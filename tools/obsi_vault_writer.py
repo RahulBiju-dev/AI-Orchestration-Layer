@@ -10,8 +10,8 @@ def _json(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 def create_structured_note(
-    title: str, 
-    content: str, 
+    title: str = "Untitled Note", 
+    content: str = "", 
     incoming_links: list[str] = None, 
     outgoing_links: list[str] = None, 
     tags: list[str] = None
@@ -21,6 +21,16 @@ def create_structured_note(
     Includes YAML frontmatter for tags, safe filename generation to prevent overwrites,
     and automatic append/prepend of cross-reference links.
     """
+    if not title:
+        title = "Untitled Note"
+    else:
+        title = str(title)
+        
+    if not content:
+        content = ""
+    else:
+        content = str(content)
+        
     os.makedirs(VAULTS_DIR, exist_ok=True)
     
     # 2. Graph View Optimization: Sanitize file names (replace invalid characters with dashes)

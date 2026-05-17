@@ -306,26 +306,30 @@ def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
             _print_status("⚠", f"Unknown tool: {fn_name}", _RED)
             result = json.dumps({"error": f"Unknown tool '{fn_name}'"})
         else:
-            if fn_name == "web_search":
-                _print_status("🔍", f"Searching the web: {_DIM}{fn_args.get('query', '')}{_RESET}", _YELLOW)
-                result = handler(**fn_args)
-                _print_status("✓", "Search complete — synthesizing answer…", _GREEN)
-            elif fn_name == "read_document":
-                _print_status("📄", f"Reading document: {_DIM}{fn_args.get('file_path', '')}{_RESET}", _YELLOW)
-                result = handler(**fn_args)
-                _print_status("✓", "Document read — synthesizing answer…", _GREEN)
-            elif fn_name == "read_file":
-                _print_status("📂", f"Reading file: {_DIM}{fn_args.get('file_path', '')}{_RESET}", _YELLOW)
-                result = handler(**fn_args)
-                _print_status("✓", "File read — synthesizing answer…", _GREEN)
-            elif fn_name == "spotify_play":
-                _print_status("🎵", f"Opening Spotify: {_DIM}{fn_args.get('query', '')}{_RESET}", _YELLOW)
-                result = handler(**fn_args)
-                _print_status("✓", "Spotify action complete — synthesizing answer…", _GREEN)
-            else:
-                _print_status("⚙️", f"Executing {fn_name}…", _YELLOW)
-                result = handler(**fn_args)
-                _print_status("✓", "Tool execution complete — synthesizing answer…", _GREEN)
+            try:
+                if fn_name == "web_search":
+                    _print_status("🔍", f"Searching the web: {_DIM}{fn_args.get('query', '')}{_RESET}", _YELLOW)
+                    result = handler(**fn_args)
+                    _print_status("✓", "Search complete — synthesizing answer…", _GREEN)
+                elif fn_name == "read_document":
+                    _print_status("📄", f"Reading document: {_DIM}{fn_args.get('file_path', '')}{_RESET}", _YELLOW)
+                    result = handler(**fn_args)
+                    _print_status("✓", "Document read — synthesizing answer…", _GREEN)
+                elif fn_name == "read_file":
+                    _print_status("📂", f"Reading file: {_DIM}{fn_args.get('file_path', '')}{_RESET}", _YELLOW)
+                    result = handler(**fn_args)
+                    _print_status("✓", "File read — synthesizing answer…", _GREEN)
+                elif fn_name == "spotify_play":
+                    _print_status("🎵", f"Opening Spotify: {_DIM}{fn_args.get('query', '')}{_RESET}", _YELLOW)
+                    result = handler(**fn_args)
+                    _print_status("✓", "Spotify action complete — synthesizing answer…", _GREEN)
+                else:
+                    _print_status("⚙️", f"Executing {fn_name}…", _YELLOW)
+                    result = handler(**fn_args)
+                    _print_status("✓", "Tool execution complete — synthesizing answer…", _GREEN)
+            except Exception as e:
+                _print_status("❌", f"Error executing {fn_name}: {e}", _RED)
+                result = json.dumps({"error": f"Tool execution failed: {str(e)}"})
 
         tool_messages.append({"role": "tool", "content": result})
 
