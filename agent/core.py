@@ -1025,6 +1025,9 @@ def run() -> None:
                 # Remove any stray system messages elsewhere and insert at front
                 history[:] = [m for m in history if m.get("role") != "system"]
                 history.insert(0, {"role": "system", "content": session["system"]})
+        else:
+            # If using Modelfile default, strip any injected system prompts from history
+            history[:] = [m for m in history if m.get("role") != "system"]
 
         # ── Auto-index large or binary files when user inputs a local file path ─
         pre_tool_message = None
