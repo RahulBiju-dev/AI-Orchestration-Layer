@@ -98,7 +98,7 @@ Documents ──→ Chunk ──→ Embed ──→ ChromaDB
 
 **How RAG works:**
 
-1. **Chunking:** Documents (PDF, DOCX, Markdown, plain text) are split into overlapping segments of ~1800 characters. The splitter prefers natural boundaries (paragraphs, sentences) over hard character cuts, producing more coherent retrieval snippets.
+1. **Chunking:** Documents (PDF, DOCX, Markdown, reStructuredText, plain text) are split into overlapping segments of ~1800 characters. The splitter prefers natural boundaries (paragraphs, sentences) over hard character cuts, producing more coherent retrieval snippets.
 
 2. **Embedding:** Each chunk is converted into a dense vector (a list of floating-point numbers) using an embedding model (`embeddinggemma` by default, running locally via Ollama). This vector captures the *semantic meaning* of the text — chunks about similar topics will have vectors that are close together in the embedding space, regardless of exact wording.
 
@@ -138,20 +138,22 @@ The agent autonomously decides when to call tools based on the user's query:
 
 | Tool | Description |
 |------|-------------|
-| 🔍 **Web Search** | Real-time DuckDuckGo search for current events, docs, and post-cutoff information |
+| 🔍 **Web Search** | Real-time DuckDuckGo search with adaptive depth (easy/medium/hard) for current events, docs, and post-cutoff information |
 | 🌐 **Browser** | Open URLs or search queries in the system's default browser |
 | 💻 **Code Viewer** | Read source files with line numbers; scan directories by extension |
 | 📄 **Document Reader** | Extract text from PDFs (`pypdf`) and Word docs (`python-docx`) with page/chunk/query navigation |
-| 📂 **File Manager** | Read text files with line range and search controls; create new files (auto-vaulted) |
+| 📂 **File Manager** | Read text files with line range and search controls; create new files (auto-vaulted to `vaults/`) |
 | 🎵 **Spotify** | Search and play songs natively on Windows, macOS, and Linux |
 | 👁️ **Vision Describer** | Describes images, diagrams, and slides using the local `moondream` vision model |
 | 🗄️ **Vault Index** | Chunk and embed local files into ChromaDB for semantic search; auto-registers aliases |
 | 🔎 **Vault Search** | Query the vault using vector similarity; resolves friendly aliases automatically |
+| 🗑️ **Vault Delete** | Remove indexed entries by source path or delete entire collections |
 | 🏷️ **Vault Aliases** | List registered human-friendly names that map to vault collections |
+| 📓 **Obsidian Notes** | Create structured Obsidian-optimised notes with YAML frontmatter, WikiLinks, and version control |
 
 ### Terminal Interface
 - **Rich Markdown streaming** via `rich.Live` with automatic scroll management
-- **LaTeX math rendering** — Greek letters, fractions (`\frac`), roots (`\sqrt`), super/subscripts, arrays, and 120+ symbol mappings converted to Unicode for terminal display
+- **LaTeX math rendering** — Greek letters, fractions (`\frac`), roots (`\sqrt`), super/subscripts, arrays, and 220+ symbol mappings converted to Unicode for terminal display
 - **Animated spinner** during model loading and thinking phases
 - **Session persistence** — save and restore full conversation state including history, parameters, and system prompts
 - **Graceful Interrupts** — use `Ctrl+\` to safely stop the model's generation midway while preserving the partial response in your conversation context (leaving `Ctrl+C` free to exit the application).
@@ -187,15 +189,15 @@ The agent autonomously decides when to call tools based on the user's query:
 │  Spinner     │  │  TOOL_SCHEMAS│  │ (localhost:11434)    │
 │  LaTeX math  │  │  TOOL_DISP.  │  │  gemma-agent model   │
 │  Markdown    │  │              │  │  embeddinggemma      │
-└──────────────┘  └──────┬───────┘  └──────────────────────┘
-                         │
-     ┌───────┬───────┬───┴───┬────────┬──────────┐
-     ▼       ▼       ▼       ▼        ▼          ▼
- search   browser   file   document  spotify    vault
-   .py      .py     .py      .py      .py    (index/search/
-                                              embeddings)
-                                                  │
-                                                  ▼
+└──────────────┘  └──────┬───────┘  │  moondream           │
+                         │          └──────────────────────┘
+     ┌───────┬───────┬───┴───┬────────┬──────────┬──────────┐
+     ▼       ▼       ▼       ▼        ▼          ▼          ▼
+ search   browser   file   document  spotify   vision    vault
+   .py      .py     .py      .py      .py    describer (index/search/
+                                        .py    embeddings)
+                                  obsi_vault      │
+                                  _writer.py      ▼
                                             ┌──────────┐
                                             │ ChromaDB │
                                             │ (.chroma)│
@@ -289,12 +291,12 @@ Type naturally. The agent will decide whether to answer directly or use tools. W
 
 | Command | Description |
 |---------|-------------|
-| `/help` | Show all available commands |
-| `/clear` | Clear conversation history |
+| `/help` | Show all available commands (also `/?`) |
+| `/clear` | Clear conversation history and reset system prompt |
 | `/save [name]` | Save session to a JSON file |
 | `/load [name\|index]` | Load a saved session (lists available if no arg) |
 | `/set parameter <name> <val>` | Set a model parameter (e.g., `temperature 0.7`) |
-| `/set system "<prompt>"` | Override the system prompt for this session |
+| `/set system "<prompt>"` | Override the system prompt (use `default` to reset) |
 | `/set history` / `/set nohistory` | Toggle conversation memory |
 | `/set think` / `/set nothink` | Toggle thinking/reasoning visibility |
 | `/set verbose` / `/set quiet` | Toggle generation stats (tok/s, elapsed time) |
@@ -302,26 +304,27 @@ Type naturally. The agent will decide whether to answer directly or use tools. W
 | `/set wordwrap` / `/set nowordwrap` | Toggle word wrapping |
 | `/show parameters` | View active session parameters and flags |
 | `/show system` | Display the current system prompt |
-| `/show model` | Show model architecture and parameter count |
+| `/show model` | Show model architecture and parameter count (also `/show info`) |
 | `/quit` | Exit the agent (also `/exit`, `/q`) |
 
 ### Vault Commands
 
 The vault provides persistent semantic search over your local documents:
 
-| Command | Description |
-|---------|-------------|
-| `/vault list` | List indexed vault collections |
-| `/vault aliases` | List registered vault aliases |
-| `/vault alias <name> <coll>` | Register a friendly alias for a collection |
-| `/vault rename <old> <new>` | Rename a vault collection (also `/vault mv`) |
-| `/vault add <path>` | Index a file or folder into the vault |
-| `/vault search <query>` | Search indexed content for relevant chunks |
-| `/vault delete <source>` | Remove indexed entries by source path |
-| `/vault add <path> --collection notes` | Index into a named collection |
-| `/vault search <query> --top-k 10` | Return more results |
-| `/vault search <query> --source file.md` | Restrict search to a specific source |
-| `/vault delete --all` | Delete an entire collection |
+| Command | Aliases | Description |
+|---------|---------|-------------|
+| `/vault list` | `ls` | List indexed vault collections |
+| `/vault aliases` | `list-aliases` | List registered vault aliases |
+| `/vault alias <name> <coll>` | `register` | Register a friendly alias for a collection |
+| `/vault rename <old> <new>` | `mv` | Rename a vault collection |
+| `/vault add <path>` | `index` | Index a file or folder into the vault |
+| `/vault search <query>` | `find` | Search indexed content for relevant chunks |
+| `/vault delete <source>` | `remove`, `rm` | Remove indexed entries by source path |
+| `/vault help` | `-h`, `--help` | Show vault command help |
+| `/vault add <path> --collection notes` | | Index into a named collection |
+| `/vault search <query> --top-k 10` | | Return more results |
+| `/vault search <query> --source file.md` | | Restrict search to a specific source |
+| `/vault delete --all` | | Delete an entire collection |
 
 **Auto-indexing:** When you paste a file path as input and the file is large (>200KB) or binary (PDF/DOCX), the agent automatically indexes it into its own vault collection before processing. The collection name is derived from the filename (e.g., `DAA_Notes.pdf` → collection `DAA_Notes`).
 
@@ -334,7 +337,7 @@ The vault provides persistent semantic search over your local documents:
 | `physics_notes.md` | `physics_notes` |
 | Folder `/docs/` | `docs` |
 
-**Auto-vaulting on file creation:** Every file created with the `create_file` tool is automatically saved into the `vaults/` directory, indexed into its own ChromaDB collection, and registered with a human-friendly alias. This means you can immediately search any file the agent creates for you without manually indexing it.
+**Auto-vaulting on file creation:** Every file created with the `create_file` tool is automatically saved into the `vaults/` directory (using only the file's basename, regardless of the path specified), indexed into its own ChromaDB collection, and registered with a human-friendly alias. This means you can immediately search any file the agent creates for you without manually indexing it.
 
 **Vault Aliases:** Vaults are automatically given friendly aliases derived from the filename. When searching, you can use the original name (e.g., `"physics_notes"`) instead of remembering the sanitized ChromaDB collection name. Aliases are stored in `vaults/.vault_aliases.json` and support exact and substring matching.
 
@@ -368,7 +371,7 @@ The default configuration is optimised for consumer hardware (4-8GB VRAM GPUs). 
 | `num_ctx` | 8192 | Context window size. Increase for more history, decrease for faster tok/s |
 | `num_predict` | 2048 | Max tokens per response. Prevents runaway generation |
 | `num_batch` | 512 | Prompt evaluation batch size. Higher = faster prefill on capable GPUs |
-| `temperature` | 0.5 | Sampling temperature. Lower = more deterministic |
+| `temperature` | 0.4 | Sampling temperature. Lower = more deterministic |
 
 ### Ollama Environment Variables
 
@@ -381,7 +384,7 @@ export OLLAMA_FLASH_ATTENTION=1
 # Single user mode (max throughput)
 export OLLAMA_NUM_PARALLEL=1
 
-# Keep model loaded between requests
+# Keep model loaded between requests (note: the agent also sets keep_alive=30m per-request)
 export OLLAMA_KEEP_ALIVE=30m
 ```
 
@@ -417,18 +420,20 @@ AI-CLI-Agent/
 │   ├── __init__.py
 │   ├── registry.py            # Tool JSON schemas + dispatch table
 │   ├── search.py              # DuckDuckGo web search
-│   ├── browser.py             # System browser control (xdg-open)
+│   ├── browser.py             # System browser control
 │   ├── code.py                # Source code viewer with line numbers
 │   ├── document.py            # PDF/DOCX extraction with chunking
 │   ├── file.py                # Text file read/write with search; auto-vaults created files
 │   ├── spotify.py             # Spotify cross-platform desktop control
 │   ├── vision_describer.py    # Multimodal image description via moondream
+│   ├── obsi_vault_writer.py   # Obsidian-optimised structured note creation
 │   ├── vault_indexer.py       # Document chunking, ChromaDB indexing, alias registry
 │   ├── vault_search.py        # Vector similarity search with alias resolution
 │   └── vault_embeddings.py    # Ollama embedding API helpers
 │
+├── .agents/                   # Agent configuration
 ├── sessions/                  # Saved session JSON files
-├── vaults/                    # Default vault document storage
+├── vaults/                    # Default vault document storage (also Obsidian vault)
 ├── .chroma/                   # ChromaDB persistent vector database
 └── .gitignore
 ```

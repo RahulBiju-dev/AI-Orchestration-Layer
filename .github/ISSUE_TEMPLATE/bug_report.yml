@@ -1,0 +1,50 @@
+name: Bug report
+description: Create a report to help us improve AI CLI Agent
+title: '[BUG] '
+labels: ['bug']
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please fill out the form below as completely as possible to help us diagnose and fix the issue.
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+      placeholder: E.g., The agent crashes when attempting to parse a PDF with images.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Tell us how to reproduce this behavior.
+      placeholder: |
+        1. Start the agent using `python main.py`
+        2. Ask the prompt: '...'
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: A clear and concise description of what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Terminal Output / Stack Trace
+      description: Paste any terminal logs or stack traces here.
+      render: bash
+  - type: input
+    id: environment
+    attributes:
+      label: Environment Info
+      description: OS version, Python version, Ollama version, and model name.
+      placeholder: Linux (Ubuntu 22.04), Python 3.11, Ollama 0.4.1, Gemma 4 E4B
+    validations:
+      required: true

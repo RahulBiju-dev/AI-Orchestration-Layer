@@ -16,15 +16,7 @@ from agent.terminal import (
     _print_status,
     _Spinner,
     _render_terminal_markdown,
-    _BOLD,
-    _DIM,
-    _CYAN,
-    _YELLOW,
-    _GREEN,
-    _RED,
-    _MAGENTA,
-    _RESET,
-    _CLEAR_LINE,
+    print_welcome_header,
 )
 
 import signal
@@ -164,11 +156,10 @@ def _stream_thinking_response(
                 spinner.stop()
                 if in_thinking:
                     in_thinking = False
-                    print(
-                        f"\n{_MAGENTA}{_DIM}└─ [Interrupted] ────────────────────────{_RESET}\n",
-                        file=sys.stderr,
+                    _console.print(
+                f"\n[magenta][dim]└─ [Interrupted] ────────────────────────[/]\n",
                     )
-                print(f"\n{_YELLOW}⚠ Generation interrupted by user (Ctrl+\\).{_RESET}\n", file=sys.stderr)
+                _console.print(f"\n[yellow]⚠ Generation interrupted by user (Ctrl+\\).[/]\n")
                 break
             
             msg = chunk.message
@@ -193,20 +184,15 @@ def _stream_thinking_response(
                     in_thinking = True
                     spinner.stop()
                     # Print thinking header
-                    print(
-                        f"\n{_MAGENTA}{_DIM}┌─ thinking ─────────────────────────────{_RESET}",
-                        file=sys.stderr,
+                    _console.print(
+                f"\n[magenta][dim]┌─ thinking ─────────────────────────────[/]",
                     )
                     thinking_displayed = True
 
                 thinking_buf += thinking_chunk
                 # Print thinking content in dim magenta
-                print(
-                    f"{_MAGENTA}{_DIM}{thinking_chunk}{_RESET}",
-                    end="",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                from rich.markup import escape
+                _console.print(escape(thinking_chunk), style="dim magenta", end="")
                 continue
 
             # ── Content tokens ────────────────────────────────────────
@@ -215,15 +201,14 @@ def _stream_thinking_response(
                 if in_thinking:
                     # Transition from thinking to answering
                     in_thinking = False
-                    print(
-                        f"\n{_MAGENTA}{_DIM}└────────────────────────────────────────{_RESET}\n",
-                        file=sys.stderr,
+                    _console.print(
+                f"\n[magenta][dim]└────────────────────────────────────────[/]\n",
                     )
                     spinner.stop()
                 elif spinner._thread and not spinner._stop_event.is_set():
                     spinner.stop()
                     if not thinking_displayed:
-                        print()  # newline before answer
+                        _console.print()  # newline before answer
 
                 content_buf += content_chunk
 
@@ -233,46 +218,35 @@ def _stream_thinking_response(
                         Markdown(_render_terminal_markdown(content_buf)),
                         console=_console,
                         auto_refresh=False,
-                        screen=True,
+                        screen=False,
+                        vertical_overflow="visible",
                     )
                     live.start()
 
                 # Throttle Markdown re-renders to reduce CPU overhead
                 now = time.monotonic()
                 if now - _last_render >= _RENDER_INTERVAL:
-                    # Auto-scroll logic: keep the output size within the terminal bounds
-                    max_lines = max(5, _console.height - 6)
-                    lines = content_buf.rsplit("\n", max_lines)
-                    if len(lines) > max_lines:
-                        display_buf = "...\n" + "\n".join(lines[-max_lines:])
-                    else:
-                        display_buf = content_buf
-
                     # Update Markdown rendering in real-time
-                    live.update(Markdown(_render_terminal_markdown(display_buf)), refresh=True)
+                    # vertical_overflow="visible" natively handles long scrollbacks without duplication
+                    live.update(Markdown(_render_terminal_markdown(content_buf)), refresh=True)
                     _last_render = now
 
     finally:
         signal.signal(signal.SIGQUIT, old_handler)
         if live:
             live.stop()
-            # Print the final complete markdown to the terminal so it remains in the scrollback buffer.
-            # Using screen=True during streaming prevents the scrolling terminal duplication bug entirely.
-            if content_buf:
-                _console.print(Markdown(_render_terminal_markdown(content_buf)))
 
     # End of stream
     spinner.stop()
 
     if in_thinking:
         # Stream ended while still in thinking (no content followed)
-        print(
-            f"\n{_MAGENTA}{_DIM}└────────────────────────────────────────{_RESET}\n",
-            file=sys.stderr,
+        _console.print(
+                f"\n[magenta][dim]└────────────────────────────────────────[/]\n",
         )
 
     if content_buf:
-        print()  # final newline after streamed answer
+        _console.print()  # final newline after streamed answer
 
     # Verbose stats
     if verbose:
@@ -281,9 +255,8 @@ def _stream_thinking_response(
         c_tokens = len(content_buf.split()) if content_buf else 0
         total = t_tokens + c_tokens
         tps = total / elapsed if elapsed > 0 else 0
-        print(
-            f"{_DIM}  ⏱  {elapsed:.1f}s  ·  ~{total} tokens  ·  ~{tps:.1f} tok/s{_RESET}\n",
-            file=sys.stderr,
+        _console.print(
+                f"[dim]  ⏱  {elapsed:.1f}s  ·  ~{total} tokens  ·  ~{tps:.1f} tok/s[/]\n",
         )
 
     # Build the full message for history
@@ -303,32 +276,32 @@ def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
 
         handler = TOOL_DISPATCH.get(fn_name)
         if handler is None:
-            _print_status("⚠", f"Unknown tool: {fn_name}", _RED)
+            _print_status("⚠", f"Unknown tool: {fn_name}", "red")
             result = json.dumps({"error": f"Unknown tool '{fn_name}'"})
         else:
             try:
                 if fn_name == "web_search":
-                    _print_status("🔍", f"Searching the web: {_DIM}{fn_args.get('query', '')}{_RESET}", _YELLOW)
+                    _print_status("🔍", f"Searching the web: [dim]{fn_args.get('query', '')}[/]", "yellow")
                     result = handler(**fn_args)
-                    _print_status("✓", "Search complete — synthesizing answer…", _GREEN)
+                    _print_status("✓", "Search complete — synthesizing answer…", "green")
                 elif fn_name == "read_document":
-                    _print_status("📄", f"Reading document: {_DIM}{fn_args.get('file_path', '')}{_RESET}", _YELLOW)
+                    _print_status("📄", f"Reading document: [dim]{fn_args.get('file_path', '')}[/]", "yellow")
                     result = handler(**fn_args)
-                    _print_status("✓", "Document read — synthesizing answer…", _GREEN)
+                    _print_status("✓", "Document read — synthesizing answer…", "green")
                 elif fn_name == "read_file":
-                    _print_status("📂", f"Reading file: {_DIM}{fn_args.get('file_path', '')}{_RESET}", _YELLOW)
+                    _print_status("📂", f"Reading file: [dim]{fn_args.get('file_path', '')}[/]", "yellow")
                     result = handler(**fn_args)
-                    _print_status("✓", "File read — synthesizing answer…", _GREEN)
+                    _print_status("✓", "File read — synthesizing answer…", "green")
                 elif fn_name == "spotify_play":
-                    _print_status("🎵", f"Opening Spotify: {_DIM}{fn_args.get('query', '')}{_RESET}", _YELLOW)
+                    _print_status("🎵", f"Opening Spotify: [dim]{fn_args.get('query', '')}[/]", "yellow")
                     result = handler(**fn_args)
-                    _print_status("✓", "Spotify action complete — synthesizing answer…", _GREEN)
+                    _print_status("✓", "Spotify action complete — synthesizing answer…", "green")
                 else:
-                    _print_status("⚙️", f"Executing {fn_name}…", _YELLOW)
+                    _print_status("⚙️", f"Executing {fn_name}…", "yellow")
                     result = handler(**fn_args)
-                    _print_status("✓", "Tool execution complete — synthesizing answer…", _GREEN)
+                    _print_status("✓", "Tool execution complete — synthesizing answer…", "green")
             except Exception as e:
-                _print_status("❌", f"Error executing {fn_name}: {e}", _RED)
+                _print_status("❌", f"Error executing {fn_name}: {e}", "red")
                 result = json.dumps({"error": f"Tool execution failed: {str(e)}"})
 
         tool_messages.append({"role": "tool", "content": result})
@@ -339,47 +312,47 @@ def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
 # ── Slash commands ────────────────────────────────────────────────────
 
 _COMMANDS_HELP = f"""
-{_CYAN}{_BOLD}Available commands:{_RESET}
-  {_GREEN}/help{_RESET}                          — Show this help message
-  {_GREEN}/clear{_RESET}                         — Clear conversation history
-  {_GREEN}/save [name]{_RESET}                   — Save current session  {_DIM}(optional name){_RESET}
-  {_GREEN}/load [name|index]{_RESET}             — Load a saved session  {_DIM}(lists sessions if no arg){_RESET}
-  {_GREEN}/set parameter <name> <val>{_RESET}    — Set a model parameter  {_DIM}(e.g. temperature 0.7){_RESET}
-  {_GREEN}/set system "<prompt>"{_RESET}         — Set the system prompt for this session
-  {_GREEN}/set history{_RESET}                   — Enable conversation history  {_DIM}(default){_RESET}
-  {_GREEN}/set nohistory{_RESET}                 — Disable history  {_DIM}(each turn is standalone){_RESET}
-  {_GREEN}/set wordwrap{_RESET}                  — Enable word wrapping  {_DIM}(default){_RESET}
-  {_GREEN}/set nowordwrap{_RESET}                — Disable word wrapping
-  {_GREEN}/set format json{_RESET}               — Force JSON output from the model
-  {_GREEN}/set noformat{_RESET}                  — Disable forced output format  {_DIM}(default){_RESET}
-  {_GREEN}/set verbose{_RESET}                   — Show generation stats after each response
-  {_GREEN}/set quiet{_RESET}                     — Hide generation stats  {_DIM}(default){_RESET}
-  {_GREEN}/set think{_RESET}                     — Enable model thinking/reasoning  {_DIM}(default){_RESET}
-  {_GREEN}/set nothink{_RESET}                   — Disable model thinking
-  {_GREEN}/show parameters{_RESET}               — Show current session parameters
-  {_GREEN}/show system{_RESET}                   — Show the active system prompt
-  {_GREEN}/show model{_RESET}                    — Show model info
-  {_GREEN}/vault alias <name> <coll>{_RESET}     — Register a friendly alias for a collection
-  {_GREEN}/vault aliases{_RESET}                  — List registered vault aliases
-  {_GREEN}/vault rename <old> <new>{_RESET}       — Rename a vault collection
-  {_GREEN}/vault add <path>{_RESET}               — Add a file or folder to the searchable vault
-  {_GREEN}/vault list{_RESET}                     — List indexed vault collections
-  {_GREEN}/vault search <query>{_RESET}           — Search the indexed vault
-  {_GREEN}/vault delete <source>{_RESET}          — Delete indexed vault chunks by source/path
-  {_GREEN}/quit{_RESET}                          — Exit the agent  {_DIM}(also /exit, /q){_RESET}
+[cyan][bold]Available commands:[/]
+  [green]/help[/]                          — Show this help message
+  [green]/clear[/]                         — Clear conversation history
+  [green]/save [name][/]                   — Save current session  [dim](optional name)[/]
+  [green]/load [name|index][/]             — Load a saved session  [dim](lists sessions if no arg)[/]
+  [green]/set parameter <name> <val>[/]    — Set a model parameter  [dim](e.g. temperature 0.7)[/]
+  [green]/set system "<prompt>"[/]         — Set the system prompt for this session
+  [green]/set history[/]                   — Enable conversation history  [dim](default)[/]
+  [green]/set nohistory[/]                 — Disable history  [dim](each turn is standalone)[/]
+  [green]/set wordwrap[/]                  — Enable word wrapping  [dim](default)[/]
+  [green]/set nowordwrap[/]                — Disable word wrapping
+  [green]/set format json[/]               — Force JSON output from the model
+  [green]/set noformat[/]                  — Disable forced output format  [dim](default)[/]
+  [green]/set verbose[/]                   — Show generation stats after each response
+  [green]/set quiet[/]                     — Hide generation stats  [dim](default)[/]
+  [green]/set think[/]                     — Enable model thinking/reasoning  [dim](default)[/]
+  [green]/set nothink[/]                   — Disable model thinking
+  [green]/show parameters[/]               — Show current session parameters
+  [green]/show system[/]                   — Show the active system prompt
+  [green]/show model[/]                    — Show model info
+  [green]/vault alias <name> <coll>[/]     — Register a friendly alias for a collection
+  [green]/vault aliases[/]                  — List registered vault aliases
+  [green]/vault rename <old> <new>[/]       — Rename a vault collection
+  [green]/vault add <path>[/]               — Add a file or folder to the searchable vault
+  [green]/vault list[/]                     — List indexed vault collections
+  [green]/vault search <query>[/]           — Search the indexed vault
+  [green]/vault delete <source>[/]          — Delete indexed vault chunks by source/path
+  [green]/quit[/]                          — Exit the agent  [dim](also /exit, /q)[/]
 """
 
 _VAULT_HELP = f"""
-{_CYAN}{_BOLD}Vault commands:{_RESET}
-  {_GREEN}/vault list{_RESET}                                  — List indexed vault collections
-  {_GREEN}/vault aliases{_RESET}                               — List registered vault aliases
-  {_GREEN}/vault alias <name> <coll>{_RESET}                  — Register a friendly alias for a collection
-  {_GREEN}/vault rename <old> <new>{_RESET}                   — Rename a vault collection
-  {_GREEN}/vault add <path> [--collection name]{_RESET}        — Index a file or folder
-  {_GREEN}/vault search <query> [--top-k n]{_RESET}            — Search indexed content
-  {_GREEN}/vault search <query> [--source path]{_RESET}        — Restrict search to a source
-  {_GREEN}/vault delete <source> [--collection name]{_RESET}   — Remove indexed chunks
-  {_GREEN}/vault delete --all [--collection name]{_RESET}      — Delete a collection
+[cyan][bold]Vault commands:[/]
+  [green]/vault list[/]                                  — List indexed vault collections
+  [green]/vault aliases[/]                               — List registered vault aliases
+  [green]/vault alias <name> <coll>[/]                  — Register a friendly alias for a collection
+  [green]/vault rename <old> <new>[/]                   — Rename a vault collection
+  [green]/vault add <path> [--collection name][/]        — Index a file or folder
+  [green]/vault search <query> [--top-k n][/]            — Search indexed content
+  [green]/vault search <query> [--source path][/]        — Restrict search to a source
+  [green]/vault delete <source> [--collection name][/]   — Remove indexed chunks
+  [green]/vault delete --all [--collection name][/]      — Delete a collection
 """
 
 
@@ -387,7 +360,7 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
     """Handle /set sub-commands."""
     parts = args.strip().split(None, 1)
     if not parts:
-        print(f"{_RED}Usage: /set <subcommand> [args]{_RESET}  {_DIM}(type /help for details){_RESET}\n")
+        _console.print(f"[red]Usage: /set <subcommand> [args][/]  [dim](type /help for details)[/]\n")
         return
 
     sub = parts[0].lower()
@@ -396,31 +369,31 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
     # ── /set verbose / /set quiet ─────────────────────────────────────
     if sub == "verbose":
         session["verbose"] = True
-        print(f"{_CYAN}{_BOLD}✓  Verbose mode enabled — stats shown after each response.{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  Verbose mode enabled — stats shown after each response.[/]\n")
         return
     if sub == "quiet":
         session["verbose"] = False
-        print(f"{_CYAN}{_BOLD}✓  Quiet mode enabled.{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  Quiet mode enabled.[/]\n")
         return
 
     # ── /set wordwrap / /set nowordwrap ───────────────────────────────
     if sub == "wordwrap":
         session["wordwrap"] = True
-        print(f"{_CYAN}{_BOLD}✓  Word wrapping enabled.{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  Word wrapping enabled.[/]\n")
         return
     if sub == "nowordwrap":
         session["wordwrap"] = False
-        print(f"{_CYAN}{_BOLD}✓  Word wrapping disabled.{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  Word wrapping disabled.[/]\n")
         return
 
     # ── /set history / /set nohistory ─────────────────────────────────
     if sub == "history":
         session["history"] = True
-        print(f"{_CYAN}{_BOLD}✓  Conversation history enabled.{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  Conversation history enabled.[/]\n")
         return
     if sub == "nohistory":
         session["history"] = False
-        print(f"{_CYAN}{_BOLD}✓  History disabled — each turn is now standalone.{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  History disabled — each turn is now standalone.[/]\n")
         return
 
     # ── /set format json / /set noformat ──────────────────────────────
@@ -428,23 +401,23 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
         fmt = rest.strip().lower()
         if fmt == "json":
             session["format"] = "json"
-            print(f"{_CYAN}{_BOLD}✓  JSON output mode enabled.{_RESET}\n")
+            _console.print(f"[cyan][bold]✓  JSON output mode enabled.[/]\n")
         else:
-            print(f"{_RED}Unsupported format: {fmt}{_RESET}  {_DIM}(supported: json){_RESET}\n")
+            _console.print(f"[red]Unsupported format: {fmt}[/]  [dim](supported: json)[/]\n")
         return
     if sub == "noformat":
         session["format"] = ""
-        print(f"{_CYAN}{_BOLD}✓  Output formatting reset to default.{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  Output formatting reset to default.[/]\n")
         return
 
     # ── /set think / /set nothink ─────────────────────────────────────
     if sub == "think":
         session["think"] = True
-        print(f"{_CYAN}{_BOLD}✓  Thinking/reasoning enabled.{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  Thinking/reasoning enabled.[/]\n")
         return
     if sub == "nothink":
         session["think"] = False
-        print(f"{_CYAN}{_BOLD}✓  Thinking disabled — model will respond directly.{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  Thinking disabled — model will respond directly.[/]\n")
         return
 
     # ── /set system "<prompt>" ────────────────────────────────────────
@@ -457,7 +430,7 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
 
         if not prompt or prompt.lower() == "default":
             session["system"] = ""
-            print(f"{_CYAN}{_BOLD}✓  System prompt reset to default.{_RESET}\n")
+            _console.print(f"[cyan][bold]✓  System prompt reset to default.[/]\n")
             return
 
         # Insert new system message at the start
@@ -466,36 +439,36 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
         
         # Truncate display for confirmation
         display = prompt if len(prompt) <= 80 else prompt[:77] + "…"
-        print(f"{_CYAN}{_BOLD}✓  System prompt set:{_RESET} {_DIM}{display}{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  System prompt set:[/] [dim]{display}[/]\n")
         return
 
     # ── /set parameter <name> <value> ─────────────────────────────────
     if sub == "parameter":
         param_parts = rest.strip().split(None, 1)
         if len(param_parts) != 2:
-            print(f"{_RED}Usage: /set parameter <name> <value>{_RESET}")
-            print(f"{_DIM}  Available: {', '.join(sorted(_ALL_PARAMS))}{_RESET}\n")
+            _console.print(f"[red]Usage: /set parameter <name> <value>[/]")
+            _console.print(f"[dim]  Available: {', '.join(sorted(_ALL_PARAMS))}[/]\n")
             return
 
         name, raw_val = param_parts[0].lower(), param_parts[1]
 
         if name not in _ALL_PARAMS:
-            print(f"{_RED}Unknown parameter: {name}{_RESET}")
-            print(f"{_DIM}  Available: {', '.join(sorted(_ALL_PARAMS))}{_RESET}\n")
+            _console.print(f"[red]Unknown parameter: {name}[/]")
+            _console.print(f"[dim]  Available: {', '.join(sorted(_ALL_PARAMS))}[/]\n")
             return
 
         try:
             value = float(raw_val) if name in _FLOAT_PARAMS else int(raw_val)
         except ValueError:
             expected = "float" if name in _FLOAT_PARAMS else "integer"
-            print(f"{_RED}Invalid value for {name}: expected {expected}, got '{raw_val}'{_RESET}\n")
+            _console.print(f"[red]Invalid value for {name}: expected {expected}, got '{raw_val}'[/]\n")
             return
 
         session["options"][name] = value
-        print(f"{_CYAN}{_BOLD}✓  {name} = {value}{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  {name} = {value}[/]\n")
         return
 
-    print(f"{_RED}Unknown /set subcommand: {sub}{_RESET}  {_DIM}(try: parameter, system, verbose, quiet, wordwrap, nowordwrap, history, nohistory, format, noformat, think, nothink){_RESET}\n")
+    _console.print(f"[red]Unknown /set subcommand: {sub}[/]  [dim](try: parameter, system, verbose, quiet, wordwrap, nowordwrap, history, nohistory, format, noformat, think, nothink)[/]\n")
 
 
 def _handle_show(args: str, session: dict, history: list[dict]) -> None:
@@ -505,12 +478,12 @@ def _handle_show(args: str, session: dict, history: list[dict]) -> None:
     if sub == "parameters":
         opts = session.get("options", {})
         if not opts:
-            print(f"{_DIM}  No custom parameters set (using model defaults).{_RESET}\n")
+            _console.print(f"[dim]  No custom parameters set (using model defaults).[/]\n")
         else:
-            print(f"\n{_CYAN}{_BOLD}Session parameters:{_RESET}")
+            _console.print(f"\n[cyan][bold]Session parameters:[/]")
             for k, v in sorted(opts.items()):
-                print(f"  {_GREEN}{k}{_RESET} = {v}")
-            print()
+                _console.print(f"  [green]{k}[/] = {v}")
+            _console.print()
         # Also show flags
         flags = []
         if session.get("verbose"):
@@ -524,7 +497,7 @@ def _handle_show(args: str, session: dict, history: list[dict]) -> None:
         if not session.get("think", True):
             flags.append("nothink")
         if flags:
-            print(f"{_DIM}  Flags: {', '.join(flags)}{_RESET}\n")
+            _console.print(f"[dim]  Flags: {', '.join(flags)}[/]\n")
         return
 
     if sub == "system":
@@ -534,9 +507,9 @@ def _handle_show(args: str, session: dict, history: list[dict]) -> None:
             if history and history[0].get("role") == "system":
                 prompt = history[0]["content"]
         if prompt:
-            print(f"\n{_CYAN}{_BOLD}System prompt:{_RESET}\n{_DIM}{prompt}{_RESET}\n")
+            _console.print(f"\n[cyan][bold]System prompt:[/]\n[dim]{prompt}[/]\n")
         else:
-            print(f"{_DIM}  No system prompt set (using Modelfile default).{_RESET}\n")
+            _console.print(f"[dim]  No system prompt set (using Modelfile default).[/]\n")
         return
 
     if sub in ("model", "info"):
@@ -545,14 +518,14 @@ def _handle_show(args: str, session: dict, history: list[dict]) -> None:
             model_info = getattr(info, "modelinfo", None) or {}
             family = model_info.get("general.architecture", "unknown")
             params = model_info.get("general.parameter_count", "unknown")
-            print(f"\n{_CYAN}{_BOLD}Model:{_RESET}  {MODEL_NAME}")
-            print(f"{_CYAN}{_BOLD}Family:{_RESET} {family}")
-            print(f"{_CYAN}{_BOLD}Params:{_RESET} {params}\n")
+            _console.print(f"\n[cyan][bold]Model:[/]  {MODEL_NAME}")
+            _console.print(f"[cyan][bold]Family:[/] {family}")
+            _console.print(f"[cyan][bold]Params:[/] {params}\n")
         except Exception:
-            print(f"\n{_CYAN}{_BOLD}Model:{_RESET}  {MODEL_NAME}\n")
+            _console.print(f"\n[cyan][bold]Model:[/]  {MODEL_NAME}\n")
         return
 
-    print(f"{_RED}Unknown /show subcommand: {sub}{_RESET}  {_DIM}(try: parameters, system, model){_RESET}\n")
+    _console.print(f"[red]Unknown /show subcommand: {sub}[/]  [dim](try: parameters, system, model)[/]\n")
 
 
 def _list_saved_sessions() -> list[str]:
@@ -599,9 +572,9 @@ def _handle_save(args: str, session: dict, history: list[dict]) -> None:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         display_name = os.path.basename(filepath)
         msg_count = sum(1 for m in history if m.get("role") == "user")
-        print(f"{_CYAN}{_BOLD}✓  Session saved:{_RESET} {_DIM}{display_name}{_RESET}  ({msg_count} user message{'s' if msg_count != 1 else ''})\n")
+        _console.print(f"[cyan][bold]✓  Session saved:[/] [dim]{display_name}[/]  ({msg_count} user message{'s' if msg_count != 1 else ''})\n")
     except OSError as exc:
-        print(f"{_RED}Failed to save session: {exc}{_RESET}\n")
+        _console.print(f"[red]Failed to save session: {exc}[/]\n")
 
 
 def _handle_load(args: str, session: dict, history: list[dict]) -> None:
@@ -612,9 +585,9 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
     # No argument: list available sessions
     if not arg:
         if not saved:
-            print(f"{_DIM}  No saved sessions found.{_RESET}\n")
+            _console.print(f"[dim]  No saved sessions found.[/]\n")
             return
-        print(f"\n{_CYAN}{_BOLD}Saved sessions:{_RESET}")
+        _console.print(f"\n[cyan][bold]Saved sessions:[/]")
         for i, fp in enumerate(saved, 1):
             name = os.path.basename(fp).replace(".json", "")
             mtime = datetime.fromtimestamp(os.path.getmtime(fp)).strftime("%Y-%m-%d %H:%M")
@@ -626,8 +599,8 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
                 info = f"{msg_count} msg{'s' if msg_count != 1 else ''}"
             except Exception:
                 info = "?"
-            print(f"  {_GREEN}{i}.{_RESET} {name}  {_DIM}({mtime} · {info}){_RESET}")
-        print(f"\n{_DIM}  Use /load <number> or /load <name> to restore.{_RESET}\n")
+            _console.print(f"  [green]{i}.[/] {name}  [dim]({mtime} · {info})[/]")
+        _console.print(f"\n[dim]  Use /load <number> or /load <name> to restore.[/]\n")
         return
 
     # Try as index first
@@ -645,14 +618,14 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
         if len(matches) == 1:
             target_path = matches[0]
         elif len(matches) > 1:
-            print(f"{_YELLOW}Multiple sessions match '{arg}':{_RESET}")
+            _console.print(f"[yellow]Multiple sessions match '{arg}':[/]")
             for fp in matches:
-                print(f"  {_DIM}{os.path.basename(fp)}{_RESET}")
-            print(f"{_DIM}  Be more specific or use /load to list with indices.{_RESET}\n")
+                _console.print(f"  [dim]{os.path.basename(fp)}[/]")
+            _console.print(f"[dim]  Be more specific or use /load to list with indices.[/]\n")
             return
 
     if target_path is None:
-        print(f"{_RED}No session found matching '{arg}'.{_RESET}  {_DIM}(type /load to list available sessions){_RESET}\n")
+        _console.print(f"[red]No session found matching '{arg}'.[/]  [dim](type /load to list available sessions)[/]\n")
         return
 
     # Load the session
@@ -660,7 +633,7 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
         with open(target_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"{_RED}Failed to load session: {exc}{_RESET}\n")
+        _console.print(f"[red]Failed to load session: {exc}[/]\n")
         return
 
     # Restore history
@@ -679,7 +652,7 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
 
     display_name = os.path.basename(target_path).replace(".json", "")
     msg_count = sum(1 for m in history if m.get("role") == "user")
-    print(f"{_CYAN}{_BOLD}✓  Session loaded:{_RESET} {_DIM}{display_name}{_RESET}  ({msg_count} user message{'s' if msg_count != 1 else ''})\n")
+    _console.print(f"[cyan][bold]✓  Session loaded:[/] [dim]{display_name}[/]  ({msg_count} user message{'s' if msg_count != 1 else ''})\n")
 
 
 def _extract_option(tokens: list[str], names: tuple[str, ...], default: str | None = None) -> str | None:
@@ -741,7 +714,7 @@ def _handle_vault(args: str) -> None:
     try:
         parts = shlex.split(args)
     except ValueError as exc:
-        print(f"{_RED}Invalid /vault command: {exc}{_RESET}\n")
+        _console.print(f"[red]Invalid /vault command: {exc}[/]\n")
         return
 
     if not parts or parts[0].lower() in ("help", "-h", "--help"):
@@ -758,15 +731,15 @@ def _handle_vault(args: str) -> None:
     if sub in ("list", "ls"):
         data = _call_tool_json("list_vaults")
         if "error" in data:
-            print(f"{_RED}Vault list failed: {data['error']}{_RESET}\n")
+            _console.print(f"[red]Vault list failed: {data['error']}[/]\n")
             return
 
         vaults = data.get("vaults", [])
         if not vaults:
-            print(f"{_DIM}  No indexed vault collections found.{_RESET}\n")
+            _console.print(f"[dim]  No indexed vault collections found.[/]\n")
             return
 
-        print(f"\n{_CYAN}{_BOLD}Indexed vaults:{_RESET}")
+        _console.print(f"\n[cyan][bold]Indexed vaults:[/]")
         for vault in vaults:
             name = vault.get("collection", "unknown")
             chunk_count = vault.get("indexed_chunks")
@@ -774,19 +747,19 @@ def _handle_vault(args: str) -> None:
                 count_text = f"{chunk_count} chunk{'s' if chunk_count != 1 else ''}"
             else:
                 count_text = "chunk count unavailable"
-            print(f"  {_GREEN}{name}{_RESET}  {_DIM}({count_text}){_RESET}")
-        print()
+            _console.print(f"  [green]{name}[/]  [dim]({count_text})[/]")
+        _console.print()
         return
 
     if sub in ("alias", "register"):
         if len(tokens) < 2:
-            print(f"{_RED}Usage: /vault alias <human-name> <collection-name>{_RESET}\n")
+            _console.print(f"[red]Usage: /vault alias <human-name> <collection-name>[/]\n")
             return
         alias_name = tokens[0]
         coll_name = tokens[1]
         from tools.vault_indexer import register_vault_alias
         register_vault_alias(alias_name, coll_name)
-        print(f"{_CYAN}{_BOLD}✓  Vault alias registered:{_RESET} {_GREEN}{alias_name}{_RESET} -> {_DIM}{coll_name}{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  Vault alias registered:[/] [green]{alias_name}[/] -> [dim]{coll_name}[/]\n")
         return
 
     if sub in ("aliases", "list-aliases"):
@@ -796,19 +769,19 @@ def _handle_vault(args: str) -> None:
             data = _json.loads(list_vault_aliases())
             aliases = data.get("aliases", [])
             if not aliases:
-                print(f"{_DIM}  No vault aliases registered.{_RESET}\n")
+                _console.print(f"[dim]  No vault aliases registered.[/]\n")
                 return
-            print(f"\n{_CYAN}{_BOLD}Vault aliases:{_RESET}")
+            _console.print(f"\n[cyan][bold]Vault aliases:[/]")
             for entry in aliases:
-                print(f"  {_GREEN}{entry['alias']}{_RESET} -> {_DIM}{entry['collection']}{_RESET}")
-            print()
+                _console.print(f"  [green]{entry['alias']}[/] -> [dim]{entry['collection']}[/]")
+            _console.print()
         except Exception as e:
-            print(f"{_RED}Failed to list aliases: {e}{_RESET}\n")
+            _console.print(f"[red]Failed to list aliases: {e}[/]\n")
         return
 
     if sub in ("rename", "mv"):
         if len(tokens) < 2:
-            print(f"{_RED}Usage: /vault rename <old-name> <new-name>{_RESET}\n")
+            _console.print(f"[red]Usage: /vault rename <old-name> <new-name>[/]\n")
             return
         old_name = tokens[0]
         new_name = tokens[1]
@@ -817,27 +790,27 @@ def _handle_vault(args: str) -> None:
             import json as _json
             data = _json.loads(rename_vault(old_name, new_name))
             if data.get("error"):
-                print(f"{_RED}✗  {data['error']}{_RESET}\n")
+                _console.print(f"[red]✗  {data['error']}[/]\n")
             else:
-                print(f"{_CYAN}{_BOLD}✓  Vault renamed:{_RESET} {_DIM}{data['old_collection']}{_RESET} -> {_GREEN}{data['new_collection']}{_RESET}  ({data.get('chunks_moved', 0)} chunks moved)")
+                _console.print(f"[cyan][bold]✓  Vault renamed:[/] [dim]{data['old_collection']}[/] -> [green]{data['new_collection']}[/]  ({data.get('chunks_moved', 0)} chunks moved)")
                 if data.get("updated_aliases"):
-                    print(f"  {_DIM}Updated aliases: {', '.join(data['updated_aliases'])}{_RESET}")
-                print()
+                    _console.print(f"  [dim]Updated aliases: {', '.join(data['updated_aliases'])}[/]")
+                _console.print()
         except Exception as e:
-            print(f"{_RED}Failed to rename vault: {e}{_RESET}\n")
+            _console.print(f"[red]Failed to rename vault: {e}[/]\n")
         return
 
     if sub in ("add", "index"):
         if not tokens:
-            print(f"{_RED}Usage: /vault add <file-or-folder> [--collection name]{_RESET}\n")
+            _console.print(f"[red]Usage: /vault add <file-or-folder> [--collection name][/]\n")
             return
 
         target = " ".join(tokens)
         if not os.path.exists(target):
-            print(f"{_RED}Vault path not found: {target}{_RESET}\n")
+            _console.print(f"[red]Vault path not found: {target}[/]\n")
             return
 
-        _print_status("🔧", f"Indexing vault content: {_DIM}{target}{_RESET}", _YELLOW)
+        _print_status("🔧", f"Indexing vault content: [dim]{target}[/]", "yellow")
         if os.path.isdir(target):
             data = _call_tool_json("index_vault", vault_path=target, collection=collection)
         else:
@@ -849,21 +822,21 @@ def _handle_vault(args: str) -> None:
             )
 
         if "error" in data:
-            print(f"{_RED}Vault add failed: {data['error']}{_RESET}\n")
+            _console.print(f"[red]Vault add failed: {data['error']}[/]\n")
             return
 
         indexed_files = data.get("indexed_files", 0)
         indexed_chunks = data.get("indexed_chunks", 0)
         skipped_count = data.get("skipped_count", 0)
-        print(
-            f"{_CYAN}{_BOLD}✓  Vault indexed:{_RESET} "
+        _console.print(
+                f"[cyan][bold]✓  Vault indexed:[/] "
             f"{indexed_files} file{'s' if indexed_files != 1 else ''}, "
             f"{indexed_chunks} chunk{'s' if indexed_chunks != 1 else ''} "
-            f"{_DIM}(collection: {data.get('collection', collection)}){_RESET}"
+            f"[dim](collection: {data.get('collection', collection)})[/]"
         )
         if skipped_count:
-            print(f"{_YELLOW}  Skipped {skipped_count} file{'s' if skipped_count != 1 else ''}.{_RESET}")
-        print()
+            _console.print(f"[yellow]  Skipped {skipped_count} file{'s' if skipped_count != 1 else ''}.[/]")
+        _console.print()
         return
 
     if sub in ("search", "find"):
@@ -871,47 +844,47 @@ def _handle_vault(args: str) -> None:
         source = _extract_option(tokens, ("--source", "-s"), None)
         query = " ".join(tokens).strip()
         if not query:
-            print(f"{_RED}Usage: /vault search <query> [--collection name] [--top-k n] [--source path]{_RESET}\n")
+            _console.print(f"[red]Usage: /vault search <query> [--collection name] [--top-k n] [--source path][/]\n")
             return
         try:
             top_k = int(top_k_raw) if top_k_raw is not None else 6
         except ValueError:
-            print(f"{_RED}Invalid --top-k value: {top_k_raw}{_RESET}\n")
+            _console.print(f"[red]Invalid --top-k value: {top_k_raw}[/]\n")
             return
 
-        _print_status("🔍", f"Searching vault: {_DIM}{query}{_RESET}", _YELLOW)
+        _print_status("🔍", f"Searching vault: [dim]{query}[/]", "yellow")
         data = _call_tool_json("vault_search", query=query, collection=collection, top_k=top_k, source=source)
 
         if "error" in data:
-            print(f"{_RED}Vault search failed: {data['error']}{_RESET}\n")
+            _console.print(f"[red]Vault search failed: {data['error']}[/]\n")
             return
 
         matches = data.get("matches", [])
-        print(
-            f"\n{_CYAN}{_BOLD}Vault search:{_RESET} "
+        _console.print(
+                f"\n[cyan][bold]Vault search:[/] "
             f"{len(matches)} match{'es' if len(matches) != 1 else ''} "
-            f"{_DIM}(collection: {data.get('collection', collection)}){_RESET}"
+            f"[dim](collection: {data.get('collection', collection)})[/]"
         )
         for match in matches:
             source_name = match.get("source") or match.get("filename") or "unknown"
             chunk = match.get("chunk_index", "?")
             distance = match.get("distance")
             distance_text = f" · distance {distance:.4f}" if isinstance(distance, (int, float)) else ""
-            print(f"  {_GREEN}{match.get('rank', '?')}.{_RESET} {source_name}  {_DIM}(chunk {chunk}{distance_text}){_RESET}")
+            _console.print(f"  [green]{match.get('rank', '?')}.[/] {source_name}  [dim](chunk {chunk}{distance_text})[/]")
             snippet = _format_match_snippet(match.get("text"))
             if snippet:
-                print(f"     {_DIM}{snippet}{_RESET}")
-        print()
+                _console.print(f"     [dim]{snippet}[/]")
+        _console.print()
         return
 
     if sub in ("delete", "remove", "rm"):
         delete_collection = _extract_flag(tokens, ("--all", "--collection-all"))
         source = " ".join(tokens).strip()
         if not delete_collection and not source:
-            print(f"{_RED}Usage: /vault delete <source> [--collection name]{_RESET}\n")
+            _console.print(f"[red]Usage: /vault delete <source> [--collection name][/]\n")
             return
 
-        _print_status("🗑", "Deleting vault index entries…", _YELLOW)
+        _print_status("🗑", "Deleting vault index entries…", "yellow")
         data = _call_tool_json(
             "delete_vault_item",
             source=source or None,
@@ -920,25 +893,25 @@ def _handle_vault(args: str) -> None:
         )
 
         if "error" in data:
-            print(f"{_RED}Vault delete failed: {data['error']}{_RESET}\n")
+            _console.print(f"[red]Vault delete failed: {data['error']}[/]\n")
             return
 
         if data.get("deleted_collection"):
-            print(f"{_CYAN}{_BOLD}✓  Vault collection deleted:{_RESET} {_DIM}{collection}{_RESET}\n")
+            _console.print(f"[cyan][bold]✓  Vault collection deleted:[/] [dim]{collection}[/]\n")
             return
 
         deleted_chunks = data.get("deleted_chunks", 0)
         if deleted_chunks:
-            print(
-                f"{_CYAN}{_BOLD}✓  Vault entries deleted:{_RESET} "
+            _console.print(
+                f"[cyan][bold]✓  Vault entries deleted:[/] "
                 f"{deleted_chunks} chunk{'s' if deleted_chunks != 1 else ''} "
-                f"{_DIM}(collection: {data.get('collection', collection)}){_RESET}\n"
+                f"[dim](collection: {data.get('collection', collection)})[/]\n"
             )
         else:
-            print(f"{_YELLOW}No indexed chunks matched:{_RESET} {_DIM}{source}{_RESET}\n")
+            _console.print(f"[yellow]No indexed chunks matched:[/] [dim]{source}[/]\n")
         return
 
-    print(f"{_RED}Unknown /vault subcommand: {sub}{_RESET}  {_DIM}(try: list, aliases, rename, add, search, delete){_RESET}\n")
+    _console.print(f"[red]Unknown /vault subcommand: {sub}[/]  [dim](try: list, aliases, rename, add, search, delete)[/]\n")
 
 
 def _handle_command(cmd: str, session: dict, history: list[dict]) -> bool | None:
@@ -958,7 +931,7 @@ def _handle_command(cmd: str, session: dict, history: list[dict]) -> bool | None
         history.clear()
         # Also clear the custom system prompt override
         session["system"] = ""
-        print(f"{_CYAN}{_BOLD}✓  Conversation history and system prompt cleared.{_RESET}\n")
+        _console.print(f"[cyan][bold]✓  Conversation history and system prompt cleared.[/]\n")
         return True
 
     if base == "/set":
@@ -982,7 +955,7 @@ def _handle_command(cmd: str, session: dict, history: list[dict]) -> bool | None
         return True
 
     # Unknown command
-    print(f"{_RED}Unknown command: {base}{_RESET}  {_DIM}(type /help for available commands){_RESET}\n")
+    _console.print(f"[red]Unknown command: {base}[/]  [dim](type /help for available commands)[/]\n")
     return True
 
 
@@ -1001,14 +974,12 @@ def run() -> None:
         "think": True,       # Whether to enable model thinking/reasoning
     }
 
-    print(f"\n{_CYAN}{_BOLD}╭───────────────────────────────────────╮{_RESET}")
-    print(f"{_CYAN}{_BOLD}│   Gemma CLI Agent  ·  type /help      │{_RESET}")
-    print(f"{_CYAN}{_BOLD}╰───────────────────────────────────────╯{_RESET}\n")
+    print_welcome_header()
 
     while True:
         # ── User input ────────────────────────────────────────────────
         try:
-            user_input = input(f"{_GREEN}{_BOLD}>>> {_RESET}").strip()
+            user_input = _console.input("[green bold]>>> [/]").strip()
         except EOFError:
             break
 
@@ -1042,7 +1013,7 @@ def run() -> None:
                 # Threshold in bytes for auto-indexing (tunable)
                 INDEX_THRESHOLD = 200_000
                 if size > INDEX_THRESHOLD or ext in (".pdf", ".docx"):
-                    _print_status("🔧", f"Large/binary file detected — indexing: {_DIM}{user_input}{_RESET}", _YELLOW)
+                    _print_status("🔧", f"Large/binary file detected — indexing: [dim]{user_input}[/]", "yellow")
                     handler = TOOL_DISPATCH.get("index_vault")
                     if handler:
                         try:
@@ -1058,9 +1029,9 @@ def run() -> None:
                                 history.append(tool_msg)
                             else:
                                 pre_tool_message = tool_msg
-                            _print_status("✓", "Indexing complete.", _GREEN)
+                            _print_status("✓", "Indexing complete.", "green")
                         except Exception as e:
-                            _print_status("⚠", f"Indexing failed: {e}", _RED)
+                            _print_status("⚠", f"Indexing failed: {e}", "red")
         except Exception:
             # Best-effort; don't let indexing errors stop the agent
             pass
