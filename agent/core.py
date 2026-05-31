@@ -25,6 +25,10 @@ import threading
 import time
 import itertools
 from datetime import datetime, timezone
+try:
+    import readline
+except ImportError:
+    pass
 
 import ollama
 from rich.markdown import Markdown
@@ -218,7 +222,7 @@ def _stream_thinking_response(
                         Markdown(_render_terminal_markdown(content_buf)),
                         console=_console,
                         auto_refresh=False,
-                        screen=False,
+                        screen=True,
                         vertical_overflow="visible",
                     )
                     live.start()
@@ -227,7 +231,6 @@ def _stream_thinking_response(
                 now = time.monotonic()
                 if now - _last_render >= _RENDER_INTERVAL:
                     # Update Markdown rendering in real-time
-                    # vertical_overflow="visible" natively handles long scrollbacks without duplication
                     live.update(Markdown(_render_terminal_markdown(content_buf)), refresh=True)
                     _last_render = now
 
@@ -246,6 +249,9 @@ def _stream_thinking_response(
         )
 
     if content_buf:
+        # Print the final complete markdown to the terminal so it remains in the scrollback buffer.
+        # Using screen=True during streaming prevents the scrolling terminal duplication bug entirely.
+        _console.print(Markdown(_render_terminal_markdown(content_buf)))
         _console.print()  # final newline after streamed answer
 
     # Verbose stats
