@@ -140,56 +140,61 @@ def _strip_frontmatter(text: str) -> str:
     return text[match.end():].lstrip() if match else text
 
 
+def extract_pdf_with_vision(path: str) -> tuple[str, dict]:
+    """Extract regular text and visual descriptions page-by-page from a PDF in a memory-safe batching loop."""
+    try:
+        import pypdf
+        from pdf2image import convert_from_path
+        import tempfile
+        from tools.vision_describer import describe_image
+        
+        text_stream = []
+        with open(path, "rb") as f:
+            reader = pypdf.PdfReader(f)
+            total_pages = len(reader.pages)
+            
+        chunk_size = 10
+        for i in range(0, total_pages, chunk_size):
+            first_page = i + 1
+            last_page = min(i + chunk_size, total_pages)
+            
+            # Extract regular text using pypdf
+            with open(path, "rb") as f:
+                reader = pypdf.PdfReader(f)
+                for page_num in range(first_page - 1, last_page):
+                    try:
+                        page_text = reader.pages[page_num].extract_text()
+                        if page_text:
+                            text_stream.append(f"--- Page {page_num + 1} Text ---\n{page_text.strip()}\n")
+                    except Exception:
+                        pass
+                        
+            # Extract multimodal vision text
+            try:
+                images = convert_from_path(path, first_page=first_page, last_page=last_page)
+                for img_idx, img in enumerate(images):
+                    page_num = first_page + img_idx
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_img:
+                        temp_img_path = temp_img.name
+                        img.save(temp_img_path, "PNG")
+                    try:
+                        desc = describe_image(temp_img_path)
+                        text_stream.append(f"--- Page {page_num} Visual Description ---\n{desc}\n")
+                    finally:
+                        os.remove(temp_img_path)
+            except Exception as e:
+                text_stream.append(f"Error processing visual descriptions for pages {first_page}-{last_page}: {e}")
+                
+        text = "\n".join(text_stream)
+        return text, {"document_type": "pdf", "char_count": len(text)}
+    except Exception as e:
+        return f"Error reading PDF: {e}", {"document_type": "pdf", "char_count": 0}
+
+
 def _read_text_for_index(path: str) -> tuple[str, dict]:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
-        try:
-            import pypdf
-            from pdf2image import convert_from_path
-            import tempfile
-            from tools.vision_describer import describe_image
-            
-            text_stream = []
-            with open(path, "rb") as f:
-                reader = pypdf.PdfReader(f)
-                total_pages = len(reader.pages)
-                
-            chunk_size = 10
-            for i in range(0, total_pages, chunk_size):
-                first_page = i + 1
-                last_page = min(i + chunk_size, total_pages)
-                
-                # Extract regular text using PyPDF2
-                with open(path, "rb") as f:
-                    reader = pypdf.PdfReader(f)
-                    for page_num in range(first_page - 1, last_page):
-                        try:
-                            page_text = reader.pages[page_num].extract_text()
-                            if page_text:
-                                text_stream.append(f"--- Page {page_num + 1} Text ---\n{page_text.strip()}\n")
-                        except Exception:
-                            pass
-                            
-                # Extract multimodal vision text
-                try:
-                    images = convert_from_path(path, first_page=first_page, last_page=last_page)
-                    for img_idx, img in enumerate(images):
-                        page_num = first_page + img_idx
-                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_img:
-                            temp_img_path = temp_img.name
-                            img.save(temp_img_path, "PNG")
-                        try:
-                            desc = describe_image(temp_img_path)
-                            text_stream.append(f"--- Page {page_num} Visual Description ---\n{desc}\n")
-                        finally:
-                            os.remove(temp_img_path)
-                except Exception as e:
-                    text_stream.append(f"Error processing visual descriptions for pages {first_page}-{last_page}: {e}")
-                    
-            text = "\n".join(text_stream)
-            return text, {"document_type": "pdf", "char_count": len(text)}
-        except Exception as e:
-            return f"Error reading PDF: {e}", {"document_type": "pdf", "char_count": 0}
+        return extract_pdf_with_vision(path)
             
     if ext in {".pdf", ".docx"}:
         return extract_document_text(path)

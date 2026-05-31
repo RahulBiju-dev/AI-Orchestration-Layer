@@ -134,20 +134,29 @@ def read_file(
     ext = os.path.splitext(file_path)[1].lower()
     file_size_bytes = os.path.getsize(file_path)
 
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            text = f.read()
-    except UnicodeDecodeError:
-        binary_type = BINARY_DOCUMENT_TYPES.get(ext)
-        hint = "Use read_document for this file type." if binary_type else "This appears to be a binary file."
-        return _json({
-            "error": f"Cannot read file as UTF-8 text: {file_path}",
-            "binary": True,
-            "binary_type": binary_type,
-            "hint": hint,
-        })
-    except Exception as exc:
-        return _json({"error": f"Error reading file: {exc}"})
+    if ext == ".pdf":
+        try:
+            from tools.vault_indexer import extract_pdf_with_vision
+            text, info = extract_pdf_with_vision(file_path)
+            if text.startswith("Error reading PDF:"):
+                return _json({"error": text})
+        except Exception as exc:
+            return _json({"error": f"Error reading PDF with vision: {exc}"})
+    else:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except UnicodeDecodeError:
+            binary_type = BINARY_DOCUMENT_TYPES.get(ext)
+            hint = "Use read_document for this file type." if binary_type else "This appears to be a binary file."
+            return _json({
+                "error": f"Cannot read file as UTF-8 text: {file_path}",
+                "binary": True,
+                "binary_type": binary_type,
+                "hint": hint,
+            })
+        except Exception as exc:
+            return _json({"error": f"Error reading file: {exc}"})
 
     max_chars_int = _positive_int(max_chars, DEFAULT_MAX_CHARS, minimum=1000, maximum=MAX_CHARS_CAP)
     chunk_size_int = _positive_int(chunk_size, DEFAULT_CHUNK_SIZE, minimum=1000, maximum=MAX_CHARS_CAP)

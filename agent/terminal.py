@@ -8,70 +8,83 @@ from __future__ import annotations
 
 import re
 import sys
-import threading
-import itertools
-import time
 from rich.console import Console
-
-# ANSI escape helpers
-_BOLD = "\033[1m"
-_DIM = "\033[2m"
-_ITALIC = "\033[3m"
-_CYAN = "\033[36m"
-_YELLOW = "\033[33m"
-_GREEN = "\033[32m"
-_RED = "\033[31m"
-_MAGENTA = "\033[35m"
-_RESET = "\033[0m"
-_CLEAR_LINE = "\033[2K\r"
 
 # Shared console (write to stderr so Live and spinner use the same stream)
 _console = Console(stderr=True)
 
 
-def _print_status(icon: str, message: str, color: str = _CYAN) -> None:
+def _print_status(icon: str, message: str, color: str = "cyan") -> None:
     """Print a formatted status line to stderr so it doesn't mix with piped output."""
-    print(f"{color}{_BOLD}{icon}  {message}{_RESET}", file=sys.stderr)
+    _console.print(f"[{color} bold]{icon}  {message}[/]")
+
+
+def print_welcome_header() -> None:
+    """Prints a stylish welcome header with an ASCII art logo."""
+    from rich.panel import Panel
+    from rich.columns import Columns
+    from rich.text import Text
+    
+    # ASCII Art logo
+    logo_art_raw = r"""
+                              /
+                   __       //
+                   -\= \=\ //
+                 --=_\=---//=--
+               -_==/  \/ //\/--
+                ==/   /O   O\==--
+   _ _ _ _     /_/    \  ]  /--
+  /\ ( (- \    /       ] ] ]==-
+ (\ _\_\_\-\__/     \  (,_,)--
+(\_/                 \     \-
+\/      /       (   ( \  ] /)
+/      (         \   \_ \./ )
+(       \         \      )  \
+(       /\_ _ _ _ /---/ /\_  \
+ \     / \     / ____/ /   \  \
+  (   /   )   / /  /__ )   (  )
+  (  )   / __/ '---`       / /
+  \  /   \ \             _/ /
+  ] ]     )_\_         /__\/
+  /_\     ]___\
+ (___)
+""".strip("\n")
+    logo_art = Text(logo_art_raw, style="cyan")
+    
+    title_text = Text("\n\n\n\n\n\nAI CLI Agent\n", style="bold white", justify="center")
+    title_text.append("Type ", style="dim")
+    title_text.append("/help", style="bold green")
+    title_text.append(" to see available commands.", style="dim")
+    
+    columns = Columns([logo_art, title_text], expand=True, align="center")
+    _console.print(Panel(columns, border_style="cyan", padding=(1, 2)))
 
 
 class _Spinner:
-    """Animated spinner that shows a message while the model is working."""
+    """Animated spinner wrapper that uses rich.status.Status."""
 
-    _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-    def __init__(self, message: str = "Thinking", color: str = _MAGENTA) -> None:
+    def __init__(self, message: str = "Thinking", color: str = "magenta") -> None:
         self._message = message
         self._color = color
+        self._status = _console.status(f"[{self._color} bold]{self._message}…[/]", spinner="dots", spinner_style=f"{self._color} bold")
+        
+        # Keep threading variables for backwards compatibility with core.py's interrupt checking
+        import threading
         self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def _animate(self) -> None:
-        for frame in itertools.cycle(self._FRAMES):
-            if self._stop_event.is_set():
-                break
-            print(
-                f"{_CLEAR_LINE}{self._color}{_BOLD}{frame}  {self._message}…{_RESET}",
-                end="",
-                file=sys.stderr,
-                flush=True,
-            )
-            time.sleep(0.08)
-        # Clear the spinner line when done
-        print(_CLEAR_LINE, end="", file=sys.stderr, flush=True)
+        self._thread = type('MockThread', (), {'is_alive': lambda: False, 'join': lambda: None})()
 
     def start(self) -> "_Spinner":
-        self._thread = threading.Thread(target=self._animate, daemon=True)
-        self._thread.start()
+        self._stop_event.clear()
+        self._status.start()
         return self
 
     def update(self, message: str) -> None:
-        """Update the spinner message in-place."""
         self._message = message
+        self._status.update(f"[{self._color} bold]{self._message}…[/]")
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._thread:
-            self._thread.join()
+        self._status.stop()
 
 
 # Small helpers for rendering common LaTeX math to terminal-friendly text
