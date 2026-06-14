@@ -12,8 +12,8 @@ from ddgs import DDGS
 
 # Map difficulty labels to max result counts.
 _DIFFICULTY_MAP: dict[str, int] = {
-    "easy": 4,
-    "medium": 7,
+    "easy": 5,
+    "medium": 8,
     "hard": 15,
 }
 
