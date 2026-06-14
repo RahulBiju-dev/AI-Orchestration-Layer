@@ -1,6 +1,8 @@
 # AI CLI Agent
 
-A modular, tool-augmented local AI agent built with Python and [Ollama](https://ollama.com/). It runs entirely in your terminal — no cloud APIs, no telemetry, no subscriptions. The agent wraps a customised [Gemma 4](https://ai.google.dev/gemma) model with an autonomous tool-calling loop, real-time streaming output with Markdown/LaTeX rendering, and a persistent RAG (Retrieval-Augmented Generation) vault for long-term document memory.
+A modular, tool-augmented local AI agent built with Python and [Ollama](https://ollama.com/). Runs entirely on your machine — no cloud APIs, no telemetry, no subscriptions. The agent wraps a customised [Gemma 4](https://ai.google.dev/gemma) model with an autonomous tool-calling loop, real-time streaming output, and a persistent RAG (Retrieval-Augmented Generation) vault for long-term document memory.
+
+By default the agent launches a **modern browser-based Web UI** with live streaming, collapsible thinking panels, and an interactive sidebar. The classic terminal interface is still available via `--cli`.
 
 ---
 
@@ -13,10 +15,15 @@ A modular, tool-augmented local AI agent built with Python and [Ollama](https://
   - [RAG Vault](#rag-vault--retrieval-augmented-generation)
   - [Context Window Management](#context-window-management)
 - [Features](#features)
+  - [Web UI](#web-ui)
+  - [Terminal Interface](#terminal-interface)
+  - [Tool Suite](#tool-suite)
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Usage](#usage)
+  - [Web UI (Default)](#web-ui-default)
+  - [Terminal CLI](#terminal-cli)
   - [Slash Commands](#slash-commands)
   - [Vault Commands](#vault-commands)
   - [Runtime Configuration](#runtime-configuration)
@@ -131,7 +138,24 @@ The agent manages this automatically:
 ### Core
 - **Fully local:** All inference runs through Ollama on your machine. No cloud dependencies for core functionality.
 - **Custom model:** Uses a `Modelfile` to wrap Gemma 4 (8B, Q4_K_M quantisation) with a tailored system prompt and optimised sampling parameters.
-- **Thinking visibility:** Streams the model's internal chain-of-thought reasoning before the final answer. Toggle with `/set think` / `/set nothink`.
+- **Thinking visibility:** Streams the model's internal chain-of-thought reasoning before the final answer.
+- **Dual interface:** Launches the Web UI by default; pass `--cli` for the classic terminal experience.
+
+### Web UI
+
+The default interface — launch with `python main.py` and the agent opens in your browser automatically.
+
+- **Cyberpunk-Obsidian aesthetic** — deep charcoal backgrounds, glassmorphism cards, and neon glowing accents in Cyan, Magenta, Teal, and Amber.
+- **Live SSE streaming** — tokens and thinking blocks are pushed to the browser in real-time via Server-Sent Events; no polling, no page reloads.
+- **Collapsible thinking panel** — while the model reasons, a dedicated magenta panel shows the chain-of-thought with animated dots. After completion it collapses into a togglable bar (DeepSeek/Gemini style).
+- **Interactive tool cards** — each tool invocation renders a visual card: `⟳ Running [tool]` → `✓ Executed [tool]`. Click the header to expand raw JSON parameters and output.
+- **Sidebar control panel:**
+  - Real-time sliders for `Temperature`, `Top-P`, and `Top-K`
+  - System-prompt override with a one-click reset to default
+  - Toggles for conversation history and model thinking
+  - Save / restore named sessions without leaving the browser
+- **Markdown & code highlighting** — responses are rendered with `marked.js` and syntax-highlighted with `highlight.js`.
+- **Responsive layout** — sidebar collapses on narrow viewports; works on desktop and tablet.
 
 ### Tool Suite
 The agent autonomously decides when to call tools based on the user's query:
@@ -163,48 +187,63 @@ The agent autonomously decides when to call tools based on the user's query:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        main.py                              │
-│                   (entry point, model init)                 │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────┐
-│                    agent/core.py                             │
-│  ┌───────────┐  ┌──────────────┐  ┌────────────────────────┐ │
-│  │ Chat Loop │ →│ Tool Dispatch│ →│ Streaming + Thinking   │ │
-│  │ /commands │  │ (iterative)  │  │ History Trimming       │ │
-│  └───────────┘  └──────┬───────┘  └────────────────────────┘ │
-│                        │                                     │
-│  ┌─────────────────────┴──────────────────────────────────┐  │
-│  │                  Session Manager                       │  │
-│  │  /save, /load, /set, /show — JSON persistence          │  │
-│  └────────────────────────────────────────────────────────┘  │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-          ┌────────────────┼────────────────┐
-          ▼                ▼                ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐
-│agent/terminal│  │tools/registry│  │    Ollama Server     │
-│  Spinner     │  │  TOOL_SCHEMAS│  │ (localhost:11434)    │
-│  LaTeX math  │  │  TOOL_DISP.  │  │  gemma-agent model   │
-│  Markdown    │  │              │  │  embeddinggemma      │
-└──────────────┘  └──────┬───────┘  │  moondream           │
-                         │          └──────────────────────┘
-     ┌───────┬───────┬───┴───┬────────┬──────────┬──────────┐
-     ▼       ▼       ▼       ▼        ▼          ▼          ▼
- search   browser   file   document  spotify   vision    vault
-   .py      .py     .py      .py      .py    describer (index/search/
-                                        .py    embeddings)
-                                  obsi_vault      │
-                                  _writer.py      ▼
-                                            ┌──────────┐
-                                            │ ChromaDB │
-                                            │ (.chroma)│
-                                            └──────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                          main.py                                │
+│          (entry point — model init, CLI/Web routing)            │
+└────────────────────┬──────────────────────┬─────────────────────┘
+                     │  --cli flag          │  default
+                     ▼                      ▼
+        ┌────────────────────┐   ┌─────────────────────────────┐
+        │   agent/core.py    │   │       agent/web.py           │
+        │  (Terminal CLI)    │   │  (Threaded HTTP + SSE)       │
+        │  Chat Loop         │   │  /api/chat   → SSE stream    │
+        │  /commands         │   │  /api/session/*  → JSON      │
+        │  Streaming         │   │  /static/*   → HTML/CSS/JS   │
+        │  Session Mgmt      │   └──────────────┬──────────────┘
+        └────────┬───────────┘                  │
+                 │                              │
+                 └──────────────┬───────────────┘
+                                ▼
+               ┌────────────────────────────────┐
+               │         tools/registry          │
+               │  TOOL_SCHEMAS   TOOL_DISPATCH   │
+               └────────────────┬───────────────┘
+                                │
+     ┌──────┬──────┬────────┬───┴──┬─────────┬───────────┐
+     ▼      ▼      ▼        ▼      ▼         ▼           ▼
+  search  browser  file  document spotify   vision     vault
+  .py     .py      .py   .py      .py    describer  (index/search/
+                                          .py        embeddings)
+                                    obsi_vault          │
+                                    _writer.py           ▼
+                                                  ┌──────────┐
+                                                  │ ChromaDB │
+                                                  │ (.chroma)│
+                                                  └──────────┘
+
+ Browser (Web UI)
+ ┌──────────────────────────────────────────────┐
+ │  index.html  +  style.css  +  app.js          │
+ │  ┌──────────┐  ┌─────────────────────────┐   │
+ │  │ Sidebar  │  │  Chat Panel              │   │
+ │  │ Sliders  │  │  SSE token stream        │   │
+ │  │ Toggles  │  │  Thinking block          │   │
+ │  │ Sessions │  │  Tool cards              │   │
+ │  └──────────┘  └─────────────────────────┘   │
+ └──────────────────────────────────────────────┘
 ```
 
-### Data Flow
+### Data Flow — Web UI
+
+1. Browser opens automatically at `http://localhost:5005` (or next free port)
+2. User message is `POST`ed to `/api/chat`
+3. `web.py` builds the Ollama request with the current session's parameters, history, and tool schemas
+4. If the model returns tool calls, `web.py` executes them via `TOOL_DISPATCH` and yields SSE `tool_*` events to the browser
+5. Thinking tokens arrive as `thinking` SSE events; content tokens as `token` events
+6. `app.js` renders tokens in real time, assembles the thinking panel, and builds tool cards
+7. On completion a `done` SSE event is fired and the response is added to history
+
+### Data Flow — Terminal CLI
 
 1. **User input** enters the chat loop in `agent/core.py`
 2. Slash commands (`/help`, `/save`, `/vault`, etc.) are intercepted and handled locally — they never touch the LLM
@@ -264,10 +303,34 @@ This custom model is cached by Ollama and reused on subsequent runs.
 
 ## Usage
 
-Start the agent:
+### Web UI (Default)
 
 ```bash
 python main.py
+```
+
+The server binds to port `5005` (or the next free port) and automatically opens your default browser. You'll land on the chat interface immediately — no configuration required.
+
+> **Port:** If `5005` is occupied the agent finds a free port and launches the browser pointing to that port.
+
+**Sidebar controls** (click `⚙` to open):
+
+| Control | Description |
+|---------|-------------|
+| Temperature slider | Adjust response creativity (0.0 – 1.0) |
+| Top-P / Top-K sliders | Fine-tune nucleus and top-k sampling |
+| System prompt | Override or reset the model's instructions |
+| History toggle | Enable / disable conversation memory |
+| Thinking toggle | Show / hide the model's reasoning panel |
+| Save session | Persist the current conversation with a custom name |
+| Load session | Restore any previously saved session |
+
+### Terminal CLI
+
+Pass `--cli` to skip the Web UI and use the classic terminal interface:
+
+```bash
+python main.py --cli
 ```
 
 You'll see the chat prompt:
@@ -407,14 +470,19 @@ export OLLAMA_KEEP_ALIVE=30m
 
 ```
 AI-CLI-Agent/
-├── main.py                    # Entry point — model init and launch
+├── main.py                    # Entry point — model init, --cli flag, web launch
 ├── Modelfile                  # Ollama model definition (system prompt, parameters)
 ├── requirements.txt           # Python dependencies
 │
 ├── agent/
 │   ├── __init__.py
-│   ├── core.py                # Chat loop, tool dispatch, streaming, session mgmt
-│   └── terminal.py            # ANSI helpers, spinner, LaTeX renderer, Markdown
+│   ├── core.py                # Terminal chat loop, tool dispatch, streaming, session mgmt
+│   ├── terminal.py            # ANSI helpers, spinner, LaTeX renderer, Markdown
+│   ├── web.py                 # Threaded HTTP server, SSE generator, session/API routes
+│   └── static/
+│       ├── index.html         # Web UI layout — sidebar, chat panel, modals
+│       ├── style.css          # Design system — dark mode, glassmorphism, animations
+│       └── app.js             # Browser controller — SSE stream, tool cards, Markdown render
 │
 ├── tools/
 │   ├── __init__.py
@@ -440,8 +508,12 @@ AI-CLI-Agent/
 
 ### Key Design Decisions
 
+- **Web UI is the default** — `python main.py` starts the browser interface; the terminal CLI is opt-in via `--cli`. This keeps the richer interface front-and-centre without breaking existing workflows.
+- **SSE over WebSockets** — Server-Sent Events are used for token streaming because they need only a standard HTTP connection, require no upgrade handshake, and reconnect automatically on drop.
+- **`ThreadingMixIn` HTTP server** — `web.py` uses Python's `socketserver.ThreadingMixIn` so each request (including long-lived SSE connections) runs in its own daemon thread, preventing a slow generation from blocking the session API.
+- **Shared `GLOBAL_STATE`** — a single in-process dict holds history and session parameters, making state trivially accessible across request handlers without an external store.
 - **Tool schemas are compressed** to minimise prompt token overhead — they're sent with every LLM call, so shorter descriptions directly improve prefill speed.
-- **Streaming is throttled** at ~12 FPS to avoid CPU-bound Markdown re-rendering from bottlenecking the token pipeline.
+- **Streaming is throttled** at ~12 FPS in the terminal to avoid CPU-bound Markdown re-rendering from bottlenecking the token pipeline. The Web UI receives every token immediately via SSE.
 - **All regex patterns are pre-compiled** at module load time in `terminal.py`, not on each rendering pass.
 - **History is trimmed** using a token budget heuristic (1 token ≈ 4 characters) to keep prompt size bounded without requiring a tokeniser dependency.
 - **Vault embeddings** use the local `embeddinggemma` model via Ollama's HTTP API, falling back to the Python client if the HTTP endpoint changes.
