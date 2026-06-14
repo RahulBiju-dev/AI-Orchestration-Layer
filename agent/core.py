@@ -38,7 +38,7 @@ from tools.registry import TOOL_DISPATCH, TOOL_SCHEMAS
 
 # ── Configuration ─────────────────────────────────────────────────────
 
-MODEL_NAME = "gemma-agent"
+MODEL_NAME = "selene"
 _SESSIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sessions")
 
 # Parameters that accept float values via /set parameter

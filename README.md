@@ -187,7 +187,7 @@ The agent autonomously decides when to call tools based on the user's query:
 ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐
 │agent/terminal│  │tools/registry│  │    Ollama Server     │
 │  Spinner     │  │  TOOL_SCHEMAS│  │ (localhost:11434)    │
-│  LaTeX math  │  │  TOOL_DISP.  │  │  gemma-agent model   │
+│  LaTeX math  │  │  TOOL_DISP.  │  │  selene model        │
 │  Markdown    │  │              │  │  embeddinggemma      │
 └──────────────┘  └──────┬───────┘  │  moondream           │
                          │          └──────────────────────┘
@@ -253,7 +253,7 @@ The agent supports memory-safe multimodal vision, allowing it to read slides, di
 
 ### What happens on first run
 
-The agent calls `ollama create gemma-agent -f Modelfile` to build a custom model variant that bundles:
+The agent calls `ollama create selene -f Modelfile` to build a custom model variant that bundles:
 - The Gemma 4 base weights
 - A system prompt with personality, knowledge cutoff rules, and tool-use instructions
 - Tuned sampling parameters (`temperature`, `num_ctx`, `num_batch`, `num_predict`)
