@@ -797,6 +797,7 @@ async function sendMessage() {
     
     // Display user bubble
     appendUserMessage(text);
+    showLoadingPlaceholder();
     
     // Lock state
     state.isGenerating = true;
@@ -853,6 +854,7 @@ async function sendMessage() {
         state.isGenerating = false;
         currentAbortController = null;
         updateSendButtonState();
+        hideLoadingPlaceholder();
         
         // Final refresh
         loadSessionState();
@@ -943,6 +945,7 @@ function handleSSEEvent(event) {
 
 // Get or spawn the active assistant DOM message wrapper
 function getOrCreateAssistantBodyElement() {
+    hideLoadingPlaceholder();
     const chatContainer = document.getElementById('chat-messages');
     
     // If there is an active assistant bubble we are streaming into, return its body
@@ -1016,5 +1019,35 @@ function updateSendButtonState() {
         sendBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide-icon"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>';
         sendBtn.classList.remove('stop-btn');
         sendBtn.title = 'Send message';
+    }
+}
+
+function showLoadingPlaceholder() {
+    const chatContainer = document.getElementById('chat-messages');
+    if (!chatContainer) return;
+    
+    hideLoadingPlaceholder();
+    
+    const loader = document.createElement('div');
+    loader.className = 'message assistant loading-placeholder-bubble';
+    loader.id = 'loading-placeholder-bubble';
+    loader.innerHTML = `
+        <div class="message-avatar">A</div>
+        <div class="message-body">
+            <div class="loading-wave">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+        </div>
+    `;
+    chatContainer.appendChild(loader);
+    scrollToBottom();
+}
+
+function hideLoadingPlaceholder() {
+    const loader = document.getElementById('loading-placeholder-bubble');
+    if (loader) {
+        loader.remove();
     }
 }
