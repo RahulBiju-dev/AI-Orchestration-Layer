@@ -11,6 +11,7 @@ from tools.file import read_file, create_file
 from tools.code import view_code
 from tools.spotify import spotify_play
 from tools.browser import open_browser
+from tools.app_launcher import open_app
 from tools.vault_indexer import delete_vault_item, index_vault, list_vault_aliases, list_vaults
 from tools.vault_search import search_vault
 from tools.obsi_vault_writer import create_structured_note
@@ -210,6 +211,26 @@ TOOL_SCHEMAS: list[dict] = [
                 "required": ["file_path"],
             },
         },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_app",
+            "description": (
+                "Open a desktop application on the user's computer by name (e.g. 'chrome', 'VS Code', 'spotify'). "
+                "The process will launch detached in the background."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_name": {
+                        "type": "string",
+                        "description": "The name or command of the application to open.",
+                    }
+                },
+                "required": ["app_name"],
+            },
+        },
     }
 ]
 
@@ -332,6 +353,7 @@ TOOL_DISPATCH: dict[str, callable] = {
     "view_code": view_code,
     "spotify_play": spotify_play,
     "open_browser": open_browser,
+    "open_app": open_app,
 }
 
 # Dispatch RAG tools

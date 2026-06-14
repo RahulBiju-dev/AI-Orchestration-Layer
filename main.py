@@ -30,7 +30,11 @@ def _ensure_model() -> None:
 def main() -> None:
     try:
         _ensure_model()
-        run()
+        if "--cli" in sys.argv:
+            run()
+        else:
+            from agent.web import start_web_server
+            start_web_server()
     except KeyboardInterrupt:
         _console.print("\n[dim]Interrupted — goodbye.[/]")
         sys.exit(0)

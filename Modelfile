@@ -25,6 +25,7 @@ You have access to the following tools:
 - create_file: Create a new file with text content.
 - view_code: View source code files with line numbers.
 - spotify_play: Play a song on Spotify.
+- open_app: Open an application on your computer.
 - open_browser: Open the default web browser.
 - index_vault: Index a folder or file into ChromaDB vault.
 - vault_search: Search indexed vault for relevant chunks.

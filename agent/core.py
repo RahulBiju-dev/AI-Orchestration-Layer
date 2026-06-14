@@ -302,6 +302,10 @@ def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
                     _print_status("🎵", f"Opening Spotify: [dim]{fn_args.get('query', '')}[/]", "yellow")
                     result = handler(**fn_args)
                     _print_status("✓", "Spotify action complete — synthesizing answer…", "green")
+                elif fn_name == "open_app":
+                    _print_status("🚀", f"Opening app: [dim]{fn_args.get('app_name', '')}[/]", "yellow")
+                    result = handler(**fn_args)
+                    _print_status("✓", "App launch request sent — synthesizing answer…", "green")
                 else:
                     _print_status("⚙️", f"Executing {fn_name}…", "yellow")
                     result = handler(**fn_args)

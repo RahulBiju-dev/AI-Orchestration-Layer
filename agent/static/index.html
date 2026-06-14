@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemma Agent — Modern UI</title>
+    
+    <!-- Google Fonts: Outfit for display, JetBrains Mono for code/thinking -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    
+    <!-- Highlight.js theme -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css">
+    
+    <!-- Custom styling -->
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <div class="logo-icon"></div>
+                    <div class="logo-text">
+                        <span class="logo-title">GEMMA</span>
+                        <span class="logo-subtitle">AGENT</span>
+                    </div>
+                </div>
+                <button class="icon-btn close-sidebar-btn" id="close-sidebar" aria-label="Close Sidebar">
+                    <i data-lucide="x"></i>
+                </button>
+            </div>
+            
+            <div class="sidebar-scroll">
+                <!-- Action Buttons -->
+                <div class="sidebar-actions">
+                    <button class="btn btn-primary btn-new" id="new-chat-btn">
+                        <i data-lucide="plus"></i> New Chat
+                    </button>
+                    <button class="btn btn-secondary" id="save-session-btn">
+                        <i data-lucide="save"></i> Save Session
+                    </button>
+                </div>
+                
+                <!-- Saved Sessions -->
+                <div class="sidebar-section">
+                    <h3 class="section-title">Saved Sessions</h3>
+                    <div class="sessions-list" id="sessions-list">
+                        <!-- Populated dynamically -->
+                        <div class="loading-placeholder">Loading sessions...</div>
+                    </div>
+                </div>
+                
+                <!-- Configuration Settings -->
+                <div class="sidebar-section">
+                    <h3 class="section-title">Agent Settings</h3>
+                    
+                    <div class="setting-item">
+                        <div class="setting-label">
+                            <span>Temperature</span>
+                            <span class="setting-value" id="temp-val">0.7</span>
+                        </div>
+                        <input type="range" class="slider" id="param-temperature" min="0" max="1.5" step="0.1" value="0.7">
+                        <div class="slider-labels">
+                            <span>Precise</span>
+                            <span>Creative</span>
+                        </div>
+                    </div>
+                    
+                    <div class="setting-item">
+                        <div class="setting-label">
+                            <span>Top-P</span>
+                            <span class="setting-value" id="topp-val">0.9</span>
+                        </div>
+                        <input type="range" class="slider" id="param-top_p" min="0" max="1" step="0.05" value="0.9">
+                    </div>
+                    
+                    <div class="setting-item">
+                        <div class="setting-label">
+                            <span>Top-K</span>
+                            <span class="setting-value" id="topk-val">40</span>
+                        </div>
+                        <input type="range" class="slider" id="param-top_k" min="1" max="100" step="1" value="40">
+                    </div>
+                    
+                    <div class="setting-item toggle-item">
+                        <div class="setting-details">
+                            <span class="setting-name">Conversation History</span>
+                            <span class="setting-desc">Enable memory across turns</span>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="setting-history" checked>
+                            <span class="switch-slider"></span>
+                        </label>
+                    </div>
+                    
+                    <div class="setting-item toggle-item">
+                        <div class="setting-details">
+                            <span class="setting-name">Model Thinking</span>
+                            <span class="setting-desc">Stream reasoning progress</span>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="setting-think" checked>
+                            <span class="switch-slider"></span>
+                        </label>
+                    </div>
+                </div>
+                
+                <!-- Custom System Prompt -->
+                <div class="sidebar-section">
+                    <h3 class="section-title">System Prompt Override</h3>
+                    <textarea class="textarea-prompt" id="system-prompt" placeholder="Enter custom agent instructions..."></textarea>
+                    <button class="btn btn-secondary btn-sm" id="apply-prompt-btn">Apply Prompt</button>
+                </div>
+            </div>
+            
+            <div class="sidebar-footer">
+                <span class="version-label">v1.2.0-modern</span>
+            </div>
+        </aside>
+        
+        <!-- Main Chat Area -->
+        <main class="main-content">
+            <header class="navbar">
+                <div class="nav-left">
+                    <button class="icon-btn menu-btn" id="menu-toggle" aria-label="Open Sidebar">
+                        <i data-lucide="menu"></i>
+                    </button>
+                    <div class="navbar-info">
+                        <h2 class="nav-session-title" id="current-session-title">Active Session</h2>
+                        <div class="nav-badges">
+                            <span class="badge" id="model-badge">gemma-agent</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="nav-right">
+                    <div class="status-indicator">
+                        <span class="status-dot online"></span>
+                        <span class="status-text" id="connection-status">Ollama Online</span>
+                    </div>
+                    <button class="icon-btn" id="clear-history-btn" title="Clear Chat History">
+                        <i data-lucide="trash-2"></i>
+                    </button>
+                    <button class="icon-btn" id="help-btn" title="Help & Shortcuts">
+                        <i data-lucide="help-circle"></i>
+                    </button>
+                </div>
+            </header>
+            
+            <!-- Message List -->
+            <div class="chat-messages" id="chat-messages">
+                <!-- If empty, shows welcome dashboard -->
+            </div>
+            
+            <!-- Input Container -->
+            <div class="input-container">
+                <div class="input-wrapper">
+                    <textarea class="chat-input" id="user-input" rows="1" placeholder="Ask Gemma anything, or type a file path to index..."></textarea>
+                    <button class="send-btn" id="send-btn" disabled>
+                        <i data-lucide="send"></i>
+                    </button>
+                </div>
+                <div class="input-footer">
+                    <span>Press <kbd>Enter</kbd> to send, <kbd>Shift</kbd>+<kbd>Enter</kbd> for newline.</span>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modals -->
+    <!-- Save Session Modal -->
+    <div class="modal-overlay" id="save-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Save Current Session</h3>
+                <button class="icon-btn close-modal-btn"><i data-lucide="x"></i></button>
+            </div>
+            <div class="modal-body">
+                <p>Provide a name to save this conversation session.</p>
+                <input type="text" class="modal-input" id="save-session-name" placeholder="e.g. project_discussion">
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary close-modal-btn">Cancel</button>
+                <button class="btn btn-primary" id="confirm-save-btn">Save Session</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Help Modal -->
+    <div class="modal-overlay" id="help-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Agent Help & Capabilities</h3>
+                <button class="icon-btn close-modal-btn"><i data-lucide="x"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="help-section">
+                    <h4>🛠 Available Tools</h4>
+                    <p>The agent automatically executes these tools in the background when needed:</p>
+                    <ul class="help-list">
+                        <li><strong>Spotify Control:</strong> Play music (e.g. "play some rock music").</li>
+                        <li><strong>App Launcher:</strong> Open local applications (e.g. "open chrome").</li>
+                        <li><strong>Browser:</strong> Open URLs and default web browsers.</li>
+                        <li><strong>File Management:</strong> Read, write, view, and list files.</li>
+                        <li><strong>Knowledge Vault:</strong> Search and index local folders or documents (PDF, DOCX, etc.).</li>
+                    </ul>
+                </div>
+                <div class="help-section">
+                    <h4>📂 Auto-indexing files</h4>
+                    <p>Type the absolute path of a large file (e.g. PDF or DOCX) in the chat input. The system will detect and automatically index it into the active vault before processing your request.</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary close-modal-btn">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="/app.js"></script>
+</body>
+</html>
