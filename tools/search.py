@@ -24,7 +24,7 @@ def web_search(query: str, difficulty: str = "medium") -> str:
     Args:
         query:      The search query string.
         difficulty: One of 'easy', 'medium', or 'hard'.
-                    Controls how many results are fetched (3 / 5 / 10).
+                    Controls how many results are fetched (3 / 6 / 10).
 
     Returns:
         A JSON string containing a list of {title, snippet} dicts,
