@@ -4,7 +4,7 @@ const state = {
     history: [],
     settings: {
         options: {
-            temperature: 0.7,
+            temperature: 0.4,
             top_p: 0.9,
             top_k: 40
         },
@@ -15,11 +15,16 @@ const state = {
         think: true
     },
     savedSessions: [],
+    
+    // Generation & Streaming State
     isGenerating: false,
-    currentThinkingBox: null,
+    currentAssistantBody: null,
     currentAssistantBubble: null,
+    currentThinkingBox: null,
     currentAssistantText: '',
     currentAssistantThinkingText: '',
+    toolCards: {},
+    toolCallCounter: 0
 };
 
 let currentAbortController = null;
@@ -31,7 +36,6 @@ document.addEventListener('DOMContentLoaded', () => {
     loadSessionState();
 });
 
-// Configure markdown parsing & highlighting
 function initLibraries() {
     marked.setOptions({
         highlight: function (code, lang) {
@@ -41,7 +45,6 @@ function initLibraries() {
         langPrefix: 'hljs language-'
     });
     
-    // Initial Lucide icons rendering
     if (window.lucide) {
         lucide.createIcons();
     }
@@ -49,7 +52,7 @@ function initLibraries() {
 
 // ── Event Listeners ──────────────────────────────────────────────────
 function initEventListeners() {
-    // Menu Sidebar toggle (for mobile)
+    // Menu Sidebar toggle
     const menuToggle = document.getElementById('menu-toggle');
     const closeSidebar = document.getElementById('close-sidebar');
     const sidebar = document.getElementById('sidebar');
@@ -112,29 +115,20 @@ function initEventListeners() {
             state.settings.system = systemPromptArea.value.trim();
             saveSettingsOnBackend();
             
-            // Show confirmation on button
             const originalText = applyPromptBtn.textContent;
             applyPromptBtn.textContent = 'Applied ✓';
-            applyPromptBtn.style.borderColor = 'var(--accent-teal)';
-            applyPromptBtn.style.color = 'var(--accent-teal)';
-            setTimeout(() => {
-                applyPromptBtn.textContent = originalText;
-                applyPromptBtn.style.borderColor = '';
-                applyPromptBtn.style.color = '';
-            }, 1500);
+            setTimeout(() => applyPromptBtn.textContent = originalText, 1500);
         });
     }
     
-    // Input Area Resizing & Enter key
+    // Input Area
     const userInput = document.getElementById('user-input');
     const sendBtn = document.getElementById('send-btn');
     
     if (userInput) {
         userInput.addEventListener('input', () => {
-            // Auto resize
             userInput.style.height = 'auto';
-            userInput.style.height = (userInput.scrollHeight - 4) + 'px';
-            
+            userInput.style.height = (userInput.scrollHeight) + 'px';
             updateSendButtonState();
         });
         
@@ -154,35 +148,23 @@ function initEventListeners() {
                 if (currentAbortController) {
                     currentAbortController.abort();
                 }
+                finishGeneration(true);
             } else {
                 sendMessage();
             }
         });
     }
     
-    // New Chat Button
-    const newChatBtn = document.getElementById('new-chat-btn');
-    if (newChatBtn) {
-        newChatBtn.addEventListener('click', () => {
-            clearSession();
-        });
-    }
-    
-    // Clear History Button
-    const clearHistoryBtn = document.getElementById('clear-history-btn');
-    if (clearHistoryBtn) {
-        clearHistoryBtn.addEventListener('click', () => {
-            if (confirm('Are you sure you want to clear this conversation history?')) {
-                clearSession();
-            }
-        });
-    }
+    // Buttons
+    document.getElementById('new-chat-btn')?.addEventListener('click', clearSession);
+    document.getElementById('clear-history-btn')?.addEventListener('click', () => {
+        if (confirm('Clear this conversation history?')) clearSession();
+    });
     
     // Modals
     setupModal('save-session-btn', 'save-modal');
     setupModal('help-btn', 'help-modal');
     
-    // Confirm Save Session
     const confirmSaveBtn = document.getElementById('confirm-save-btn');
     const sessionNameInput = document.getElementById('save-session-name');
     if (confirmSaveBtn && sessionNameInput) {
@@ -198,34 +180,31 @@ function initEventListeners() {
                 });
                 const data = await res.json();
                 if (data.status === 'success') {
-                    closeAllModals();
+                    document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
                     sessionNameInput.value = '';
-                    loadSessionState(); // Reload session list
+                    loadSessionState();
                 } else {
                     alert('Error saving session: ' + data.error);
                 }
             } catch (err) {
                 console.error(err);
-                alert('Failed to save session');
             }
         });
     }
-    // Tab switching
-    const tabBtns = document.querySelectorAll('.tab-btn');
-    tabBtns.forEach(btn => {
+    
+    // Tabs
+    document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             
             btn.classList.add('active');
-            const targetId = btn.getAttribute('data-target');
-            const targetContent = document.getElementById(targetId);
-            if (targetContent) targetContent.classList.add('active');
+            const target = document.getElementById(btn.getAttribute('data-target'));
+            if (target) target.classList.add('active');
         });
     });
 }
 
-// Modal helper
 function setupModal(triggerId, modalId) {
     const trigger = document.getElementById(triggerId);
     const modal = document.getElementById(modalId);
@@ -237,28 +216,16 @@ function setupModal(triggerId, modalId) {
         if (firstInput) setTimeout(() => firstInput.focus(), 100);
     });
     
-    const closeBtns = modal.querySelectorAll('.close-modal-btn');
-    closeBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            modal.classList.remove('active');
-        });
+    modal.querySelectorAll('.close-modal-btn').forEach(btn => {
+        btn.addEventListener('click', () => modal.classList.remove('active'));
     });
     
     modal.addEventListener('click', (e) => {
-        if (e.target === modal) {
-            modal.classList.remove('active');
-        }
+        if (e.target === modal) modal.classList.remove('active');
     });
 }
 
-function closeAllModals() {
-    const modals = document.querySelectorAll('.modal-overlay');
-    modals.forEach(m => m.classList.remove('active'));
-}
-
 // ── Backend Communications ───────────────────────────────────────────
-
-// Load current configuration and history from backend
 async function loadSessionState() {
     try {
         const res = await fetch('/api/settings');
@@ -269,26 +236,41 @@ async function loadSessionState() {
         state.savedSessions = data.saved_sessions;
         state.activeSession = data.active_session_name || 'Active Session';
         
-        document.getElementById('current-session-title').textContent = state.activeSession;
-        document.getElementById('model-badge').textContent = data.model_name || 'gemma-agent';
+        const sessionTitle = document.getElementById('current-session-title');
+        if (sessionTitle) {
+            sessionTitle.textContent = state.activeSession;
+        }
+        const modelBadge = document.getElementById('model-badge');
+        if (modelBadge) {
+            modelBadge.textContent = data.model_name || 'selene';
+        }
         
-        // Sync UI inputs with loaded settings
+        const dot = document.querySelector('.status-dot');
+        const statusIndicator = document.querySelector('.status-indicator');
+        if (dot) {
+            if (data.ollama_status === 'Online') {
+                dot.className = 'status-dot online';
+            } else {
+                dot.className = 'status-dot offline';
+            }
+        }
+        if (statusIndicator) {
+            statusIndicator.title = `Ollama Status: ${data.ollama_status || 'Offline'}`;
+        }
+        const statusText = document.getElementById('connection-status');
+        if (statusText) {
+            statusText.textContent = data.ollama_status === 'Online' ? 'Online' : 'Ollama Offline';
+        }
+        
         syncSettingsToUI();
-        
-        // Render saved sessions
         renderSavedSessionsList();
-        
-        // Render history
         renderHistory();
         
     } catch (err) {
         console.error('Failed to load session settings:', err);
-        document.getElementById('connection-status').textContent = 'Ollama Offline';
-        document.getElementById('connection-status').previousElementSibling.className = 'status-dot offline';
     }
 }
 
-// Push local settings updates to backend
 async function saveSettingsOnBackend() {
     try {
         await fetch('/api/settings', {
@@ -301,62 +283,41 @@ async function saveSettingsOnBackend() {
     }
 }
 
-// Sync settings variables to HTML form fields
 function syncSettingsToUI() {
-    const tempSlider = document.getElementById('param-temperature');
-    const tempVal = document.getElementById('temp-val');
-    if (tempSlider && tempVal) {
-        const temp = state.settings.options.temperature ?? 0.7;
-        tempSlider.value = temp;
-        tempVal.textContent = temp;
+    const ids = {
+        'param-temperature': ['temp-val', state.settings.options.temperature ?? 0.4],
+        'param-top_p': ['topp-val', state.settings.options.top_p ?? 0.9],
+        'param-top_k': ['topk-val', state.settings.options.top_k ?? 40]
+    };
+    
+    for (const [id, [valId, val]] of Object.entries(ids)) {
+        const slider = document.getElementById(id);
+        const display = document.getElementById(valId);
+        if (slider && display) {
+            slider.value = val;
+            display.textContent = val;
+        }
     }
     
-    const toppSlider = document.getElementById('param-top_p');
-    const toppVal = document.getElementById('topp-val');
-    if (toppSlider && toppVal) {
-        const topp = state.settings.options.top_p ?? 0.9;
-        toppSlider.value = topp;
-        toppVal.textContent = topp;
-    }
+    const hist = document.getElementById('setting-history');
+    if (hist) hist.checked = state.settings.history;
     
-    const topkSlider = document.getElementById('param-top_k');
-    const topkVal = document.getElementById('topk-val');
-    if (topkSlider && topkVal) {
-        const topk = state.settings.options.top_k ?? 40;
-        topkSlider.value = topk;
-        topkVal.textContent = topk;
-    }
+    const think = document.getElementById('setting-think');
+    if (think) think.checked = state.settings.think;
     
-    const historySwitch = document.getElementById('setting-history');
-    if (historySwitch) {
-        historySwitch.checked = state.settings.history;
-    }
-    
-    const thinkSwitch = document.getElementById('setting-think');
-    if (thinkSwitch) {
-        thinkSwitch.checked = state.settings.think;
-    }
-    
-    const systemPrompt = document.getElementById('system-prompt');
-    if (systemPrompt) {
-        systemPrompt.value = state.settings.system || '';
-    }
+    const prompt = document.getElementById('system-prompt');
+    if (prompt) prompt.value = state.settings.system || '';
 }
 
-// Clear current session settings and history
 async function clearSession() {
     try {
-        const res = await fetch('/api/clear-session', { method: 'POST' });
-        const data = await res.json();
-        if (data.status === 'success') {
-            loadSessionState();
-        }
+        await fetch('/api/clear-session', { method: 'POST' });
+        loadSessionState();
     } catch (err) {
         console.error(err);
     }
 }
 
-// Render the list of saved sessions in sidebar
 function renderSavedSessionsList() {
     const container = document.getElementById('sessions-list');
     if (!container) return;
@@ -369,28 +330,22 @@ function renderSavedSessionsList() {
     container.innerHTML = '';
     state.savedSessions.forEach((sessionFile) => {
         const basename = sessionFile.replace('.json', '');
-        
-        // Try parsing timestamp and cleaner name
         let displayName = basename;
         let timeLabel = '';
         
-        // Format: [name]_[YYYYMMDD]_[HHMMSS]
         const match = basename.match(/^(.+)_(\d{8})_(\d{6})$/);
         if (match) {
             displayName = match[1].replace(/_/g, ' ');
-            const yr = match[2].substring(0, 4);
-            const mo = match[2].substring(4, 6);
-            const dy = match[2].substring(6, 8);
-            const hr = match[3].substring(0, 2);
-            const mn = match[3].substring(2, 4);
+            const [yr, mo, dy, hr, mn] = [
+                match[2].substring(0,4), match[2].substring(4,6), match[2].substring(6,8),
+                match[3].substring(0,2), match[3].substring(2,4)
+            ];
             timeLabel = `${dy}/${mo}/${yr} ${hr}:${mn}`;
         }
         
         const item = document.createElement('div');
         item.className = 'session-item';
-        if (basename + '.json' === state.activeSession) {
-            item.classList.add('active');
-        }
+        if (basename + '.json' === state.activeSession) item.classList.add('active');
         
         item.innerHTML = `
             <div class="session-details">
@@ -400,64 +355,47 @@ function renderSavedSessionsList() {
             <i data-lucide="chevron-right" style="width: 14px; height: 14px; color: var(--text-muted);"></i>
         `;
         
-        item.addEventListener('click', () => loadSavedSession(sessionFile));
+        item.addEventListener('click', async () => {
+            try {
+                const res = await fetch('/api/load-session', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: sessionFile })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    loadSessionState();
+                    document.getElementById('sidebar')?.classList.add('collapsed');
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        });
         container.appendChild(item);
     });
     
     if (window.lucide) lucide.createIcons();
 }
 
-// Load a specific session JSON file
-async function loadSavedSession(filename) {
-    try {
-        const res = await fetch('/api/load-session', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: filename })
-        });
-        const data = await res.json();
-        if (data.status === 'success') {
-            loadSessionState();
-            // Close mobile sidebar if open
-            document.getElementById('sidebar').classList.add('collapsed');
-        } else {
-            alert('Failed to load session: ' + data.error);
-        }
-    } catch (err) {
-        console.error(err);
-    }
-}
-
 // ── Rendering Chat Logs ──────────────────────────────────────────────
-
-// Render welcome layout or chat history bubbles
 function renderHistory() {
     const container = document.getElementById('chat-messages');
     if (!container) return;
     
     container.innerHTML = '';
-    
-    // Filter history to display user & assistant replies, excluding system/tool messages
-    // (tools will be integrated inside assistant messages)
     const displayMessages = [];
     
     for (let i = 0; i < state.history.length; i++) {
         const msg = state.history[i];
-        
         if (msg.role === 'user') {
-            displayMessages.push({
-                role: 'user',
-                content: msg.content
-            });
+            displayMessages.push({ role: 'user', content: msg.content });
         } else if (msg.role === 'assistant') {
-            // Check for associated tools succeeding this assistant msg
             const tools = [];
             let j = i + 1;
             while (j < state.history.length && state.history[j].role === 'tool') {
                 tools.push(state.history[j]);
                 j++;
             }
-            // Advance iterator past tool messages
             i = j - 1;
             
             displayMessages.push({
@@ -476,70 +414,63 @@ function renderHistory() {
     }
     
     displayMessages.forEach(msg => {
-        if (msg.role === 'user') {
-            appendUserMessage(msg.content, false);
-        } else {
-            appendAssistantMessage(msg, false);
-        }
+        if (msg.role === 'user') appendUserMessage(msg.content, false);
+        else appendAssistantMessage(msg, false);
     });
     
     scrollToBottom();
 }
 
-// Render empty dashboard with query suggestions
 function renderWelcomeScreen(container) {
     const welcome = document.createElement('div');
     welcome.className = 'welcome-container';
     welcome.innerHTML = `
         <div class="welcome-logo">
-            <i data-lucide="bot"></i>
+            <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
         </div>
         <div>
-            <h1 class="welcome-title">AI Agent Workspace</h1>
-            <p class="welcome-subtitle">A modern, visual wrapper around your local Gemma-powered CLI Agent. Control your desktop, query documents, and listen to music.</p>
+            <h1 class="welcome-title">Selene</h1>
+            <p class="welcome-subtitle">A professional AI agent interface with local tools, web search, and document reasoning capabilities.</p>
         </div>
         
         <div class="suggestions-grid">
-            <div class="suggestion-card" data-cmd="play some synthwave music on spotify">
+            <div class="suggestion-card" data-cmd="Search the web for today's tech news">
                 <div class="suggestion-header">
-                    <i data-lucide="music" style="width: 16px; height: 16px;"></i> Spotify Music
+                    <i data-lucide="globe" style="width: 18px; height: 18px;"></i> Web Search
                 </div>
-                <div class="suggestion-text">"Play some synthwave music on Spotify"</div>
+                <div class="suggestion-text">"Search the web for today's tech news"</div>
             </div>
-            <div class="suggestion-card" data-cmd="open chrome">
+            <div class="suggestion-card" data-cmd="Index the project folder and summarize its architecture">
                 <div class="suggestion-header">
-                    <i data-lucide="external-link" style="width: 16px; height: 16px;"></i> Launch App
+                    <i data-lucide="database" style="width: 18px; height: 18px;"></i> Document Vault
                 </div>
-                <div class="suggestion-text">"Open Google Chrome browser"</div>
+                <div class="suggestion-text">"Index the project folder and summarize it"</div>
             </div>
-            <div class="suggestion-card" data-cmd="search indexed vaults for project info">
+            <div class="suggestion-card" data-cmd="Play some focus music on Spotify">
                 <div class="suggestion-header">
-                    <i data-lucide="search" style="width: 16px; height: 16px;"></i> Vault Search
+                    <i data-lucide="music" style="width: 18px; height: 18px;"></i> Spotify
                 </div>
-                <div class="suggestion-text">"Search indexed vaults for project info"</div>
+                <div class="suggestion-text">"Play some focus music on Spotify"</div>
             </div>
-            <div class="suggestion-card" data-cmd="show help info">
+            <div class="suggestion-card" data-cmd="Show me a python script to list all files in a directory recursively">
                 <div class="suggestion-header">
-                    <i data-lucide="help-circle" style="width: 16px; height: 16px;"></i> Show Help
+                    <i data-lucide="code" style="width: 18px; height: 18px;"></i> Coding
                 </div>
-                <div class="suggestion-text">"How do I index my local PDF folders?"</div>
+                <div class="suggestion-text">"Write a python script to list files"</div>
             </div>
         </div>
     `;
     
     container.appendChild(welcome);
     
-    // Bind click events to suggestion cards
-    const cards = welcome.querySelectorAll('.suggestion-card');
-    cards.forEach(card => {
+    welcome.querySelectorAll('.suggestion-card').forEach(card => {
         card.addEventListener('click', () => {
-            const cmd = card.getAttribute('data-cmd');
             const input = document.getElementById('user-input');
             if (input) {
-                input.value = cmd;
+                input.value = card.getAttribute('data-cmd');
                 input.style.height = 'auto';
-                input.style.height = (input.scrollHeight - 4) + 'px';
-                document.getElementById('send-btn').disabled = false;
+                input.style.height = input.scrollHeight + 'px';
+                updateSendButtonState();
                 input.focus();
             }
         });
@@ -548,14 +479,12 @@ function renderWelcomeScreen(container) {
     if (window.lucide) lucide.createIcons();
 }
 
-// Append a user speech bubble
 function appendUserMessage(content, animate = true) {
     const container = document.getElementById('chat-messages');
     if (!container) return;
     
-    // Clear welcome screen if present
     const welcome = container.querySelector('.welcome-container');
-    if (welcome) container.innerHTML = '';
+    if (welcome) welcome.remove();
     
     const msg = document.createElement('div');
     msg.className = 'message user';
@@ -567,17 +496,10 @@ function appendUserMessage(content, animate = true) {
             <div class="message-bubble">${escapeHtml(content)}</div>
         </div>
     `;
-    
     container.appendChild(msg);
     if (animate) scrollToBottom();
 }
 
-// Helper to escape HTML characters
-function escapeHtml(str) {
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-// Append an assistant reply bubble (which might include thinking logs and tool cards)
 function appendAssistantMessage(msgData, animate = true) {
     const container = document.getElementById('chat-messages');
     if (!container) return;
@@ -588,36 +510,27 @@ function appendAssistantMessage(msgData, animate = true) {
     
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar';
-    avatar.innerHTML = 'A';
+    avatar.textContent = 'S';
     msg.appendChild(avatar);
     
     const body = document.createElement('div');
     body.className = 'message-body';
     
-    // 1. Thinking block
     if (msgData.thinking) {
-        const thinkingBox = createThinkingBoxElement(msgData.thinking, false);
-        body.appendChild(thinkingBox);
+        body.appendChild(createThinkingBoxElement(msgData.thinking, false));
     }
     
-    // 2. Tool Calls
     if (msgData.tool_calls) {
         msgData.tool_calls.forEach((tc, idx) => {
-            const toolName = tc.function.name;
             const args = tc.function.arguments;
             let result = '';
-            
-            // Try matching results
             if (msgData.tool_results && msgData.tool_results[idx]) {
                 result = msgData.tool_results[idx].content;
             }
-            
-            const toolCard = createToolCardElement(toolName, args, result, false);
-            body.appendChild(toolCard);
+            body.appendChild(createToolCardElement(tc.function.name, args, result, false));
         });
     }
     
-    // 3. Final Content
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
     bubble.innerHTML = marked.parse(msgData.content || '');
@@ -625,14 +538,11 @@ function appendAssistantMessage(msgData, animate = true) {
     
     msg.appendChild(body);
     container.appendChild(msg);
-    
-    // Enable copy buttons for code blocks
     addCopyButtons(bubble);
     
     if (animate) scrollToBottom();
 }
 
-// Create a collapsible Thinking Log panel
 function createThinkingBoxElement(text, isStreaming = false) {
     const box = document.createElement('div');
     box.className = 'thinking-box';
@@ -640,28 +550,18 @@ function createThinkingBoxElement(text, isStreaming = false) {
     
     const header = document.createElement('div');
     header.className = 'thinking-header';
-    
-    const title = document.createElement('div');
-    title.className = 'thinking-title';
-    title.innerHTML = `<i data-lucide="brain" style="width: 14px; height: 14px;"></i> Thinking Process`;
-    
-    const meta = document.createElement('div');
-    meta.className = 'thinking-meta';
-    
-    if (isStreaming) {
-        meta.innerHTML = `
-            <span class="thinking-pulse">
-                <span class="thinking-dot"></span>
-                <span class="thinking-dot"></span>
-                <span class="thinking-dot"></span>
-            </span>
-        `;
-    } else {
-        meta.innerHTML = `<i data-lucide="chevron-down" class="thinking-arrow" style="width: 14px; height: 14px;"></i>`;
-    }
-    
-    header.appendChild(title);
-    header.appendChild(meta);
+    header.innerHTML = `
+        <div class="thinking-title">
+            <i data-lucide="brain" style="width: 14px; height: 14px;"></i> Thinking Process
+        </div>
+        <div class="thinking-meta">
+            ${isStreaming ? `
+                <span class="thinking-pulse">
+                    <span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span>
+                </span>
+            ` : `<i data-lucide="chevron-down" class="thinking-arrow" style="width: 14px; height: 14px;"></i>`}
+        </div>
+    `;
     box.appendChild(header);
     
     const content = document.createElement('div');
@@ -669,119 +569,87 @@ function createThinkingBoxElement(text, isStreaming = false) {
     content.textContent = text;
     box.appendChild(content);
     
-    // Event listener to toggle collapse
-    header.addEventListener('click', () => {
-        box.classList.toggle('collapsed');
-        const arrow = meta.querySelector('.thinking-arrow');
-        if (arrow) {
-            // Done toggle via class, arrow is handled in CSS
-        }
-    });
+    header.addEventListener('click', () => box.classList.toggle('collapsed'));
     
     if (window.lucide) lucide.createIcons();
     return box;
 }
 
-// Create an expandable Tool Execution card
 function createToolCardElement(name, args, result = '', isExecuting = false) {
     const card = document.createElement('div');
     card.className = 'tool-card';
     if (!isExecuting) card.classList.add('collapsed');
     
+    let statusIcon = isExecuting ? '<i data-lucide="loader" class="thinking-pulse" style="width: 14px; height: 14px;"></i>' : 
+                     (result && !result.toLowerCase().startsWith('error') ? '<i data-lucide="check" style="width: 14px; height: 14px; color: var(--accent-green);"></i>' : '<i data-lucide="alert-circle" style="width: 14px; height: 14px; color: var(--accent-red);"></i>');
+    
     const header = document.createElement('div');
     header.className = 'tool-header';
-    
-    const info = document.createElement('div');
-    info.className = 'tool-info';
-    
-    let statusIcon = '🔧';
-    if (isExecuting) statusIcon = '⟳';
-    else if (result && !result.toLowerCase().startsWith('error')) statusIcon = '✓';
-    else if (result) statusIcon = '⚠';
-    
-    info.innerHTML = `
-        <span class="tool-msg-icon">${statusIcon}</span>
-        <span>Executed tool: <code style="color: var(--accent-amber); font-weight: bold; background: transparent; padding: 0;">${name}</code></span>
+    header.innerHTML = `
+        <div class="tool-info">
+            ${statusIcon}
+            <span>Executed tool: <code>${name}</code></span>
+        </div>
+        <i data-lucide="chevron-down" class="tool-arrow" style="width: 16px; height: 16px;"></i>
     `;
-    
-    const arrow = document.createElement('i');
-    arrow.className = 'tool-arrow';
-    arrow.setAttribute('data-lucide', 'chevron-down');
-    arrow.style.width = '14px';
-    arrow.style.height = '14px';
-    arrow.style.color = 'var(--text-muted)';
-    
-    header.appendChild(info);
-    header.appendChild(arrow);
     card.appendChild(header);
     
     const content = document.createElement('div');
     content.className = 'tool-result';
-    
-    // Format display content: args + result
     let details = `Arguments:\n${JSON.stringify(args, null, 2)}\n\n`;
-    if (result) {
-        details += `Result:\n${result}`;
-    } else if (isExecuting) {
-        details += `Running in background...`;
-    }
+    if (result) details += `Result:\n${result}`;
+    else if (isExecuting) details += `Running in background...`;
     
     content.textContent = details;
     card.appendChild(content);
     
-    header.addEventListener('click', () => {
-        card.classList.toggle('collapsed');
-    });
-    
+    header.addEventListener('click', () => card.classList.toggle('collapsed'));
     if (window.lucide) lucide.createIcons();
     return card;
 }
 
-// Scroll chat container to bottom
-function scrollToBottom() {
-    const container = document.getElementById('chat-messages');
-    if (container) {
-        container.scrollTop = container.scrollHeight;
-    }
+function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// Add copy buttons to code blocks
+function scrollToBottom() {
+    const container = document.getElementById('chat-messages');
+    if (container) container.scrollTop = container.scrollHeight;
+}
+
 function addCopyButtons(container) {
-    const preBlocks = container.querySelectorAll('pre');
-    preBlocks.forEach(pre => {
-        // Prevent adding multiple buttons
+    container.querySelectorAll('pre').forEach(pre => {
         if (pre.querySelector('.copy-btn')) return;
         
         const btn = document.createElement('button');
-        btn.className = 'btn btn-secondary btn-sm copy-btn';
-        btn.style.position = 'absolute';
-        btn.style.top = '8px';
-        btn.style.right = '8px';
-        btn.style.width = 'auto';
-        btn.style.padding = '4px 8px';
-        btn.style.fontSize = '0.75rem';
-        btn.innerHTML = `<i data-lucide="copy" style="width: 12px; height: 12px;"></i> Copy`;
-        
+        btn.className = 'copy-btn';
+        btn.innerHTML = `<i data-lucide="copy" style="width: 14px; height: 14px;"></i> Copy`;
         pre.appendChild(btn);
         
         btn.addEventListener('click', () => {
             const code = pre.querySelector('code').textContent;
             navigator.clipboard.writeText(code).then(() => {
-                btn.innerHTML = 'Copied ✓';
-                btn.style.color = 'var(--accent-teal)';
+                btn.innerHTML = `<i data-lucide="check" style="width: 14px; height: 14px;"></i> Copied`;
                 setTimeout(() => {
-                    btn.innerHTML = `<i data-lucide="copy" style="width: 12px; height: 12px;"></i> Copy`;
-                    btn.style.color = '';
+                    btn.innerHTML = `<i data-lucide="copy" style="width: 14px; height: 14px;"></i> Copy`;
                     if (window.lucide) lucide.createIcons();
-                }, 1500);
+                }, 2000);
             });
         });
     });
-    
     if (window.lucide) lucide.createIcons();
 }
 
-// ── SSE Chat Streaming Logic ─────────────────────────────────────────
+// ── SSE Streaming Logic ──────────────────────────────────────────────
+function resetStreamingState() {
+    state.currentAssistantBody = null;
+    state.currentAssistantBubble = null;
+    state.currentThinkingBox = null;
+    state.currentAssistantText = '';
+    state.currentAssistantThinkingText = '';
+    state.toolCards = {};
+    state.toolCallCounter = 0;
+}
 
 async function sendMessage() {
     const inputArea = document.getElementById('user-input');
@@ -790,34 +658,28 @@ async function sendMessage() {
     const text = inputArea.value.trim();
     if (!text) return;
     
-    // Clear input
     inputArea.value = '';
     inputArea.style.height = 'auto';
-    document.getElementById('send-btn').disabled = true;
+    updateSendButtonState();
     
-    // Display user bubble
     appendUserMessage(text);
-    showLoadingPlaceholder();
     
-    // Lock state
+    // Initialize state for the new response
     state.isGenerating = true;
+    resetStreamingState();
     updateSendButtonState();
     
     currentAbortController = new AbortController();
-    const signal = currentAbortController.signal;
     
-    // Start streaming from server
     try {
         const response = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: text }),
-            signal: signal
+            signal: currentAbortController.signal
         });
         
-        if (!response.ok) {
-            throw new Error(`Server returned HTTP ${response.status}`);
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
@@ -829,58 +691,39 @@ async function sendMessage() {
             
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split('\n');
-            buffer = lines.pop(); // Hold onto partial line
+            buffer = lines.pop(); 
             
             for (const line of lines) {
                 if (line.startsWith('data: ')) {
                     try {
-                        const eventData = JSON.parse(line.substring(6));
-                        handleSSEEvent(eventData);
+                        handleSSEEvent(JSON.parse(line.substring(6)));
                     } catch (e) {
-                        console.error('Error parsing SSE event json:', e, line);
+                        console.error('SSE JSON error:', e);
                     }
                 }
             }
         }
     } catch (err) {
         if (err.name === 'AbortError') {
-            appendStatusMessage('Interrupted. Follow-up prompts can be sent.', 'primary');
+            appendStatusMessage('Interrupted by user.', 'primary');
         } else {
-            console.error('Streaming failed:', err);
-            appendStatusMessage('⚠ Connection error: Make sure the backend server is running and Ollama is active.', 'red');
+            console.error('Stream error:', err);
+            appendStatusMessage('Connection error. Is the server running?', 'red');
         }
-    } finally {
-        // Unlock state
-        state.isGenerating = false;
-        currentAbortController = null;
-        updateSendButtonState();
-        hideLoadingPlaceholder();
-        
-        // Final refresh
-        loadSessionState();
+        finishGeneration(false);
     }
 }
 
-// Handle individual Server-Sent Events from backend
 function handleSSEEvent(event) {
-    const chatContainer = document.getElementById('chat-messages');
-    if (!chatContainer) return;
-    
-    // 1. Status notices
     if (event.type === 'status') {
         appendStatusMessage(event.message, event.color === 'red' ? 'red' : 'primary');
     }
-    
-    // 2. Thinking phase start
     else if (event.type === 'thinking_start') {
         const body = getOrCreateAssistantBodyElement();
-        state.currentAssistantThinkingText = '';
         state.currentThinkingBox = createThinkingBoxElement('', true);
         body.appendChild(state.currentThinkingBox);
         scrollToBottom();
     }
-    
-    // 3. Thinking content chunk
     else if (event.type === 'thinking_chunk') {
         if (state.currentThinkingBox) {
             state.currentAssistantThinkingText += event.text;
@@ -888,8 +731,6 @@ function handleSSEEvent(event) {
             if (contentDiv) contentDiv.textContent = state.currentAssistantThinkingText;
         }
     }
-    
-    // 4. Thinking phase end
     else if (event.type === 'thinking_end') {
         if (state.currentThinkingBox) {
             state.currentThinkingBox.classList.add('collapsed');
@@ -900,154 +741,128 @@ function handleSSEEvent(event) {
             }
         }
     }
-    
-    // 5. Final content text chunk
     else if (event.type === 'content_chunk') {
         const body = getOrCreateAssistantBodyElement();
-        
-        // If the markdown bubble isn't created yet, create it
         if (!state.currentAssistantBubble) {
             state.currentAssistantBubble = document.createElement('div');
             state.currentAssistantBubble.className = 'message-bubble';
             body.appendChild(state.currentAssistantBubble);
         }
-        
         state.currentAssistantText += event.text;
         state.currentAssistantBubble.innerHTML = marked.parse(state.currentAssistantText);
         addCopyButtons(state.currentAssistantBubble);
         scrollToBottom();
     }
-    
-    // 6. Tool execution start
     else if (event.type === 'tool_start') {
         const body = getOrCreateAssistantBodyElement();
+        state.toolCallCounter++;
+        const callId = `tool_${state.toolCallCounter}`;
+        
         const card = createToolCardElement(event.name, event.arguments, '', true);
         body.appendChild(card);
-        state.toolCards[event.name] = card;
+        state.toolCards[callId] = card;
+        
+        // Temporarily store the ID on the event name (a bit hacky but works since backend doesn't send IDs)
+        // For multiple concurrent tools this would fail, but Selene tools run sequentially
+        state.lastToolCallId = callId;
         scrollToBottom();
     }
-    
-    // 7. Tool execution end
     else if (event.type === 'tool_end') {
-        const card = state.toolCards[event.name];
+        const callId = state.lastToolCallId;
+        const card = state.toolCards[callId];
         if (card) {
-            const name = event.name;
-            const res = event.result;
-            
-            // Replace with completed tool card
-            const newCard = createToolCardElement(name, {}, res, false);
+            const newCard = createToolCardElement(event.name, {}, event.result, false);
             card.parentNode.replaceChild(newCard, card);
-            state.toolCards[name] = newCard;
+            state.toolCards[callId] = newCard;
         }
+        
+        // Reset bubbles so the post-tool response gets a fresh bubble/body block
+        state.currentAssistantBody = null;
+        state.currentAssistantBubble = null;
+        state.currentAssistantText = '';
         scrollToBottom();
+    }
+    else if (event.type === 'done') {
+        finishGeneration(false);
     }
 }
 
-// Get or spawn the active assistant DOM message wrapper
 function getOrCreateAssistantBodyElement() {
-    hideLoadingPlaceholder();
-    const chatContainer = document.getElementById('chat-messages');
+    // If we have an active body for this turn, return it
+    if (state.currentAssistantBody) return state.currentAssistantBody;
     
-    // If there is an active assistant bubble we are streaming into, return its body
-    const messages = chatContainer.querySelectorAll('.message.assistant');
-    if (messages.length > 0 && state.isGenerating) {
-        const lastMsg = messages[messages.length - 1];
-        // Ensure this message was spawned in the current user turn
-        const body = lastMsg.querySelector('.message-body');
-        if (body) return body;
-    }
-    
-    // Otherwise, create a new assistant block
-    const welcome = chatContainer.querySelector('.welcome-container');
-    if (welcome) chatContainer.innerHTML = '';
-    
+    // Otherwise, create a new assistant message wrapper
+    const container = document.getElementById('chat-messages');
     const msg = document.createElement('div');
     msg.className = 'message assistant';
     
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar';
-    avatar.textContent = 'A';
+    avatar.textContent = 'S';
     msg.appendChild(avatar);
     
     const body = document.createElement('div');
     body.className = 'message-body';
     msg.appendChild(body);
+    container.appendChild(msg);
     
-    chatContainer.appendChild(msg);
+    state.currentAssistantBody = body;
     return body;
 }
 
-// Append a system status bubble
-function appendStatusMessage(text, type = 'primary') {
-    const chatContainer = document.getElementById('chat-messages');
-    if (!chatContainer) return;
+function finishGeneration(wasAborted = false) {
+    if (!state.isGenerating) return;
     
-    const welcome = chatContainer.querySelector('.welcome-container');
-    if (welcome) chatContainer.innerHTML = '';
+    state.isGenerating = false;
+    currentAbortController = null;
+    updateSendButtonState();
+    
+    if (state.currentThinkingBox) {
+        state.currentThinkingBox.classList.add('collapsed');
+        const meta = state.currentThinkingBox.querySelector('.thinking-meta');
+        if (meta) {
+            meta.innerHTML = `<i data-lucide="chevron-down" class="thinking-arrow" style="width: 14px; height: 14px;"></i>`;
+        }
+    }
+    if (window.lucide) lucide.createIcons();
+    
+    loadSessionState();
+}
+
+function appendStatusMessage(text, type = 'primary') {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
     
     const row = document.createElement('div');
-    row.className = 'message status-msg';
+    row.className = 'status-msg-bubble';
     
-    let icon = '🔧';
-    if (text.startsWith('✓')) icon = '✓';
-    else if (text.startsWith('⚠')) icon = '⚠';
+    let icon = 'info';
+    if (type === 'red') icon = 'alert-triangle';
+    if (text.startsWith('✓')) icon = 'check-circle';
     
     row.innerHTML = `
-        <div class="status-msg-bubble">
-            <span class="status-msg-icon" style="color: var(--accent-${type});">${icon}</span>
-            <span>${escapeHtml(text)}</span>
-        </div>
+        <i data-lucide="${icon}" class="status-msg-icon" style="color: var(--accent-${type});"></i>
+        <span>${escapeHtml(text.replace('✓ ', '').replace('⚠ ', ''))}</span>
     `;
-    
-    chatContainer.appendChild(row);
+    container.appendChild(row);
+    if (window.lucide) lucide.createIcons();
     scrollToBottom();
 }
 
 function updateSendButtonState() {
     const sendBtn = document.getElementById('send-btn');
-    const userInput = document.getElementById('user-input');
-    if (!sendBtn) return;
+    const inputArea = document.getElementById('user-input');
+    if (!sendBtn || !inputArea) return;
     
     if (state.isGenerating) {
         sendBtn.disabled = false;
-        sendBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide-icon"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>';
-        sendBtn.classList.add('stop-btn');
-        sendBtn.title = 'Stop generation';
+        sendBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>';
+        sendBtn.className = 'send-btn stop-btn';
     } else {
-        const hasText = userInput && userInput.value.trim();
+        const hasText = inputArea.value.trim().length > 0;
         sendBtn.disabled = !hasText;
-        sendBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide-icon"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>';
-        sendBtn.classList.remove('stop-btn');
-        sendBtn.title = 'Send message';
+        sendBtn.innerHTML = '<i data-lucide="arrow-up" style="width: 18px; height: 18px;"></i>';
+        sendBtn.className = 'send-btn';
     }
-}
-
-function showLoadingPlaceholder() {
-    const chatContainer = document.getElementById('chat-messages');
-    if (!chatContainer) return;
-    
-    hideLoadingPlaceholder();
-    
-    const loader = document.createElement('div');
-    loader.className = 'message assistant loading-placeholder-bubble';
-    loader.id = 'loading-placeholder-bubble';
-    loader.innerHTML = `
-        <div class="message-avatar">A</div>
-        <div class="message-body">
-            <div class="loading-wave">
-                <span></span>
-                <span></span>
-                <span></span>
-            </div>
-        </div>
-    `;
-    chatContainer.appendChild(loader);
-    scrollToBottom();
-}
-
-function hideLoadingPlaceholder() {
-    const loader = document.getElementById('loading-placeholder-bubble');
-    if (loader) {
-        loader.remove();
-    }
+    if (window.lucide) lucide.createIcons();
 }

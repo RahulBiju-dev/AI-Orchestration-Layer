@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-agent/web.py — Web Server for the Gemma Agent Modern UI.
+agent/web.py — Web Server for the Selene AI Agent UI.
 
 Serves static frontend files and exposes HTTP endpoints / SSE streaming for interaction.
 """
@@ -345,8 +345,20 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_json_response(200, response_data)
             return
             
+        elif self.path == '/favicon.ico':
+            self.send_response(204)
+            self.end_headers()
+            return
+            
         else:
             self.send_error(404, "Not Found")
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
 
     def do_POST(self):
         # 1. Save Settings
@@ -451,7 +463,7 @@ def start_web_server():
         server = ThreadingHTTPServer((host, port), AgentHTTPRequestHandler)
         
     url = f"http://127.0.0.1:{port}"
-    print(f"\n🚀 Starting Gemma Agent Web Interface at {url}")
+    print(f"\n🚀 Starting Selene Web Interface at {url}")
     
     if host == '0.0.0.0':
         local_ip = "127.0.0.1"

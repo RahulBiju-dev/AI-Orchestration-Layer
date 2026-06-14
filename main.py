@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py — Entry point for the Gemma CLI Agent.
+main.py — Entry point for the Selene AI Agent.
 
 Creates the custom Ollama model from the Modelfile (if needed)
 and launches the interactive chat loop.

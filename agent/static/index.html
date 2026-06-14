@@ -2,237 +2,231 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemma Agent — Modern UI</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Selene — AI Assistant</title>
     
-    <!-- Google Fonts: Plus Jakarta Sans for display, JetBrains Mono for code/thinking -->
+    <!-- Fonts: Literata (Serif) & JetBrains Mono -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Literata:opsz,wght@7..72,300;7..72,400;7..72,500;7..72,600;7..72,700&display=swap" rel="stylesheet">
     
-    <!-- Highlight.js theme -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css">
+    <!-- Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
     
-    <!-- Custom styling -->
+    <!-- Markdown & Syntax Highlighting -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    
+    <!-- App Styles -->
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
     <div class="app-layout">
+        
         <!-- Sidebar -->
-        <aside class="sidebar" id="sidebar">
+        <aside id="sidebar" class="sidebar">
             <div class="sidebar-header">
                 <div class="logo">
-                    <div class="logo-icon"></div>
+                    <div class="logo-icon">
+                        <!-- Crescent moon SVG -->
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: var(--bg-paper);"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                    </div>
                     <div class="logo-text">
-                        <span class="logo-title">GEMMA</span>
-                        <span class="logo-subtitle">AGENT</span>
+                        <span class="logo-title">SELENE</span>
+                        <span class="logo-subtitle">AI AGENT</span>
                     </div>
                 </div>
-                <button class="icon-btn close-sidebar-btn" id="close-sidebar" aria-label="Close Sidebar">
+                <button id="close-sidebar" class="icon-btn close-sidebar-btn" style="display: none;">
                     <i data-lucide="x"></i>
                 </button>
             </div>
             
             <div class="sidebar-scroll">
-                <!-- Action Buttons -->
                 <div class="sidebar-actions">
-                    <button class="btn btn-primary btn-new" id="new-chat-btn">
-                        <i data-lucide="plus"></i> New Chat
-                    </button>
-                    <button class="btn btn-secondary" id="save-session-btn">
-                        <i data-lucide="save"></i> Save Session
+                    <button id="new-chat-btn" class="btn btn-primary">
+                        <i data-lucide="plus" style="width: 16px; height: 16px;"></i> New Conversation
                     </button>
                 </div>
                 
-                <!-- Sidebar Tabs -->
                 <div class="sidebar-tabs">
-                    <button class="tab-btn active" data-target="sessions-tab">Sessions</button>
-                    <button class="tab-btn" data-target="settings-tab">Settings</button>
+                    <button class="tab-btn active" data-target="tab-sessions">Sessions</button>
+                    <button class="tab-btn" data-target="tab-settings">Settings</button>
                 </div>
-
-                <div id="sessions-tab" class="tab-content active">
-                    <!-- Saved Sessions -->
+                
+                <!-- Sessions Tab -->
+                <div id="tab-sessions" class="tab-content active">
                     <div class="sidebar-section">
-                        <h3 class="section-title">Saved Sessions</h3>
-                        <div class="sessions-list" id="sessions-list">
-                            <!-- Populated dynamically -->
+                        <div class="section-title">Saved Sessions</div>
+                        <div id="sessions-list" class="sessions-list">
                             <div class="loading-placeholder">Loading sessions...</div>
                         </div>
                     </div>
                 </div>
                 
-                <div id="settings-tab" class="tab-content">
-                    <!-- Configuration Settings -->
-                <div class="sidebar-section">
-                    <h3 class="section-title">Agent Settings</h3>
-                    
-                    <div class="setting-item">
-                        <div class="setting-label">
-                            <span>Temperature</span>
-                            <span class="setting-value" id="temp-val">0.7</span>
+                <!-- Settings Tab -->
+                <div id="tab-settings" class="tab-content">
+                    <div class="sidebar-section">
+                        <div class="section-title">Model Parameters</div>
+                        
+                        <div class="setting-item">
+                            <div class="setting-label">
+                                <span>Temperature</span>
+                                <span id="temp-val" class="setting-value">0.4</span>
+                            </div>
+                            <input type="range" id="param-temperature" class="slider" min="0" max="2" step="0.1" value="0.4">
                         </div>
-                        <input type="range" class="slider" id="param-temperature" min="0" max="1.5" step="0.1" value="0.7">
-                        <div class="slider-labels">
-                            <span>Precise</span>
-                            <span>Creative</span>
+                        
+                        <div class="setting-item">
+                            <div class="setting-label">
+                                <span>Top-P</span>
+                                <span id="topp-val" class="setting-value">0.9</span>
+                            </div>
+                            <input type="range" id="param-top_p" class="slider" min="0" max="1" step="0.05" value="0.9">
+                        </div>
+                        
+                        <div class="setting-item">
+                            <div class="setting-label">
+                                <span>Top-K</span>
+                                <span id="topk-val" class="setting-value">40</span>
+                            </div>
+                            <input type="range" id="param-top_k" class="slider" min="1" max="100" step="1" value="40">
                         </div>
                     </div>
                     
-                    <div class="setting-item">
-                        <div class="setting-label">
-                            <span>Top-P</span>
-                            <span class="setting-value" id="topp-val">0.9</span>
+                    <div class="sidebar-section">
+                        <div class="section-title">Behavior</div>
+                        
+                        <div class="setting-item toggle-item">
+                            <div class="setting-details">
+                                <span class="setting-name">Conversation History</span>
+                                <span class="setting-desc">Remember past messages</span>
+                            </div>
+                            <label class="switch">
+                                <input type="checkbox" id="setting-history" checked>
+                                <span class="switch-slider"></span>
+                            </label>
                         </div>
-                        <input type="range" class="slider" id="param-top_p" min="0" max="1" step="0.05" value="0.9">
+                        
+                        <div class="setting-item toggle-item">
+                            <div class="setting-details">
+                                <span class="setting-name">Thinking Process</span>
+                                <span class="setting-desc">Show model reasoning</span>
+                            </div>
+                            <label class="switch">
+                                <input type="checkbox" id="setting-think" checked>
+                                <span class="switch-slider"></span>
+                            </label>
+                        </div>
                     </div>
                     
-                    <div class="setting-item">
-                        <div class="setting-label">
-                            <span>Top-K</span>
-                            <span class="setting-value" id="topk-val">40</span>
-                        </div>
-                        <input type="range" class="slider" id="param-top_k" min="1" max="100" step="1" value="40">
+                    <div class="sidebar-section">
+                        <div class="section-title">System Prompt (Override)</div>
+                        <textarea id="system-prompt" class="textarea-prompt" placeholder="Leave blank to use default Selene persona..."></textarea>
+                        <button id="apply-prompt-btn" class="btn btn-secondary btn-sm">Apply Changes</button>
                     </div>
-                    
-                    <div class="setting-item toggle-item">
-                        <div class="setting-details">
-                            <span class="setting-name">Conversation History</span>
-                            <span class="setting-desc">Enable memory across turns</span>
-                        </div>
-                        <label class="switch">
-                            <input type="checkbox" id="setting-history" checked>
-                            <span class="switch-slider"></span>
-                        </label>
-                    </div>
-                    
-                    <div class="setting-item toggle-item">
-                        <div class="setting-details">
-                            <span class="setting-name">Model Thinking</span>
-                            <span class="setting-desc">Stream reasoning progress</span>
-                        </div>
-                        <label class="switch">
-                            <input type="checkbox" id="setting-think" checked>
-                            <span class="switch-slider"></span>
-                        </label>
-                    </div>
-                </div>
-                
-                <!-- Custom System Prompt -->
-                <div class="sidebar-section">
-                    <h3 class="section-title">System Prompt Override</h3>
-                    <textarea class="textarea-prompt" id="system-prompt" placeholder="Enter custom agent instructions..."></textarea>
-                    <button class="btn btn-secondary btn-sm" id="apply-prompt-btn">Apply Prompt</button>
                 </div>
             </div>
-        </div>
             
             <div class="sidebar-footer">
-                <span class="version-label">v1.2.0-modern</span>
+                <button id="save-session-btn" class="btn btn-secondary btn-sm" style="width: 100%; margin-bottom: 12px;">
+                    <i data-lucide="save" style="width: 14px; height: 14px;"></i> Save Session
+                </button>
+                <div>Selene AI Agent v1.0</div>
             </div>
         </aside>
         
-        <!-- Main Chat Area -->
+        <!-- Main Content -->
         <main class="main-content">
-            <header class="navbar">
+            <nav class="navbar">
                 <div class="nav-left">
-                    <button class="icon-btn menu-btn" id="menu-toggle" aria-label="Open Sidebar">
+                    <button id="menu-toggle" class="icon-btn menu-btn" title="Toggle Sidebar">
                         <i data-lucide="menu"></i>
                     </button>
-                    <div class="navbar-info">
-                        <h2 class="nav-session-title" id="current-session-title">Active Session</h2>
-                        <div class="nav-badges">
-                            <span class="badge" id="model-badge">gemma-agent</span>
-                        </div>
-                    </div>
                 </div>
-                
                 <div class="nav-right">
-                    <div class="status-indicator">
-                        <span class="status-dot online"></span>
-                        <span class="status-text" id="connection-status">Ollama Online</span>
+                    <div class="status-indicator" title="Ollama Status: Checking...">
+                        <div class="status-dot online"></div>
                     </div>
-                    <button class="icon-btn" id="clear-history-btn" title="Clear Chat History">
-                        <i data-lucide="trash-2"></i>
-                    </button>
-                    <button class="icon-btn" id="help-btn" title="Help & Shortcuts">
+                    <button id="help-btn" class="icon-btn" title="Help">
                         <i data-lucide="help-circle"></i>
                     </button>
+                    <button id="clear-history-btn" class="icon-btn" title="Clear History">
+                        <i data-lucide="trash-2"></i>
+                    </button>
                 </div>
-            </header>
+            </nav>
             
-            <!-- Message List -->
-            <div class="chat-messages" id="chat-messages">
-                <!-- If empty, shows welcome dashboard -->
+            <div id="chat-messages" class="chat-messages">
+                <!-- Welcome Screen / Messages will be injected here -->
             </div>
             
-            <!-- Input Container -->
             <div class="input-container">
                 <div class="input-wrapper">
-                    <textarea class="chat-input" id="user-input" rows="1" placeholder="Ask Gemma anything, or type a file path to index..."></textarea>
-                    <button class="send-btn" id="send-btn" disabled>
-                        <i data-lucide="send"></i>
+                    <textarea id="user-input" class="chat-input" placeholder="Message Selene..." rows="1"></textarea>
+                    <button id="send-btn" class="send-btn" disabled>
+                        <i data-lucide="arrow-up" style="width: 18px; height: 18px;"></i>
                     </button>
                 </div>
                 <div class="input-footer">
-                    <span>Press <kbd>Enter</kbd> to send, <kbd>Shift</kbd>+<kbd>Enter</kbd> for newline.</span>
+                    Press <kbd>Enter</kbd> to send, <kbd>Shift</kbd> + <kbd>Enter</kbd> for new line. Type <kbd>/</kbd> for commands.
                 </div>
             </div>
         </main>
+        
     </div>
 
     <!-- Modals -->
-    <!-- Save Session Modal -->
-    <div class="modal-overlay" id="save-modal">
+    <div id="save-modal" class="modal-overlay">
         <div class="modal">
             <div class="modal-header">
-                <h3>Save Current Session</h3>
+                <h3>Save Session</h3>
                 <button class="icon-btn close-modal-btn"><i data-lucide="x"></i></button>
             </div>
             <div class="modal-body">
-                <p>Provide a name to save this conversation session.</p>
-                <input type="text" class="modal-input" id="save-session-name" placeholder="e.g. project_discussion">
+                <p>Enter a name for this conversation to save it for later.</p>
+                <input type="text" id="save-session-name" class="modal-input" placeholder="e.g., Project Planning">
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary close-modal-btn">Cancel</button>
-                <button class="btn btn-primary" id="confirm-save-btn">Save Session</button>
+                <button id="confirm-save-btn" class="btn btn-primary">Save</button>
             </div>
         </div>
     </div>
-
-    <!-- Help Modal -->
-    <div class="modal-overlay" id="help-modal">
+    
+    <div id="help-modal" class="modal-overlay">
         <div class="modal">
             <div class="modal-header">
-                <h3>Agent Help & Capabilities</h3>
+                <h3>Agent Commands</h3>
                 <button class="icon-btn close-modal-btn"><i data-lucide="x"></i></button>
             </div>
             <div class="modal-body">
                 <div class="help-section">
-                    <h4>🛠 Available Tools</h4>
-                    <p>The agent automatically executes these tools in the background when needed:</p>
-                    <ul class="help-list">
-                        <li><strong>Spotify Control:</strong> Play music (e.g. "play some rock music").</li>
-                        <li><strong>App Launcher:</strong> Open local applications (e.g. "open chrome").</li>
-                        <li><strong>Browser:</strong> Open URLs and default web browsers.</li>
-                        <li><strong>File Management:</strong> Read, write, view, and list files.</li>
-                        <li><strong>Knowledge Vault:</strong> Search and index local folders or documents (PDF, DOCX, etc.).</li>
-                    </ul>
+                    <h4>Available Tools</h4>
+                    <div class="help-list">
+                        <span>🔍 Web Search (DuckDuckGo)</span>
+                        <span>📄 Read Documents (PDF, DOCX, TXT)</span>
+                        <span>💻 View Source Code</span>
+                        <span>🌐 Open Browser URLs</span>
+                        <span>🎵 Control Spotify Playback</span>
+                        <span>📚 Search Indexed Vaults (RAG)</span>
+                        <span>📝 Create Files & Obsidian Notes</span>
+                    </div>
                 </div>
-                <div class="help-section">
-                    <h4>📂 Auto-indexing files</h4>
-                    <p>Type the absolute path of a large file (e.g. PDF or DOCX) in the chat input. The system will detect and automatically index it into the active vault before processing your request.</p>
+                <div class="help-section" style="margin-top: 16px;">
+                    <h4>Slash Commands</h4>
+                    <div class="help-list">
+                        <span><code>/help</code> - Show this menu</span>
+                        <span><code>/clear</code> - Clear current history</span>
+                        <span><code>/vault list</code> - List indexed vaults</span>
+                        <span><code>/vault add &lt;path&gt;</code> - Index a folder/file</span>
+                    </div>
                 </div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-primary close-modal-btn">Close</button>
             </div>
         </div>
     </div>
 
-    <!-- JavaScript libraries -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- App Logic -->
     <script src="/app.js"></script>
 </body>
 </html>
