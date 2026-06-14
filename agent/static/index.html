@@ -44,16 +44,25 @@
                     </button>
                 </div>
                 
-                <!-- Saved Sessions -->
-                <div class="sidebar-section">
-                    <h3 class="section-title">Saved Sessions</h3>
-                    <div class="sessions-list" id="sessions-list">
-                        <!-- Populated dynamically -->
-                        <div class="loading-placeholder">Loading sessions...</div>
+                <!-- Sidebar Tabs -->
+                <div class="sidebar-tabs">
+                    <button class="tab-btn active" data-target="sessions-tab">Sessions</button>
+                    <button class="tab-btn" data-target="settings-tab">Settings</button>
+                </div>
+
+                <div id="sessions-tab" class="tab-content active">
+                    <!-- Saved Sessions -->
+                    <div class="sidebar-section">
+                        <h3 class="section-title">Saved Sessions</h3>
+                        <div class="sessions-list" id="sessions-list">
+                            <!-- Populated dynamically -->
+                            <div class="loading-placeholder">Loading sessions...</div>
+                        </div>
                     </div>
                 </div>
                 
-                <!-- Configuration Settings -->
+                <div id="settings-tab" class="tab-content">
+                    <!-- Configuration Settings -->
                 <div class="sidebar-section">
                     <h3 class="section-title">Agent Settings</h3>
                     
@@ -115,6 +124,7 @@
                     <button class="btn btn-secondary btn-sm" id="apply-prompt-btn">Apply Prompt</button>
                 </div>
             </div>
+        </div>
             
             <div class="sidebar-footer">
                 <span class="version-label">v1.2.0-modern</span>

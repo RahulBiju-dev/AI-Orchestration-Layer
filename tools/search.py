@@ -12,9 +12,9 @@ from ddgs import DDGS
 
 # Map difficulty labels to max result counts.
 _DIFFICULTY_MAP: dict[str, int] = {
-    "easy": 3,
-    "medium": 6,
-    "hard": 12,
+    "easy": 7,
+    "medium": 12,
+    "hard": 16,
 }
 
 
@@ -24,7 +24,7 @@ def web_search(query: str, difficulty: str = "medium") -> str:
     Args:
         query:      The search query string.
         difficulty: One of 'easy', 'medium', or 'hard'.
-                    Controls how many results are fetched (3 / 5 / 10).
+                    Controls how many results are fetched (7 / 12 / 16).
 
     Returns:
         A JSON string containing a list of {title, snippet} dicts,

@@ -20,8 +20,9 @@ const state = {
     currentAssistantBubble: null,
     currentAssistantText: '',
     currentAssistantThinkingText: '',
-    toolCards: {} // Maps tool call indexes or IDs to elements
 };
+
+let currentAbortController = null;
 
 // ── Initialization ───────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -134,20 +135,29 @@ function initEventListeners() {
             userInput.style.height = 'auto';
             userInput.style.height = (userInput.scrollHeight - 4) + 'px';
             
-            // Toggle send button
-            sendBtn.disabled = !userInput.value.trim() || state.isGenerating;
+            updateSendButtonState();
         });
         
         userInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                sendMessage();
+                if (!state.isGenerating) {
+                    sendMessage();
+                }
             }
         });
     }
     
     if (sendBtn) {
-        sendBtn.addEventListener('click', sendMessage);
+        sendBtn.addEventListener('click', () => {
+            if (state.isGenerating) {
+                if (currentAbortController) {
+                    currentAbortController.abort();
+                }
+            } else {
+                sendMessage();
+            }
+        });
     }
     
     // New Chat Button
@@ -200,6 +210,19 @@ function initEventListeners() {
             }
         });
     }
+    // Tab switching
+    const tabBtns = document.querySelectorAll('.tab-btn');
+    tabBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            
+            btn.classList.add('active');
+            const targetId = btn.getAttribute('data-target');
+            const targetContent = document.getElementById(targetId);
+            if (targetContent) targetContent.classList.add('active');
+        });
+    });
 }
 
 // Modal helper
@@ -381,7 +404,7 @@ function renderSavedSessionsList() {
         container.appendChild(item);
     });
     
-    if (window.lucide) lucide.createIcons({ attrs: { class: 'lucide-icon' } });
+    if (window.lucide) lucide.createIcons();
 }
 
 // Load a specific session JSON file
@@ -648,7 +671,6 @@ function createThinkingBoxElement(text, isStreaming = false) {
     
     // Event listener to toggle collapse
     header.addEventListener('click', () => {
-        if (state.isGenerating && isStreaming) return; // Prevent collapse while streaming
         box.classList.toggle('collapsed');
         const arrow = meta.querySelector('.thinking-arrow');
         if (arrow) {
@@ -656,7 +678,7 @@ function createThinkingBoxElement(text, isStreaming = false) {
         }
     });
     
-    if (window.lucide) lucide.createIcons({ attrs: { class: 'lucide-icon' } });
+    if (window.lucide) lucide.createIcons();
     return box;
 }
 
@@ -711,7 +733,7 @@ function createToolCardElement(name, args, result = '', isExecuting = false) {
         card.classList.toggle('collapsed');
     });
     
-    if (window.lucide) lucide.createIcons({ attrs: { class: 'lucide-icon' } });
+    if (window.lucide) lucide.createIcons();
     return card;
 }
 
@@ -756,7 +778,7 @@ function addCopyButtons(container) {
         });
     });
     
-    if (window.lucide) lucide.createIcons({ attrs: { class: 'lucide-icon' } });
+    if (window.lucide) lucide.createIcons();
 }
 
 // ── SSE Chat Streaming Logic ─────────────────────────────────────────
@@ -778,17 +800,18 @@ async function sendMessage() {
     
     // Lock state
     state.isGenerating = true;
-    state.currentThinkingBox = null;
-    state.currentAssistantBubble = null;
-    state.currentAssistantText = '';
-    state.currentAssistantThinkingText = '';
+    updateSendButtonState();
+    
+    currentAbortController = new AbortController();
+    const signal = currentAbortController.signal;
     
     // Start streaming from server
     try {
         const response = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: text })
+            body: JSON.stringify({ message: text }),
+            signal: signal
         });
         
         if (!response.ok) {
@@ -819,13 +842,17 @@ async function sendMessage() {
             }
         }
     } catch (err) {
-        console.error('Streaming failed:', err);
-        appendStatusMessage('⚠ Connection error: Make sure the backend server is running and Ollama is active.', 'red');
+        if (err.name === 'AbortError') {
+            appendStatusMessage('Interrupted. Follow-up prompts can be sent.', 'primary');
+        } else {
+            console.error('Streaming failed:', err);
+            appendStatusMessage('⚠ Connection error: Make sure the backend server is running and Ollama is active.', 'red');
+        }
     } finally {
         // Unlock state
         state.isGenerating = false;
-        const sendBtn = document.getElementById('send-btn');
-        if (sendBtn) sendBtn.disabled = !inputArea.value.trim();
+        currentAbortController = null;
+        updateSendButtonState();
         
         // Final refresh
         loadSessionState();
@@ -839,7 +866,7 @@ function handleSSEEvent(event) {
     
     // 1. Status notices
     if (event.type === 'status') {
-        appendStatusMessage(event.message, event.color === 'red' ? 'red' : 'cyan');
+        appendStatusMessage(event.message, event.color === 'red' ? 'red' : 'primary');
     }
     
     // 2. Thinking phase start
@@ -867,7 +894,7 @@ function handleSSEEvent(event) {
             const meta = state.currentThinkingBox.querySelector('.thinking-meta');
             if (meta) {
                 meta.innerHTML = `<i data-lucide="chevron-down" class="thinking-arrow" style="width: 14px; height: 14px;"></i>`;
-                if (window.lucide) lucide.createIcons({ attrs: { class: 'lucide-icon' } });
+                if (window.lucide) lucide.createIcons();
             }
         }
     }
@@ -948,7 +975,7 @@ function getOrCreateAssistantBodyElement() {
 }
 
 // Append a system status bubble
-function appendStatusMessage(text, type = 'cyan') {
+function appendStatusMessage(text, type = 'primary') {
     const chatContainer = document.getElementById('chat-messages');
     if (!chatContainer) return;
     
@@ -971,4 +998,25 @@ function appendStatusMessage(text, type = 'cyan') {
     
     chatContainer.appendChild(row);
     scrollToBottom();
+}
+
+function updateSendButtonState() {
+    const sendBtn = document.getElementById('send-btn');
+    const userInput = document.getElementById('user-input');
+    if (!sendBtn) return;
+    
+    if (state.isGenerating) {
+        sendBtn.disabled = false;
+        sendBtn.innerHTML = '<i data-lucide="square"></i>';
+        sendBtn.classList.add('stop-btn');
+        sendBtn.title = 'Stop generation';
+    } else {
+        const hasText = userInput && userInput.value.trim();
+        sendBtn.disabled = !hasText;
+        sendBtn.innerHTML = '<i data-lucide="send"></i>';
+        sendBtn.classList.remove('stop-btn');
+        sendBtn.title = 'Send message';
+    }
+    
+    if (window.lucide) lucide.createIcons();
 }
