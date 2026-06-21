@@ -22,9 +22,9 @@
     --font-sans: 'Literata', Georgia, serif;
     --font-mono: 'JetBrains Mono', Consolas, monospace;
     
-    --shadow-subtle: 0 4px 12px rgba(40, 30, 20, 0.05);
-    --shadow-focus: 0 0 0 3px rgba(27, 58, 92, 0.2);
-    --shadow-heavy: 0 10px 30px rgba(40, 30, 20, 0.12);
+    --shadow-subtle: 0 2px 5px rgba(40, 30, 20, 0.1), 0 4px 12px rgba(40, 30, 20, 0.05);
+    --shadow-focus: 0 0 0 3px rgba(27, 58, 92, 0.2), 0 4px 12px rgba(40, 30, 20, 0.1);
+    --shadow-heavy: 0 8px 24px rgba(40, 30, 20, 0.15), 0 12px 40px rgba(40, 30, 20, 0.1);
     
     --transition-smooth: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -224,7 +224,8 @@ body {
 
 .btn-primary:hover {
     background-color: var(--ink-secondary);
-    box-shadow: var(--shadow-subtle);
+    box-shadow: var(--shadow-heavy);
+    transform: translateY(-2px);
 }
 
 .btn-secondary {
@@ -636,12 +637,13 @@ input:checked + .switch-slider:before {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    box-shadow: var(--shadow-subtle);
 }
 
 .suggestion-card:hover {
     border-color: var(--ink-light);
-    box-shadow: var(--shadow-subtle);
-    transform: translateY(-2px);
+    box-shadow: var(--shadow-heavy);
+    transform: translateY(-4px);
 }
 
 .suggestion-header {
@@ -728,11 +730,17 @@ input:checked + .switch-slider:before {
     border-radius: 16px;
     border-top-right-radius: 4px;
     color: var(--text-dark);
+    box-shadow: var(--shadow-subtle);
 }
 
 .message.assistant .message-bubble {
     color: var(--text-dark);
-    padding-top: 4px;
+    background-color: var(--bg-elevated);
+    border: 1px solid var(--border-color);
+    padding: 16px 20px;
+    border-radius: 16px;
+    border-top-left-radius: 4px;
+    box-shadow: var(--shadow-subtle);
 }
 
 /* Markdown styling */
