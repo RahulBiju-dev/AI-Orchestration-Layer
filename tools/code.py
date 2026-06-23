@@ -1,3 +1,11 @@
+"""
+tools/code.py - Source code reading and viewing tool.
+
+This module provides functionality to read and display source code files
+with line numbers, handling truncation for very large files. It also allows
+scanning directories for files matching specific extensions.
+"""
+
 import json
 import os
 
@@ -87,19 +95,38 @@ SUPPORTED_EXTENSIONS = {
 
 
 def _read_single_file(file_path: str, lines: str | None = None) -> dict:
-    """Helper function to read a single file and return structured data."""
+    """
+    Read a single source code file and return structured data including its contents.
+    
+    This helper function reads the file line by line, applies any requested line
+    ranges, and prepends line numbers to the output. It also enforces a size limit
+    on the returned output string to avoid overwhelming output.
+    
+    Args:
+        file_path (str): The path to the file to read.
+        lines (str | None): An optional line range string (e.g., "10-20" or "42").
+            If None, the entire file is processed.
+            
+    Returns:
+        dict: A dictionary containing the file metadata and its contents (or error).
+            Keys on success: "file", "extension", "total_lines", "displayed_lines", "code".
+            Keys on failure: "error".
+    """
     try:
+        # Read all lines from the file
         with open(file_path, "r", encoding="utf-8") as f:
             file_lines = f.readlines()
 
-        # Parse line range if provided
+        # Initialize line range to encompass the entire file
         start_line = 1
         end_line = len(file_lines)
         
+        # Parse line range if provided
         if lines:
             try:
                 if "-" in lines:
                     start_line, end_line = map(int, lines.split("-"))
+                    # Bound start and end lines to valid ranges
                     start_line = max(1, start_line)
                     end_line = min(len(file_lines), end_line)
                 else:
@@ -108,7 +135,7 @@ def _read_single_file(file_path: str, lines: str | None = None) -> dict:
             except ValueError:
                 return {"error": f"Invalid line range format: {lines}. Use '10-20' or '10'."}
 
-        # Build output with line numbers
+        # Build output string with prepended line numbers
         output_lines = []
         for i in range(start_line - 1, end_line):
             if i < len(file_lines):
@@ -118,7 +145,7 @@ def _read_single_file(file_path: str, lines: str | None = None) -> dict:
 
         code_output = "\n".join(output_lines)
 
-        # Add truncation notice if file is too large
+        # Add truncation notice if output text is too large
         if len(code_output) > 25000:
             code_output = code_output[:25000] + f"\n\n...[File truncated due to size limit. Showing first 25000 characters.]"
 
@@ -138,7 +165,8 @@ def _read_single_file(file_path: str, lines: str | None = None) -> dict:
 
 
 def view_code(file_path: str, lines: str | None = None, extension: str | None = None) -> str:
-    """View and read source code files with line numbers, or scan folders for files.
+    """
+    View and read source code files with line numbers, or scan folders for files.
 
     Args:
         file_path: Path to a source code file or folder.

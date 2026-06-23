@@ -143,7 +143,26 @@ def search_vault(
     max_chars: int = DEFAULT_MAX_CHARS,
     source: str | None = None,
 ) -> str:
-    """Search the indexed vault and return compact JSON for the agent."""
+    """
+    Search the indexed vault and return relevant snippets in a compact JSON format.
+
+    This function generates an embedding for the provided query, queries the local
+    ChromaDB collection for the most similar text chunks, and returns them along
+    with metadata like source path and chunk index.
+
+    Args:
+        query (str): The search query to embed and look up.
+        collection_name (str): The name or human-friendly alias of the ChromaDB collection.
+        model (str): The embedding model used for the query.
+        top_k (int): Number of top results to return.
+        collection (str | None): An alias for collection_name.
+        max_chars (int): The maximum character limit for the returned context string.
+        source (str | None): Optional filepath to restrict the search to a specific file.
+
+    Returns:
+        str: A JSON-encoded string with search matches, extracted context string,
+             and metadata, or an error message.
+    """
     if collection:
         collection_name = collection
 

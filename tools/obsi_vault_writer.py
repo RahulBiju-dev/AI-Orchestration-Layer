@@ -16,10 +16,24 @@ def create_structured_note(
     outgoing_links: list[str] = None, 
     tags: list[str] = None
 ) -> str:
-    """Creates a structured Obsidian note optimized for Graph View.
+    """
+    Creates a structured Obsidian note optimized for Graph View.
     
-    Includes YAML frontmatter for tags, safe filename generation to prevent overwrites,
-    and automatic append/prepend of cross-reference links.
+    This function generates a markdown file formatted specifically for knowledge
+    graph tools like Obsidian. It includes YAML frontmatter for tags, safe filename
+    generation to prevent overwrites of existing notes, and automatic appending or
+    prepending of cross-reference (wiki) links.
+    
+    Args:
+        title (str): The primary header and base filename for the note.
+        content (str): The main body text of the note.
+        incoming_links (list[str]): Optional wiki-links to place at the top.
+        outgoing_links (list[str]): Optional wiki-links to place in a 'Related Concepts' section.
+        tags (list[str]): Optional string tags to place in the YAML frontmatter.
+        
+    Returns:
+        str: A JSON-encoded string indicating success with the created filepath
+             or an error message on failure.
     """
     if not title:
         title = "Untitled Note"

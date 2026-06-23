@@ -1,3 +1,15 @@
+/* 
+ * ────────────────────────────────────────────────────────────────────────
+ * style.css
+ * 
+ * Main stylesheet for the Selene AI Agent Web UI.
+ * This file defines the design system tokens (colors, fonts, shadows)
+ * and styles all components including the sidebar, chat interface, 
+ * tool cards, and modal dialogs. It implements the "Cyberpunk-Obsidian"
+ * aesthetic with glassmorphism and 3D effects.
+ * ────────────────────────────────────────────────────────────────────────
+ */
+
 /* ── Selene Design Tokens ─────────────────────────────────────────────── */
 :root {
     --bg-paper: #f5f0e8;

@@ -17,7 +17,21 @@ import json
 # ── Linux Desktop Entry Parser ────────────────────────────────────────
 
 def _parse_desktop_file(file_path: str) -> dict | None:
-    """Parse a Linux .desktop file and extract core fields."""
+    """
+    Parse a Linux .desktop file and extract core fields.
+    
+    This helper reads the contents of a .desktop file, identifies the
+    '[Desktop Entry]' section, and extracts key/value pairs that define
+    how the application should be launched or displayed.
+    
+    Args:
+        file_path (str): The absolute path to the .desktop file.
+        
+    Returns:
+        dict | None: A dictionary containing extracted keys ('Name', 'Exec', 
+            'Terminal', 'NoDisplay', 'Type') if successful, or None if parsing fails
+            or the file is invalid.
+    """
     try:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
@@ -53,7 +67,18 @@ def _parse_desktop_file(file_path: str) -> dict | None:
 
 
 def _get_installed_apps() -> list[dict]:
-    """Scan standard XDG paths to build a list of installed desktop applications."""
+    """
+    Scan standard XDG paths to build a list of installed desktop applications.
+    
+    This function looks through standard system directories where .desktop files
+    are typically installed (e.g., /usr/share/applications, ~/.local/share/applications,
+    and flatpak directories) to compile a registry of available GUI applications.
+    
+    Returns:
+        list[dict]: A list of application dictionaries, each containing 'filename',
+            'filepath', 'name', 'exec', and 'terminal' properties. Applications
+            marked as 'NoDisplay' or not of Type 'Application' are excluded.
+    """
     xdg_dirs = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
     app_dirs = [os.path.join(d, "applications") for d in xdg_dirs]
     # Add user local applications
@@ -102,7 +127,19 @@ def _get_installed_apps() -> list[dict]:
 
 
 def _clean_exec_line(exec_str: str) -> list[str]:
-    """Remove standard %f, %u, etc. placeholders from Exec command and return tokens."""
+    """
+    Remove standard %f, %u, etc. placeholders from an Exec command and return shell tokens.
+    
+    Linux desktop files often include placeholders (like %f or %U) which are meant to be
+    replaced by file paths or URIs by the desktop environment. This function strips
+    them out so the application can be launched without arguments safely.
+    
+    Args:
+        exec_str (str): The raw 'Exec' line from a .desktop file.
+        
+    Returns:
+        list[str]: A list of clean command-line arguments ready for subprocess execution.
+    """
     # Remove standard desktop placeholders
     cleaned = re.sub(r'%\s*[fFuUdDnNvVmMkic]', '', exec_str)
     try:

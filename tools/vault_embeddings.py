@@ -59,7 +59,25 @@ def _validate_embedding_count(embeddings: list[list[float]], expected: int) -> l
 
 
 def embed_texts(texts: Sequence[str], model: str = DEFAULT_EMBED_MODEL, timeout: int = 60) -> List[List[float]]:
-    """Embed one or more texts using Ollama, returning Chroma-compatible vectors."""
+    """
+    Embed one or more texts using Ollama, returning Chroma-compatible vectors.
+    
+    This function communicates with a local Ollama instance to generate vector
+    embeddings for the provided strings. It supports batching and handles fallback
+    to the Ollama Python client if direct HTTP requests fail.
+    
+    Args:
+        texts (Sequence[str]): A list or tuple of string documents to embed.
+        model (str): The Ollama model name to use for embeddings (e.g., 'embeddinggemma').
+        timeout (int): The maximum number of seconds to wait for a network response.
+        
+    Returns:
+        List[List[float]]: A list of floating-point vectors corresponding to the inputs.
+        
+    Raises:
+        RuntimeError: If all connection methods to Ollama fail or if the shape of the
+                      returned embeddings does not match the inputs.
+    """
     inputs = _clean_inputs(texts)
     if not inputs:
         return []

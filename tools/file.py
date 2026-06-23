@@ -116,15 +116,26 @@ def read_file(
     chunk_size: int | str = DEFAULT_CHUNK_SIZE,
     max_chars: int | str = DEFAULT_MAX_CHARS,
 ) -> str:
-    """Read a text file with line, chunk, and query controls for large files.
-
+    """
+    Read a text file with line, chunk, and query controls for large files.
+    
+    This function reads standard text files, allowing the caller to limit the
+    returned output by specifying line ranges, searching for queries to find
+    relevant snippets, or paging through the file in chunks.
+    
     Args:
-        file_path: The absolute or relative path to the file.
-        lines: Optional line range, such as "20-80" or "42".
-        query: Optional text search query; returns matching snippets.
-        chunk: Optional 0-based chunk number for large files.
-        chunk_size: Approximate characters per chunk.
-        max_chars: Maximum characters returned in text fields.
+        file_path (str): The absolute or relative path to the file.
+        lines (str | None): Optional line range, such as "20-80" or "42".
+        query (str | None): Optional text search query; if provided, returns
+            matching text snippets rather than contiguous blocks.
+        chunk (int | str | None): Optional 0-based chunk number for iterating
+            through large files.
+        chunk_size (int | str): Approximate characters per chunk (default 12000).
+        max_chars (int | str): Maximum characters returned in text fields,
+            used to protect the LLM context from overflowing.
+            
+    Returns:
+        str: A JSON-encoded string with file contents or search matches, or an error.
     """
     if not os.path.exists(file_path):
         return _json({"error": f"File not found: {file_path}"})
@@ -240,20 +251,22 @@ def read_file(
 
 
 def create_file(file_path: str, content: str) -> str:
-    """Create a new file with the given content.
+    """
+    Create a new file with the given content.
 
     The file is written into the project's ``vaults/`` directory so that it
-    is automatically available for semantic search.  A dedicated ChromaDB
+    is automatically available for semantic search. A dedicated ChromaDB
     collection is created for the file and a human-friendly alias is
     registered so the user can reference the vault by name later.
 
     Args:
-        file_path: The absolute or relative path where the file should be created.
-                   The basename is used to place the file inside ``vaults/``.
-        content: The text content to write to the file.
+        file_path (str): The absolute or relative path where the file should be created.
+            The basename is used to place the file inside the ``vaults/`` directory.
+        content (str): The text content to write to the file.
 
     Returns:
-        A JSON string indicating success or failure.
+        str: A JSON-encoded string indicating success or failure, including
+            vault connection parameters like 'collection' and 'alias'.
     """
     from tools.vault_indexer import (
         VAULTS_DIR,

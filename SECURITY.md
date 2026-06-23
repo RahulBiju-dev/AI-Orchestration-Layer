@@ -13,7 +13,7 @@ Only the latest release version on the `main` branch is actively supported with 
 
 We take the security of AI CLI Agent seriously. If you find any security vulnerability, please do not report it through public issues. Instead, please report it via one of the following methods:
 
-- **Email**: Send a detailed report to [insert contact email, e.g., security@example.com].
+- **Email**: Send a detailed report to rnair5603@gmail.com.
 - **GitHub Private Report**: If available, use the private vulnerability reporting feature on the GitHub repository.
 
 Please include:

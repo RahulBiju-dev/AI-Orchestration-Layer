@@ -241,9 +241,27 @@ def index_vault(
     file_path: Optional[str] = None,
     collection: Optional[str] = None,
 ):
-    """Index either a vault folder or a single file.
+    """
+    Index either a vault folder or a single file into a ChromaDB collection.
 
-    Returns a JSON string with status and next-step guidance for tool consumers.
+    This function reads text from the target documents, splits it into overlapping
+    semantic chunks, generates vector embeddings using Ollama, and stores them in
+    ChromaDB for later similarity search retrieval.
+
+    Args:
+        vault_path (str | None): Directory containing multiple files to index.
+            If None and file_path is provided, defaults to the file's directory.
+        collection_name (str): The name of the ChromaDB collection to use.
+        chunk_size (int): The approximate character limit for each text chunk.
+        chunk_overlap (int): The number of characters to overlap between chunks.
+        model (str): The embedding model name to pass to Ollama.
+        batch_size (int): Number of chunks to process in a single batch.
+        file_path (str | None): A single explicit file path to index.
+        collection (str | None): An alias for collection_name.
+
+    Returns:
+        str: A JSON-encoded string containing status metrics (e.g., number of indexed
+             files and chunks) and guidance for using the index.
     """
     if collection:
         collection_name = collection

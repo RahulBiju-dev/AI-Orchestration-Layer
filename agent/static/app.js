@@ -1,3 +1,13 @@
+/*
+ * ────────────────────────────────────────────────────────────────────────
+ * app.js
+ * 
+ * Main client-side script for the Selene AI Agent Web UI.
+ * Handles DOM events, state management, SSE streaming from the backend,
+ * and rendering of Markdown, tool cards, and thinking panels.
+ * ────────────────────────────────────────────────────────────────────────
+ */
+
 // ── Global Application State ─────────────────────────────────────────
 const state = {
     activeSession: 'Active Session',
@@ -36,6 +46,11 @@ document.addEventListener('DOMContentLoaded', () => {
     loadSessionState();
 });
 
+/**
+ * Initialize third-party libraries:
+ * - marked.js with highlight.js for markdown/code rendering
+ * - lucide.js for icon generation
+ */
 function initLibraries() {
     marked.setOptions({
         highlight: function (code, lang) {
@@ -51,6 +66,10 @@ function initLibraries() {
 }
 
 // ── Event Listeners ──────────────────────────────────────────────────
+/**
+ * Attach DOM event listeners for the sidebar, settings, and chat inputs.
+ * Sets up keybindings, slider value binding, and click events.
+ */
 function initEventListeners() {
     // Menu Sidebar toggle
     const menuToggle = document.getElementById('menu-toggle');

@@ -146,7 +146,10 @@ The agent manages this automatically:
 The default interface — launch with `python main.py` and the agent opens in your browser automatically.
 
 - **Cyberpunk-Obsidian aesthetic** — deep charcoal backgrounds, glassmorphism cards, and neon glowing accents in Cyan, Magenta, Teal, and Amber.
+- **Enhanced 3D Elements** — realistic layered shadows (`--shadow-subtle`, `--shadow-heavy`) and tactile hover/active states that simulate physical lift for cards and message bubbles.
+- **Context window usage indicators** — visual tracking of the model's context capacity in real time.
 - **Live SSE streaming** — tokens and thinking blocks are pushed to the browser in real-time via Server-Sent Events; no polling, no page reloads.
+- **Smart generation states** — dynamic site behaviour that intelligently adapts while a response is actively generating.
 - **Collapsible thinking panel** — while the model reasons, a dedicated magenta panel shows the chain-of-thought with animated dots. After completion it collapses into a togglable bar (DeepSeek/Gemini style).
 - **Interactive tool cards** — each tool invocation renders a visual card: `⟳ Running [tool]` → `✓ Executed [tool]`. Click the header to expand raw JSON parameters and output.
 - **Sidebar control panel:**

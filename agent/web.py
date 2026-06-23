@@ -48,7 +48,11 @@ GLOBAL_STATE = {
 # ── Session Management Functions ──────────────────────────────────────
 
 def list_saved_sessions() -> list[str]:
-    """Return a sorted list of session filenames (newest first)."""
+    """Return a sorted list of session filenames (newest first).
+    
+    Returns:
+        list[str]: A list of saved session filenames.
+    """
     if not os.path.isdir(_SESSIONS_DIR):
         return []
     files = glob.glob(os.path.join(_SESSIONS_DIR, "*.json"))
@@ -57,7 +61,14 @@ def list_saved_sessions() -> list[str]:
 
 
 def save_session(name: str) -> str:
-    """Persist current state to a JSON file."""
+    """Persist current state to a JSON file.
+    
+    Args:
+        name (str): An optional name for the session.
+        
+    Returns:
+        str: The filename of the saved session.
+    """
     os.makedirs(_SESSIONS_DIR, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     if name:
@@ -83,7 +94,14 @@ def save_session(name: str) -> str:
 
 
 def load_session(filename: str) -> None:
-    """Load session from a JSON file."""
+    """Load session from a JSON file.
+    
+    Args:
+        filename (str): The filename of the session to load.
+        
+    Raises:
+        FileNotFoundError: If the specified session file does not exist.
+    """
     filepath = os.path.join(_SESSIONS_DIR, filename)
     if not os.path.isfile(filepath):
         raise FileNotFoundError(f"Session file not found: {filename}")
@@ -124,6 +142,19 @@ _COMMANDS_HELP_MD = """
 """
 
 def execute_command_web(cmd: str, session: dict, history: list[dict]) -> str:
+    """Execute a slash command from the web interface.
+    
+    Similar to the terminal's `_handle_command`, but formats output as markdown
+    strings suitable for rendering in the web UI.
+    
+    Args:
+        cmd (str): The slash command string.
+        session (dict): The active session state dictionary.
+        history (list[dict]): The conversation history list.
+        
+    Returns:
+        str: The markdown-formatted response of the command execution.
+    """
     import os
     import json
     import glob
@@ -466,9 +497,19 @@ def execute_command_web(cmd: str, session: dict, history: list[dict]) -> str:
 # ── Chat Stream Generator ─────────────────────────────────────────────
 
 def generate_chat_events(user_input: str, session_data: dict, history_data: list[dict]):
-    """
-    Generator yielding dictionary objects representing the progress of agent generation.
-    Supports tool execution and chained follow-up model runs.
+    """Generator yielding dictionary objects representing the progress of agent generation.
+    
+    Supports tool execution and chained follow-up model runs. Yields Server-Sent Events (SSE)
+    compatible dictionary objects for streaming status, thinking chunks, content chunks,
+    and tool execution updates to the frontend.
+    
+    Args:
+        user_input (str): The raw text submitted by the user.
+        session_data (dict): The session configuration and state.
+        history_data (list[dict]): The conversation history.
+        
+    Yields:
+        dict: A dictionary representing an event in the generation process.
     """
     if user_input.startswith('/'):
         output = execute_command_web(user_input, session_data, history_data)
@@ -664,12 +705,23 @@ def generate_chat_events(user_input: str, session_data: dict, history_data: list
 # ── HTTP Handler ──────────────────────────────────────────────────────
 
 class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
+    """Custom HTTP request handler for the agent's web interface.
+    
+    Handles serving static assets, managing session state via REST API,
+    and providing an SSE endpoint for streaming chat generation.
+    """
     
     def log_message(self, format, *args):
-        # Mute standard output logs to keep the server output clean
+        """Mute standard output logs to keep the server output clean."""
         pass
 
     def send_json_response(self, status_code: int, data: dict):
+        """Helper to send a JSON-encoded HTTP response.
+        
+        Args:
+            status_code (int): The HTTP status code to return.
+            data (dict): The dictionary to serialize to JSON.
+        """
         self.send_response(status_code)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -677,11 +729,22 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode('utf-8'))
 
     def read_json_body(self) -> dict:
+        """Helper to read and parse the JSON body of an HTTP POST request.
+        
+        Returns:
+            dict: The parsed JSON body.
+        """
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length)
         return json.loads(body.decode('utf-8'))
 
     def serve_static_file(self, filename: str, content_type: str):
+        """Serve a static file from the STATIC_DIR.
+        
+        Args:
+            filename (str): The name of the file to serve.
+            content_type (str): The MIME type of the file.
+        """
         filepath = os.path.join(STATIC_DIR, filename)
         if not os.path.isfile(filepath):
             self.send_error(404, "File Not Found")
@@ -700,6 +763,7 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(500, "Internal Server Error")
 
     def do_GET(self):
+        """Handle incoming HTTP GET requests for static files and settings."""
         # 1. Routing for Home and Assets
         if self.path == '/' or self.path == '/index.html':
             self.serve_static_file('index.html', 'text/html')
@@ -744,6 +808,7 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
 
     def do_OPTIONS(self):
+        """Handle CORS preflight requests."""
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
@@ -751,6 +816,7 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        """Handle incoming HTTP POST requests for API endpoints (chat, save/load/clear session)."""
         # 1. Save Settings
         if self.path == '/api/settings':
             try:
@@ -827,10 +893,12 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 # ── Threaded HTTP Server ──────────────────────────────────────────────
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    """A threading version of the standard HTTPServer to handle concurrent requests."""
     daemon_threads = True
 
 
 def find_free_port() -> int:
+    """Find and return an available port on the local system."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(('', 0))
     port = s.getsockname()[1]
@@ -839,7 +907,11 @@ def find_free_port() -> int:
 
 
 def start_web_server():
-    """Starts the multi-threaded web server and opens the browser."""
+    """Starts the multi-threaded web server and opens the browser.
+    
+    Attempts to bind to port 5005. If unavailable, falls back to a random free port.
+    It will also launch the default web browser automatically.
+    """
     # Attempt to bind to default port 5005 first, then fall back to random port
     host = '127.0.0.1'
     if '--public' in sys.argv:

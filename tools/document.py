@@ -222,16 +222,40 @@ def _extract_docx_segments(file_path: str, preview_chars: int | None = None) -> 
 
 
 def extract_document_text(file_path: str, pages: str | None = None) -> tuple[str, dict]:
-    """Return full extracted document text plus metadata for indexing callers."""
+    """
+    Return full extracted document text plus metadata for indexing callers.
+    
+    This function acts as a unified entry point for reading both PDF and DOCX files.
+    It extracts the text segments and joins them into a single continuous string
+    suitable for search indexing, while also returning metadata like page counts.
+    
+    Args:
+        file_path (str): The absolute or relative path to the document file.
+        pages (str | None): An optional page range string (e.g., "1-5") for PDFs.
+            
+    Returns:
+        tuple[str, dict]: A tuple where the first element is the extracted text 
+            string and the second is a dictionary of document metadata.
+            
+    Raises:
+        ValueError: If the document type is unsupported.
+    """
+    # Determine the file extension to route to the correct extractor
     ext = os.path.splitext(file_path)[1].lower()
+    
     if ext == ".pdf":
+        # Extract segments from PDF with optional page range
         segments, info = _extract_pdf_segments(file_path, pages=pages)
     elif ext == ".docx":
+        # Extract blocks from DOCX (page ranges are not supported)
         segments, info = _extract_docx_segments(file_path)
     else:
         raise ValueError(f"Unsupported document type: {ext}")
+        
+    # Join the extracted segments into a single readable string
     text = _join_segments(segments)
     info["char_count"] = len(text)
+    
     return text, info
 
 
@@ -243,15 +267,28 @@ def read_document(
     chunk_size: int | str = DEFAULT_CHUNK_SIZE,
     max_chars: int | str = DEFAULT_MAX_CHARS,
 ) -> str:
-    """Extract text from a PDF or Word document with large-file navigation.
+    """
+    Extract text from a PDF or Word document with large-file navigation capabilities.
+
+    This tool enables reading content from binary document formats (.pdf, .docx).
+    To handle large files, it provides features like page filtering, semantic chunking,
+    and query-based snippet search.
 
     Args:
-        file_path: Path to a .pdf or .docx file.
-        pages: Optional 1-based PDF pages/ranges, such as "1-3,8".
-        query: Optional search query; returns snippets instead of a whole document dump.
-        chunk: Optional 0-based chunk number for large extracted text.
-        chunk_size: Approximate characters per chunk.
-        max_chars: Maximum characters returned in preview/text fields.
+        file_path (str): Absolute or relative path to a .pdf or .docx file.
+        pages (str | None): Optional 1-based PDF pages/ranges, such as "1-3,8".
+            Only applies to PDFs.
+        query (str | None): Optional search query; if provided, returns matched
+            text snippets instead of a whole document dump.
+        chunk (int | str | None): Optional 0-based chunk number to retrieve
+            when navigating large extracted text sequentially.
+        chunk_size (int | str): Approximate characters per chunk (default is 12000).
+        max_chars (int | str): Maximum characters returned in preview/text fields.
+            Used to prevent overflowing the LLM context window.
+            
+    Returns:
+        str: A JSON-encoded string containing the extracted text, search matches,
+             or metadata about the document. Contains an 'error' key if reading fails.
     """
     if not os.path.exists(file_path):
         return _json({"error": f"File not found: {file_path}"})

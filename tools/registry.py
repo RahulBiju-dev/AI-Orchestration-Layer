@@ -1,8 +1,10 @@
 """
 tools/registry.py — Tool JSON schemas for the Ollama API.
 
+This module acts as the central registry for all available tools in the agent.
 Each entry follows the Ollama tool-calling format (OpenAI-compatible
-function schema). Add new tools here as the agent grows.
+function schema). Add new tools here as the agent grows. These schemas are
+passed directly to the LLM so it knows what tools are available and how to call them.
 """
 
 from tools.search import web_search

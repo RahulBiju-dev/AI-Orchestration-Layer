@@ -15,12 +15,22 @@ _console = Console(stderr=True)
 
 
 def _print_status(icon: str, message: str, color: str = "cyan") -> None:
-    """Print a formatted status line to stderr so it doesn't mix with piped output."""
+    """Print a formatted status line to stderr so it doesn't mix with piped output.
+    
+    Args:
+        icon (str): The emoji or icon to display at the beginning of the line.
+        message (str): The status message to print.
+        color (str, optional): The rich color to use for the output. Defaults to "cyan".
+    """
     _console.print(f"[{color} bold]{icon}  {message}[/]")
 
 
 def print_welcome_header() -> None:
-    """Prints a stylish welcome header with an ASCII art logo."""
+    """Prints a stylish welcome header with an ASCII art logo.
+    
+    This function uses `rich.panel.Panel` and `rich.columns.Columns` to display a centered
+    ASCII art logo alongside a welcome title and help instruction.
+    """
     from rich.panel import Panel
     from rich.columns import Columns
     from rich.text import Text
@@ -61,7 +71,11 @@ def print_welcome_header() -> None:
 
 
 class _Spinner:
-    """Animated spinner wrapper that uses rich.status.Status."""
+    """Animated spinner wrapper that uses rich.status.Status.
+    
+    This class provides a simple API to start, update, and stop a terminal spinner.
+    It handles its own state and threading compatibility variables.
+    """
 
     def __init__(self, message: str = "Thinking", color: str = "magenta") -> None:
         self._message = message
@@ -74,15 +88,26 @@ class _Spinner:
         self._thread = type('MockThread', (), {'is_alive': lambda: False, 'join': lambda: None})()
 
     def start(self) -> "_Spinner":
+        """Start the animated spinner in the terminal.
+        
+        Returns:
+            _Spinner: The current spinner instance for method chaining.
+        """
         self._stop_event.clear()
         self._status.start()
         return self
 
     def update(self, message: str) -> None:
+        """Update the spinner's message dynamically while it is running.
+        
+        Args:
+            message (str): The new message to display.
+        """
         self._message = message
         self._status.update(f"[{self._color} bold]{self._message}…[/]")
 
     def stop(self) -> None:
+        """Stop the animated spinner and mark the stop event as set."""
         self._stop_event.set()
         self._status.stop()
 
@@ -410,6 +435,14 @@ _SUB_MAP = {
 
 
 def _to_superscript(text: str) -> str:
+    """Convert normal text characters to their Unicode superscript equivalents.
+    
+    Args:
+        text (str): The string to convert.
+        
+    Returns:
+        str: The converted superscript string.
+    """
     out = []
     for ch in text:
         out.append(_SUP_MAP.get(ch, ch))
@@ -417,6 +450,14 @@ def _to_superscript(text: str) -> str:
 
 
 def _to_subscript(text: str) -> str:
+    """Convert normal text characters to their Unicode subscript equivalents.
+    
+    Args:
+        text (str): The string to convert.
+        
+    Returns:
+        str: The converted subscript string.
+    """
     out = []
     for ch in text:
         out.append(_SUB_MAP.get(ch, ch))
@@ -424,6 +465,17 @@ def _to_subscript(text: str) -> str:
 
 
 def _extract_braced(text: str, start: int) -> tuple[str, int] | None:
+    """Extract a substring enclosed in matching curly braces.
+    
+    Args:
+        text (str): The full text containing the braces.
+        start (int): The index where the opening brace '{' is located.
+        
+    Returns:
+        tuple[str, int] | None: A tuple containing the extracted inner string and 
+                                the index immediately following the closing brace.
+                                Returns None if parsing fails.
+    """
     if start >= len(text) or text[start] != "{":
         return None
 
@@ -440,6 +492,18 @@ def _extract_braced(text: str, start: int) -> tuple[str, int] | None:
 
 
 def _render_latex_math(expr: str) -> str:
+    """Convert a LaTeX math expression into terminal-friendly Unicode text.
+    
+    This function handles common LaTeX structures such as fractions, square roots,
+    symbols, superscripts, and subscripts, rendering them cleanly without needing
+    a full LaTeX engine.
+    
+    Args:
+        expr (str): The raw LaTeX expression.
+        
+    Returns:
+        str: The Unicode-rendered representation of the expression.
+    """
     expr = expr.strip()
     if not expr:
         return ""
@@ -559,6 +623,17 @@ _RE_COLLAPSE_WS = re.compile(r"\s+")
 
 
 def _render_terminal_markdown(text: str) -> str:
+    """Pre-process markdown text to render LaTeX blocks before passing to rich.Markdown.
+    
+    Finds inline ($...$) and block ($$...$$) LaTeX expressions and replaces them
+    with their Unicode equivalents.
+    
+    Args:
+        text (str): The raw markdown string containing potential LaTeX.
+        
+    Returns:
+        str: The processed markdown string with LaTeX rendered to Unicode.
+    """
     def replace_block(match: re.Match[str]) -> str:
         rendered = _render_latex_math(match.group(1))
         return f"\n{rendered}\n"

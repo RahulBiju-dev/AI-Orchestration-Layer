@@ -216,14 +216,22 @@ def _search_spotify_uri(query: str) -> str | None:
 # ── Public tool function ──────────────────────────────────────────────
 
 def spotify_play(query: str) -> str:
-    """Open Spotify and play a specific song.
+    """
+    Open Spotify and play a specific song, album, or playlist.
+
+    This function attempts to launch the Spotify application if it isn't running,
+    resolves the provided query to a Spotify URI (either natively or via search),
+    and initiates playback using OS-specific mechanisms (e.g., cmd on Windows,
+    osascript on macOS, or D-Bus MPRIS2 on Linux).
 
     Args:
-        query: A Spotify URI, Spotify URL, or a search query
-               (e.g. "Bohemian Rhapsody Queen").
+        query (str): A Spotify URI, Spotify URL, or a text search query
+               (e.g., "Bohemian Rhapsody Queen").
 
     Returns:
-        A JSON string indicating success or failure.
+        str: A JSON-encoded string indicating the success or failure of the
+             playback attempt. On success, it may include currently playing
+             metadata depending on the OS capabilities.
     """
     try:
         # Step 1: Ensure Spotify is running
