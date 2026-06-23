@@ -278,6 +278,7 @@ def create_file(file_path: str, content: str) -> str:
     try:
         # Resolve the target inside the vaults directory
         basename = os.path.basename(file_path)
+        VAULTS_DIR = os.path.expanduser("~/.selene-agent/vaults")
         vault_file_path = os.path.join(VAULTS_DIR, basename)
         os.makedirs(VAULTS_DIR, exist_ok=True)
 

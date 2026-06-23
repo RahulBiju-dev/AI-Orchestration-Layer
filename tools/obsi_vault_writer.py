@@ -4,7 +4,7 @@ import json
 import os
 import re
 
-VAULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vaults")
+VAULTS_DIR = os.path.expanduser("~/.selene-agent/vaults")
 
 def _json(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False)

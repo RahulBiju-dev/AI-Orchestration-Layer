@@ -24,7 +24,7 @@ from tools.registry import TOOL_DISPATCH, TOOL_SCHEMAS
 
 # Setup directories
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-_SESSIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sessions")
+_SESSIONS_DIR = os.path.expanduser("~/.selene-agent/sessions")
 
 # Global Application State
 GLOBAL_STATE = {
@@ -926,6 +926,7 @@ def start_web_server():
         
     url = f"http://127.0.0.1:{port}"
     print(f"\n🚀 Starting Selene Web Interface at {url}")
+    print(f"ELECTRON_PORT:{port}", flush=True)
     
     if host == '0.0.0.0':
         local_ip = "127.0.0.1"
@@ -938,13 +939,14 @@ def start_web_server():
             pass
         print(f"📡 Accessible across your local network at: http://{local_ip}:{port}")
         
-    print(f"Opening default web browser...\n")
-    
-    def open_browser():
-        time.sleep(0.5)
-        webbrowser.open(url)
+    if "--no-browser" not in sys.argv:
+        print(f"Opening default web browser...\n")
         
-    threading.Thread(target=open_browser, daemon=True).start()
+        def open_browser():
+            time.sleep(0.5)
+            webbrowser.open(url)
+            
+        threading.Thread(target=open_browser, daemon=True).start()
     
     try:
         server.serve_forever()

@@ -23,8 +23,8 @@ SUPPORTED_INDEX_EXTENSIONS = {
 DEFAULT_CHUNK_SIZE = 1800
 DEFAULT_CHUNK_OVERLAP = 250
 DEFAULT_BATCH_SIZE = 16
-CHROMA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".chroma")
-VAULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vaults")
+CHROMA_DIR = os.path.expanduser("~/.selene-agent/.chroma")
+VAULTS_DIR = os.path.expanduser("~/.selene-agent/vaults")
 
 
 def _json(data: dict) -> str:

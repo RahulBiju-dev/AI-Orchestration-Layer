@@ -232,3 +232,9 @@ updates.md
 
 # Vaults
 vaults/
+
+# Node and Electron
+node_modules/
+dist-electron/
+bun.lockb
+bun.lock

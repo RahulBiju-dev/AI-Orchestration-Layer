@@ -7,6 +7,7 @@ and launches the interactive chat loop.
 """
 
 import sys
+import os
 
 import ollama
 
@@ -17,6 +18,12 @@ from rich.console import Console
 _console = Console()
 
 
+def _get_modelfile_path() -> str:
+    """Return the path to the Modelfile, handling PyInstaller's temp directory."""
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, 'Modelfile')
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Modelfile')
+
 def _ensure_model() -> None:
     """Create the custom model from the Modelfile if it doesn't already exist."""
     try:
@@ -25,7 +32,7 @@ def _ensure_model() -> None:
     except ollama.ResponseError:
         # If the model is not found, build it from the local Modelfile
         _console.print(f"[cyan bold]⟳  Building model '{MODEL_NAME}' from Modelfile…[/]")
-        ollama.create(model=MODEL_NAME, from_="./Modelfile")
+        ollama.create(model=MODEL_NAME, from_=_get_modelfile_path())
         _console.print("[cyan bold]✓  Model ready.[/]\n")
 
 

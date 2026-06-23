@@ -304,6 +304,41 @@ This custom model is cached by Ollama and reused on subsequent runs.
 
 ---
 
+## Building the Desktop App (Electron)
+
+Selene can be built into a standalone desktop application using Electron and PyInstaller. This bundles the Python backend and web UI into a single executable that you can distribute.
+
+> **Note**: The Ollama engine and models (like Gemma 4) are **not** bundled in the app to keep the file size reasonable. Users must have Ollama installed and running on their system.
+
+### Step-by-Step Build Instructions
+
+1. **Install Node.js & Python dependencies**:
+   Ensure you have Node.js installed. Then, install the required packages:
+   ```bash
+   bun install
+   pip install pyinstaller
+   ```
+
+2. **Build the Python Backend**:
+   First, compile the Python code into a standalone executable using the provided PyInstaller spec:
+   ```bash
+   bun run build:backend
+   ```
+   This creates the backend executable inside the `dist/` folder.
+
+3. **Test in Development Mode (Optional)**:
+   You can run the Electron app locally to ensure the backend spawns correctly:
+   ```bash
+   bun start
+   ```
+
+4. **Build the Electron App**:
+   Package the application for your operating system:
+   ```bash
+   bun run build
+   ```
+   The final binaries (AppImage, deb, nsis, etc.) will be output to the `dist-electron/` folder.
+
 ## Usage
 
 ### Web UI (Default)

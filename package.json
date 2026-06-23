@@ -1,0 +1,45 @@
+{
+  "name": "selene-agent",
+  "version": "1.0.0",
+  "description": "Selene AI Agent",
+  "author": "Rahul Biju <rahulbiju@example.com>",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:backend": "pyinstaller selene-backend.spec --clean",
+    "build": "CI=true electron-builder build --publish never",
+    "publish": "electron-builder build --linux --win --mac --publish always"
+  },
+  "build": {
+    "appId": "com.selene.agent",
+    "productName": "Selene",
+    "mac": {
+      "category": "public.app-category.productivity"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"]
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "directories": {
+      "buildResources": "build",
+      "output": "dist-electron"
+    },
+    "extraFiles": [
+      {
+        "from": "dist",
+        "to": "resources",
+        "filter": [
+          "selene-backend",
+          "selene-backend.exe"
+        ]
+      }
+    ]
+  },
+  "devDependencies": {
+    "dmg-license": "^1.0.11",
+    "electron": "^29.1.0",
+    "electron-builder": "^24.13.3"
+  }
+}
