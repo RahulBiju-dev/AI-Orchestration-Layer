@@ -7,7 +7,7 @@
   "scripts": {
     "start": "electron .",
     "build:backend": "pyinstaller selene-backend.spec --clean",
-    "build": "CI=true electron-builder build --publish never",
+    "build": "electron-builder build --publish never",
     "publish": "electron-builder build --linux --win --mac --publish always"
   },
   "build": {
@@ -17,7 +17,7 @@
       "category": "public.app-category.productivity"
     },
     "linux": {
-      "target": ["AppImage", "deb"]
+      "target": ["AppImage"]
     },
     "win": {
       "target": ["nsis"]
