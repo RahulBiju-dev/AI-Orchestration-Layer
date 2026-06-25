@@ -20,6 +20,9 @@
   <!-- Markdown rendering -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
+  <!-- GSAP for 3D Animations -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+
   <!-- Syntax highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/base16/tomorrow-night.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
@@ -32,6 +35,7 @@
   <!-- Subtle lunar dust drift background — original animation, not a Grok copy -->
   <canvas id="bg-canvas" aria-hidden="true"></canvas>
   <div class="bg-atmos" aria-hidden="true"></div>
+  <div class="bg-noise" aria-hidden="true"></div>
 
   <div class="app">
 
@@ -376,7 +380,14 @@
 
       ctx.clearRect(0, 0, w, h);
 
+      // 3D Parallax: Pre-calculate normalized mouse coordinates
+      const mouseX = window.mouseX !== undefined ? (window.mouseX / w - 0.5) * 2 : 0;
+      const mouseY = window.mouseY !== undefined ? (window.mouseY / h - 0.5) * 2 : 0;
+
       for (const p of particles) {
+        const parallaxX = mouseX * (1 - p.r) * 30; // depth effect
+        const parallaxY = mouseY * (1 - p.r) * 30;
+
         // Move
         p.x += p.vx;
         if (p.x > w + 4) p.x = -4;
@@ -385,6 +396,9 @@
         // Sine oscillation on y
         const osc = Math.sin(t * p.oscFreq + p.oscPhase) * p.oscAmp;
         const drawY = p.y + osc * 60; // oscillates ±60px over time
+
+        const finalX = p.x + parallaxX;
+        const finalY = drawY + parallaxY;
 
         // Glint logic — a brief brightness spike
         if (p.canGlint && !p.glinting && Math.random() < 0.00008) {
@@ -405,11 +419,17 @@
         }
 
         ctx.beginPath();
-        ctx.arc(p.x, drawY, p.r, 0, Math.PI * 2);
+        ctx.arc(finalX, finalY, p.r, 0, Math.PI * 2);
         ctx.fillStyle = `rgba(210, 220, 255, ${Math.min(0.85, alpha)})`;
         ctx.fill();
       }
     }
+
+    // Track mouse for 3D parallax
+    window.addEventListener('mousemove', (e) => {
+      window.mouseX = e.clientX;
+      window.mouseY = e.clientY;
+    }, { passive: true });
 
     window.addEventListener('resize', resize, { passive: true });
     resize();

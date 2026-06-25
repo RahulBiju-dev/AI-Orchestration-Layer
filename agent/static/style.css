@@ -10,23 +10,23 @@
    ═══════════════════════════════════════════════════════════════ */
 :root {
   /* === Palette === */
-  --bg-base:     #060811;   /* Deep void */
-  --bg-raised:   #0b0f1e;   /* Sidebar, elevated panels */
-  --bg-surface:  #101527;   /* Cards, bubbles, inputs */
-  --bg-overlay:  #141829;   /* Modal backdrops */
+  --bg-base:     #03050a;   /* Deeper void */
+  --bg-raised:   rgba(11, 15, 30, 0.65);   /* Sidebar, elevated panels - glassmorphic */
+  --bg-surface:  rgba(16, 21, 39, 0.5);   /* Cards, bubbles, inputs - deeper glass */
+  --bg-overlay:  rgba(6, 8, 17, 0.85);   /* Modal backdrops */
 
   /* Ink — text hierarchy */
-  --ink-0:  #f2f4fc;   /* Highest contrast */
-  --ink-1:  #d8ddf0;   /* Primary body text */
-  --ink-2:  #9aa3c2;   /* Secondary */
-  --ink-3:  #5e6888;   /* Muted, placeholders */
-  --ink-4:  #3a4060;   /* Disabled, very subtle */
+  --ink-0:  #ffffff;   /* Highest contrast - metallic white */
+  --ink-1:  #e0e6fc;   /* Primary body text */
+  --ink-2:  #a1adce;   /* Secondary */
+  --ink-3:  #6a7596;   /* Muted, placeholders */
+  --ink-4:  #3c435f;   /* Disabled, very subtle */
 
   /* Moon accent — cool periwinkle */
-  --accent:        #7b9eff;
-  --accent-dim:    rgba(123, 158, 255, 0.15);
-  --accent-glow:   rgba(123, 158, 255, 0.25);
-  --accent-border: rgba(123, 158, 255, 0.28);
+  --accent:        #a3bfff;
+  --accent-dim:    rgba(163, 191, 255, 0.12);
+  --accent-glow:   rgba(163, 191, 255, 0.3);
+  --accent-border: rgba(163, 191, 255, 0.35);
 
   /* Semantic colors */
   --color-success: #52c97a;
@@ -35,12 +35,13 @@
   --color-info:    #60a8f8;
 
   /* Borders */
-  --border:        rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.12);
+  --border:        rgba(255, 255, 255, 0.05);
+  --border-strong: rgba(255, 255, 255, 0.15);
   --border-accent: var(--accent-border);
+  --border-highlight: rgba(255, 255, 255, 0.2);
 
   /* Glass */
-  --glass-bg: rgba(11, 15, 30, 0.78);
+  --glass-bg: rgba(9, 13, 25, 0.55);
 
   /* ═══ Type Scale — 1.25 Major-Third, 16px base ═══
      caption   : 12px  / 0.75rem
@@ -93,10 +94,10 @@
   --r-pill: 999px;
 
   /* Shadows */
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.45);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
-  --shadow-glow: 0 0 0 1px var(--accent-glow);
+  --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4), inset 0 1px 1px rgba(255, 255, 255, 0.08);
+  --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.7), 0 8px 24px rgba(0, 0, 0, 0.5), inset 0 1px 2px rgba(255, 255, 255, 0.12);
+  --shadow-glow: 0 0 0 1px var(--accent-glow), 0 0 32px rgba(163, 191, 255, 0.15);
 
   /* Motion */
   --ease-snap:    cubic-bezier(0.22, 1, 0.36, 1);
@@ -190,7 +191,7 @@ body {
   inset: 0;
   z-index: 0;
   pointer-events: none;
-  opacity: 0.7;
+  opacity: 0.85;
 }
 
 .bg-atmos {
@@ -198,11 +199,22 @@ body {
   inset: 0;
   z-index: 1;
   pointer-events: none;
-  /* Dual soft radial glows — one top-right (cool blue), one bottom-left (deep amethyst) */
+  /* Enhanced 3D volumetric lighting effect */
   background:
-    radial-gradient(ellipse 65% 55% at 88% 8%, rgba(100, 130, 255, 0.045) 0%, transparent 70%),
-    radial-gradient(ellipse 50% 45% at 12% 92%, rgba(140, 100, 255, 0.025) 0%, transparent 65%);
+    radial-gradient(ellipse 70% 60% at 88% -5%, rgba(120, 150, 255, 0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 50% at 10% 110%, rgba(160, 110, 255, 0.05) 0%, transparent 70%),
+    linear-gradient(180deg, rgba(6, 8, 17, 0) 0%, var(--bg-base) 100%);
   animation: atmos-breathe 42s var(--ease-smooth) infinite alternate;
+}
+
+.bg-noise {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+  mix-blend-mode: overlay;
 }
 
 @keyframes atmos-breathe {
@@ -220,6 +232,7 @@ body {
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+  perspective: 1200px; /* Global 3D perspective */
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -236,6 +249,9 @@ body {
   z-index: 50;
   transition: transform var(--dur-med) var(--ease-snap);
   overflow: hidden;
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  box-shadow: 1px 0 24px rgba(0, 0, 0, 0.4);
 }
 
 /* Sidebar header — logo + brand */
@@ -659,26 +675,35 @@ body {
   align-items: center;
   justify-content: center;
   gap: var(--sp-2);
-  background: var(--accent-dim);
+  background: linear-gradient(135deg, var(--accent-dim), rgba(163, 191, 255, 0.05));
   color: var(--accent);
   border: 1px solid var(--accent-border);
+  border-top-color: rgba(163, 191, 255, 0.45); /* 3D highlight */
   border-radius: var(--r-md);
   font-family: var(--font-body);
   font-size: var(--fs-small);
   font-weight: 600;
   cursor: pointer;
-  transition: all var(--dur-fast);
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
+              background 0.2s, box-shadow 0.2s, border-color 0.2s;
   letter-spacing: 0.01em;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  transform-style: preserve-3d;
+  will-change: transform;
 }
 
 .btn-primary:hover {
-  background: rgba(123, 158, 255, 0.22);
-  border-color: rgba(123, 158, 255, 0.4);
+  background: linear-gradient(135deg, rgba(163, 191, 255, 0.22), rgba(163, 191, 255, 0.1));
+  border-color: rgba(163, 191, 255, 0.5);
+  border-top-color: rgba(255, 255, 255, 0.6);
   color: var(--ink-0);
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4), 0 0 16px var(--accent-dim), inset 0 1px 1px rgba(255, 255, 255, 0.2);
 }
 
 .btn-primary:active {
-  transform: scale(0.985);
+  transform: translateY(1px) scale(0.98);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4), inset 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -710,7 +735,9 @@ body {
   width: 100%;
   text-align: center;
   padding: var(--sp-10) var(--sp-5);
-  animation: welcome-enter 600ms var(--ease-snap) backwards;
+  animation: welcome-enter 800ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  transform-style: preserve-3d;
+  will-change: transform;
 }
 
 @keyframes welcome-enter {
@@ -747,31 +774,42 @@ body {
 .suggestions {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   text-align: left;
+  perspective: 1000px;
 }
 
 .suggestion-chip {
-  background: var(--bg-surface);
+  background: linear-gradient(145deg, rgba(20, 26, 45, 0.7), rgba(10, 14, 28, 0.5));
   border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: var(--sp-4);
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-left: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: var(--r-lg);
+  padding: var(--sp-5);
   cursor: pointer;
-  transition: all var(--dur-med) var(--ease-snap);
+  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.4s ease, border-color 0.4s ease;
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), inset 0 1px 1px rgba(255, 255, 255, 0.05);
+  transform-style: preserve-3d;
+  will-change: transform;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .suggestion-chip:hover {
   border-color: var(--accent-border);
-  background: rgba(123, 158, 255, 0.06);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-sm);
+  border-top-color: rgba(255, 255, 255, 0.2);
+  background: linear-gradient(145deg, rgba(30, 40, 70, 0.8), rgba(15, 20, 40, 0.6));
+  transform: translateY(-4px) translateZ(10px) rotateX(2deg);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6), 0 0 20px rgba(163, 191, 255, 0.1), inset 0 1px 2px rgba(255, 255, 255, 0.15);
 }
 
 .suggestion-chip:active {
-  transform: translateY(0);
+  transform: translateY(0) translateZ(0) rotateX(0);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), inset 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
 .chip-label {
@@ -854,8 +892,9 @@ body {
 }
 
 .msg.user .bubble {
-  background: var(--bg-surface);
+  background: linear-gradient(135deg, rgba(30, 38, 65, 0.85), rgba(16, 21, 39, 0.95));
   border: 1px solid var(--border-strong);
+  border-top-color: rgba(255, 255, 255, 0.15); /* 3D highlight */
   border-top-right-radius: var(--r-sm);
   border-top-left-radius: var(--r-xl);
   border-bottom-left-radius: var(--r-xl);
@@ -866,6 +905,11 @@ body {
   margin-left: auto;
   white-space: pre-wrap;
   word-break: break-word;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transform: translateZ(10px); /* Lift off background slightly */
+  will-change: transform;
 }
 
 .msg.assistant .bubble {
@@ -1104,22 +1148,25 @@ body {
 .composer-wrap {
   width: 100%;
   max-width: 820px;
-  background: var(--glass-bg);
+  background: linear-gradient(to bottom, rgba(16, 22, 40, 0.75), rgba(8, 12, 22, 0.85));
   border: 1px solid var(--border-strong);
+  border-top-color: rgba(255, 255, 255, 0.15); /* Specular highlight */
   border-radius: var(--r-xl);
   padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-5);
   display: flex;
   align-items: flex-end;
   gap: var(--sp-2);
-  box-shadow: var(--shadow-md);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
   transition: border-color var(--dur-med), box-shadow var(--dur-med);
+  transform-style: preserve-3d;
+  will-change: transform;
 }
 
 .composer-wrap:focus-within {
-  border-color: var(--accent-border);
-  box-shadow: 0 0 0 1px var(--accent-glow), var(--shadow-md);
+  border-color: rgba(163, 191, 255, 0.4);
+  box-shadow: 0 0 0 1px var(--accent-glow), var(--shadow-lg), 0 12px 40px rgba(163, 191, 255, 0.1);
 }
 
 .chat-textarea {
