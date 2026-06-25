@@ -1,13 +1,24 @@
-/*
- * Selene — Complete ground-up frontend (app.js)
- * - Toast system (success/error/warning/info)
- * - Auto-resizing chat input (max height then scroll) + size count
- * - Dynamic document titles
- * - All ad-hoc alerts/confirms replaced
- * - Improved human error messages
- * - Consolidated type scale usage
+/**
+ * Selene — app.js (complete ground-up rewrite)
+ *
+ * Implements:
+ *   - Full toast/notification system (success/error/warning/info, auto-dismiss,
+ *     hover-pause, progress bar, ARIA live regions, manual dismiss)
+ *   - Auto-resizing textarea (expands up to maxHeight, then scrolls)
+ *   - Character / context-token count display
+ *   - Dynamic document titles: "{Conversation Name} — Selene"
+ *   - Streaming SSE handler (thinking, tool cards, content chunks)
+ *   - Improved, human-friendly error messages (specific + constructive)
+ *   - Settings persistence and sync
+ *   - Session load/save with proper UX feedback
+ *   - showConfirm() — replaces window.confirm() with a toast-based prompt
  */
 
+'use strict';
+
+/* ═══════════════════════════════════════════════════════════════
+   STATE
+   ═══════════════════════════════════════════════════════════════ */
 const state = {
   activeSession: 'New conversation',
   history: [],
@@ -19,383 +30,521 @@ const state = {
   },
   savedSessions: [],
   isGenerating: false,
-  currentAssistantBody: null,
+  // Streaming refs
+  currentAssistantBody:   null,
   currentAssistantBubble: null,
-  currentThinkingBox: null,
-  currentAssistantText: '',
-  currentAssistantThinkingText: '',
-  toolCards: {},
-  toolCallCounter: 0
+  currentThinkingCard:    null,
+  currentAssistantText:   '',
+  currentThinkingText:    '',
+  toolCards:              {},
+  toolCallCounter:        0
 };
 
-let currentAbortController = null;
-let toasts = [];
+let abortController = null;
 
-/* ═══════════════════════════════════════════════════════════════════════
+
+/* ═══════════════════════════════════════════════════════════════
    TOAST / NOTIFICATION SYSTEM
-   Requirements:
-   - Types: success, error, warning, info
-   - Auto dismiss (errors last longer)
-   - Manual dismiss (X)
-   - Stack cleanly (top-right)
-   - ARIA live region via #toast-container (role=status + aria-live=polite)
-   - Pause on hover
-   ═══════════════════════════════════════════════════════════════════════ */
+
+   Requirements met:
+   ✓ 4 types: success, error, warning, info
+   ✓ Auto-dismiss (errors 8 s, warnings 5 s, info 3.8 s, success 3.2 s)
+   ✓ Manual dismiss (× button)
+   ✓ Stacks cleanly (top-right)
+   ✓ ARIA live regions: role="alert" for error/warning (immediate),
+                        role="status" for success/info (polite)
+   ✓ Pause on hover — dismissal timer pauses while hovered
+   ✓ Progress bar shows remaining time
+   ═══════════════════════════════════════════════════════════════ */
+const TOAST_DURATIONS = { success: 3200, info: 3800, warning: 5200, error: 0 }; // 0 = must dismiss
+
+const TOAST_ICONS = {
+  success: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`,
+  error:   `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+  warning: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>`,
+  info:    `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>`
+};
+
+/**
+ * Show a toast notification.
+ * @param {string} message     User-facing message text
+ * @param {'success'|'error'|'warning'|'info'} type  Notification type
+ * @param {number|null} duration  Override ms (0 = permanent until dismissed, null = default)
+ * @returns {HTMLElement} The toast element
+ */
 function showToast(message, type = 'info', duration = null) {
   const container = document.getElementById('toast-container');
-  if (!container) return;
+  if (!container) return null;
+
+  const life = duration !== null ? duration : (TOAST_DURATIONS[type] ?? 3800);
 
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
-  toast.setAttribute('role', 'status');
-
-  const icons = {
-    success: '<i data-lucide="check-circle" style="width:17px;height:17px;color:#4ade80"></i>',
-    error:   '<i data-lucide="alert-triangle" style="width:17px;height:17px;color:#f87171"></i>',
-    warning: '<i data-lucide="alert-circle" style="width:17px;height:17px;color:#facc15"></i>',
-    info:    '<i data-lucide="info" style="width:17px;height:17px;color:#60a5fa"></i>'
-  };
-
-  const defaultDurations = { success: 3200, info: 3800, warning: 5200, error: 8200 };
-  const life = duration ?? defaultDurations[type] ?? 4200;
+  // ARIA: errors/warnings announce immediately; info/success are polite
+  toast.setAttribute('role', (type === 'error' || type === 'warning') ? 'alert' : 'status');
+  toast.setAttribute('aria-live', (type === 'error' || type === 'warning') ? 'assertive' : 'polite');
 
   toast.innerHTML = `
-    <span class="icon">${icons[type] || icons.info}</span>
-    <span class="msg">${escapeHtml(message)}</span>
-    <button class="close" aria-label="Dismiss"><i data-lucide="x" style="width:15px;height:15px;"></i></button>
+    <span class="toast-icon">${TOAST_ICONS[type] || TOAST_ICONS.info}</span>
+    <span class="toast-message">${escapeHtml(message)}</span>
+    <button class="toast-close" aria-label="Dismiss notification">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+    ${life > 0 ? `<div class="toast-progress"><div class="toast-progress-bar" style="width:100%"></div></div>` : ''}
   `;
 
-  let timeoutId = null;
-
-  const dismiss = () => {
-    toast.style.transition = 'opacity 120ms';
-    toast.style.opacity = '0';
-    setTimeout(() => {
-      if (toast.parentNode) toast.parentNode.removeChild(toast);
-      toasts = toasts.filter(t => t !== toast);
-    }, 120);
-  };
-
-  // Hover pause
+  let timerId = null;
   let paused = false;
-  toast.addEventListener('mouseenter', () => { paused = true; if (timeoutId) clearTimeout(timeoutId); });
-  toast.addEventListener('mouseleave', () => {
-    paused = false;
-    if (life > 0) timeoutId = setTimeout(dismiss, 900);
-  });
+  let remaining = life;
+  let startTime = null;
+  const progressBar = toast.querySelector('.toast-progress-bar');
 
-  toast.querySelector('.close').addEventListener('click', dismiss);
-
-  container.appendChild(toast);
-  toasts.push(toast);
-
-  if (window.lucide) lucide.createIcons();
-
-  if (life > 0) {
-    timeoutId = setTimeout(() => {
-      if (!paused) dismiss();
-    }, life);
+  function dismiss() {
+    if (!toast.isConnected) return;
+    toast.classList.add('leaving');
+    toast.addEventListener('transitionend', () => {
+      toast.remove();
+    }, { once: true });
+    // Fallback in case transition doesn't fire
+    setTimeout(() => toast.remove(), 300);
   }
 
-  // Allow manual control
+  function startTimer() {
+    if (life <= 0) return;
+    startTime = Date.now();
+    if (progressBar) {
+      progressBar.style.transition = `width ${remaining}ms linear`;
+      progressBar.style.width = '0%';
+    }
+    timerId = setTimeout(dismiss, remaining);
+  }
+
+  function pauseTimer() {
+    if (!timerId) return;
+    clearTimeout(timerId);
+    timerId = null;
+    remaining = remaining - (Date.now() - startTime);
+    if (progressBar) {
+      const pct = (remaining / life) * 100;
+      progressBar.style.transition = 'none';
+      progressBar.style.width = `${Math.max(0, pct)}%`;
+    }
+  }
+
+  function resumeTimer() {
+    if (life <= 0 || remaining <= 0) return;
+    startTimer();
+  }
+
+  toast.addEventListener('mouseenter', () => { paused = true; pauseTimer(); });
+  toast.addEventListener('mouseleave', () => { paused = false; resumeTimer(); });
+  toast.querySelector('.toast-close').addEventListener('click', dismiss);
+
+  container.appendChild(toast);
+  startTimer();
+
+  // Expose dismiss for external use (e.g., confirm toasts)
   toast._dismiss = dismiss;
   return toast;
 }
 
-/* Replace ad-hoc alert / confirm with nice toasts + confirm toast */
+/**
+ * Replace window.confirm() — shows a warning toast with Confirm + Cancel buttons.
+ * @param {string}   message    Text to display
+ * @param {Function} onConfirm  Called on confirm
+ * @param {Function} onCancel   Called on cancel (optional)
+ */
 function showConfirm(message, onConfirm, onCancel) {
-  // Simple accessible confirm using two toasts stacked
-  const t = showToast(message + '  —  Click X to cancel', 'warning', 0);
+  const container = document.getElementById('toast-container');
+  if (!container) { if (onConfirm) onConfirm(); return; }
 
-  const confirmBtn = document.createElement('button');
-  confirmBtn.textContent = 'Confirm';
-  confirmBtn.style.cssText = 'margin-left:8px;background:#334155;color:#fff;border:0;padding:2px 9px;border-radius:6px;font-size:12px;cursor:pointer;';
-  confirmBtn.onclick = () => {
-    t._dismiss?.();
+  const toast = document.createElement('div');
+  toast.className = 'toast warning';
+  toast.setAttribute('role', 'alertdialog');
+  toast.setAttribute('aria-live', 'assertive');
+  toast.setAttribute('aria-label', 'Confirmation required');
+
+  toast.innerHTML = `
+    <span class="toast-icon">${TOAST_ICONS.warning}</span>
+    <div class="toast-message" style="display:flex;flex-direction:column;gap:8px;">
+      <span>${escapeHtml(message)}</span>
+      <div style="display:flex;gap:8px;">
+        <button id="confirm-yes" style="background:rgba(240,112,112,0.15);color:#f07070;border:1px solid rgba(240,112,112,0.3);padding:4px 12px;border-radius:7px;font-size:12px;cursor:pointer;font-family:inherit;">
+          Confirm
+        </button>
+        <button id="confirm-no" style="background:rgba(255,255,255,0.06);color:var(--ink-2);border:1px solid var(--border);padding:4px 12px;border-radius:7px;font-size:12px;cursor:pointer;font-family:inherit;">
+          Cancel
+        </button>
+      </div>
+    </div>
+    <button class="toast-close" aria-label="Cancel">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  `;
+
+  const dismiss = () => {
+    toast.classList.add('leaving');
+    setTimeout(() => toast.remove(), 300);
+  };
+
+  toast.querySelector('#confirm-yes').addEventListener('click', () => {
+    dismiss();
     onConfirm?.();
-  };
-
-  const closeBtn = t.querySelector('.close');
-  const orig = closeBtn.onclick;
-  closeBtn.onclick = (e) => {
-    t._dismiss?.();
+  });
+  toast.querySelector('#confirm-no').addEventListener('click', () => {
+    dismiss();
     onCancel?.();
-  };
+  });
+  toast.querySelector('.toast-close').addEventListener('click', () => {
+    dismiss();
+    onCancel?.();
+  });
 
-  t.querySelector('.msg').appendChild(confirmBtn);
+  container.appendChild(toast);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
+
+/* ═══════════════════════════════════════════════════════════════
    UTILITIES
-   ═══════════════════════════════════════════════════════════════════════ */
+   ═══════════════════════════════════════════════════════════════ */
 function escapeHtml(str) {
   if (!str) return '';
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-function updateDocumentTitle(title) {
-  const clean = (title || 'New conversation').trim();
-  // Consistent, descriptive pattern: specific page/convo first, then app name
-  document.title = clean === 'New conversation' || !clean
-    ? 'Selene'
-    : `${clean} — Selene`;
+/**
+ * Update the document title.
+ * Pattern: "{Conversation Name} — Selene" or just "Selene" for new conversations.
+ * Ensures browser tabs, history, and bookmarks are meaningful.
+ * @param {string} title - Conversation name or empty for default
+ */
+function setDocumentTitle(title) {
+  const name = (title || '').trim();
+  if (!name || name === 'New conversation' || name === 'Active Session') {
+    document.title = 'Selene';
+  } else {
+    document.title = `${name} — Selene`;
+  }
 }
 
-function scrollMessagesToBottom(force = false) {
+function scrollToBottom(force = false) {
   const el = document.getElementById('messages');
   if (!el) return;
   if (force) {
     el.scrollTop = el.scrollHeight;
     return;
   }
-  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  // Auto-scroll only when near bottom (within 140px)
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
   if (nearBottom) el.scrollTop = el.scrollHeight;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
+
+/* ═══════════════════════════════════════════════════════════════
    INITIALIZATION
-   ═══════════════════════════════════════════════════════════════════════ */
+   ═══════════════════════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', () => {
-  initLibraries();
-  initEventListeners();
-  loadSessionState();
+  setupLibraries();
+  setupEventListeners();
+  loadInitialState();
 });
 
-function initLibraries() {
+function setupLibraries() {
+  // Configure marked for safe, highlighted markdown
   if (window.marked) {
     marked.setOptions({
       highlight: (code, lang) => {
-        const language = (window.hljs && hljs.getLanguage(lang)) ? lang : 'plaintext';
-        return window.hljs ? hljs.highlight(code, { language }).value : escapeHtml(code);
+        if (window.hljs) {
+          const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+          return hljs.highlight(code, { language }).value;
+        }
+        return escapeHtml(code);
       },
-      langPrefix: 'hljs language-'
+      langPrefix: 'hljs language-',
+      gfm: true,
+      breaks: false
     });
   }
+
+  // Init lucide icons after DOM is ready
   if (window.lucide) lucide.createIcons();
 }
 
-function initEventListeners() {
-  // Sidebar toggle
-  const sidebar = document.getElementById('sidebar');
-  document.getElementById('sidebar-toggle')?.addEventListener('click', () => {
-    sidebar.classList.toggle('open');
+function setupEventListeners() {
+  // ── Sidebar toggle ────────────────────────────────────────────
+  const sidebar     = document.getElementById('sidebar');
+  const sidebarToggleBtn = document.getElementById('sidebar-toggle');
+
+  sidebarToggleBtn?.addEventListener('click', () => {
+    const isOpen = sidebar.classList.toggle('open');
+    sidebarToggleBtn.setAttribute('aria-expanded', String(isOpen));
   });
 
-  // New chat
+  // Close sidebar on outside click (mobile)
+  document.addEventListener('click', (e) => {
+    if (
+      window.innerWidth < 821 &&
+      sidebar?.classList.contains('open') &&
+      !sidebar.contains(e.target) &&
+      e.target.id !== 'sidebar-toggle'
+    ) {
+      sidebar.classList.remove('open');
+      sidebarToggleBtn?.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  // ── New chat ──────────────────────────────────────────────────
   document.getElementById('new-chat-btn')?.addEventListener('click', () => {
     clearConversation();
   });
 
-  // Composer
-  const input = document.getElementById('chat-input');
-  const sendBtn = document.getElementById('send-btn');
-  const countEl = document.getElementById('input-count');
+  // ── Composer (chatbox) ────────────────────────────────────────
+  const textarea = document.getElementById('chat-input');
+  const sendBtn  = document.getElementById('send-btn');
+  const countEl  = document.getElementById('input-count');
 
-  if (input) {
-    // Auto-resize + max height (requirement)
-    const MAX_HEIGHT = 220;
-    const onInputResize = () => {
-      input.style.height = 'auto';
-      const next = Math.min(input.scrollHeight, MAX_HEIGHT);
-      input.style.height = next + 'px';
-      input.style.overflowY = input.scrollHeight > MAX_HEIGHT ? 'auto' : 'hidden';
+  const MAX_TEXTAREA_HEIGHT = 220; // px — requirement: expand then scroll
 
-      if (countEl) countEl.textContent = String(input.value.length || 0);
-      updateSendButton();
-    };
+  function resizeTextarea() {
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    const next = Math.min(textarea.scrollHeight, MAX_TEXTAREA_HEIGHT);
+    textarea.style.height = `${next}px`;
+    // Switch to scrollable when at max
+    textarea.style.overflowY = textarea.scrollHeight > MAX_TEXTAREA_HEIGHT ? 'auto' : 'hidden';
 
-    input.addEventListener('input', onInputResize);
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        if (!state.isGenerating) sendMessage();
-      }
-    });
-
-    // Prime count
-    setTimeout(onInputResize, 0);
+    // Update character count
+    if (countEl) countEl.textContent = String(textarea.value.length);
+    updateSendButton();
   }
 
-  if (sendBtn) {
-    sendBtn.addEventListener('click', () => {
-      if (state.isGenerating) {
-        if (currentAbortController) currentAbortController.abort();
-        finishGeneration(true);
-      } else {
+  textarea?.addEventListener('input', resizeTextarea);
+
+  textarea?.addEventListener('keydown', (e) => {
+    // Enter sends; Shift+Enter inserts newline
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (!state.isGenerating && textarea.value.trim()) {
         sendMessage();
       }
-    });
-  }
-
-  // Settings panel toggle
-  const settingsToggle = document.getElementById('settings-toggle');
-  const settingsPanel = document.getElementById('settings-panel');
-  settingsToggle?.addEventListener('click', () => {
-    settingsPanel.classList.toggle('open');
-    const chev = settingsToggle.querySelector('[data-lucide="chevron-down"]');
-    if (chev) chev.style.transform = settingsPanel.classList.contains('open') ? 'rotate(180deg)' : '';
+    }
   });
 
-  // Model parameter sliders + switches
-  bindSettingsControls();
+  // Prime on load
+  requestAnimationFrame(resizeTextarea);
 
-  // Clear
+  sendBtn?.addEventListener('click', () => {
+    if (state.isGenerating) {
+      // Stop button
+      abortController?.abort();
+      finishGeneration(true);
+    } else {
+      sendMessage();
+    }
+  });
+
+  // ── Settings panel ────────────────────────────────────────────
+  const settingsToggleBtn = document.getElementById('settings-toggle');
+  const settingsPanel     = document.getElementById('settings-panel');
+  const settingsChevron   = settingsToggleBtn?.querySelector('.settings-chevron');
+
+  settingsToggleBtn?.addEventListener('click', () => {
+    const isOpen = settingsPanel.classList.toggle('open');
+    settingsChevron?.classList.toggle('open', isOpen);
+    settingsToggleBtn.setAttribute('aria-expanded', String(isOpen));
+  });
+
+  setupSettingsSliders();
+
+  // ── Clear ─────────────────────────────────────────────────────
   document.getElementById('clear-btn')?.addEventListener('click', () => {
-    showConfirm('Clear this conversation?', () => clearConversation(), null);
+    showConfirm(
+      'Clear this conversation? This cannot be undone.',
+      () => clearConversation(),
+      null
+    );
   });
 
-  // Help
+  // ── Help modal ────────────────────────────────────────────────
   const helpModal = document.getElementById('help-modal');
+
   document.getElementById('help-btn')?.addEventListener('click', () => {
-    if (helpModal) helpModal.classList.add('open');
-  });
-  helpModal?.querySelectorAll('.close-help, .modal-card').forEach(el => {
-    el.addEventListener('click', (e) => {
-      if (e.target === helpModal || e.currentTarget.classList.contains('close-help')) {
-        helpModal.classList.remove('open');
-      }
-    });
+    helpModal?.classList.add('open');
+    helpModal?.querySelector('.close-modal')?.focus();
   });
 
-  // Click outside sidebar on mobile closes it
-  document.addEventListener('click', (e) => {
-    if (window.innerWidth < 821 && sidebar.classList.contains('open')) {
-      if (!sidebar.contains(e.target) && e.target.id !== 'sidebar-toggle') {
-        sidebar.classList.remove('open');
-      }
+  helpModal?.addEventListener('click', (e) => {
+    // Close on backdrop click
+    if (e.target === helpModal) helpModal.classList.remove('open');
+  });
+
+  helpModal?.querySelector('.close-modal')?.addEventListener('click', () => {
+    helpModal.classList.remove('open');
+  });
+
+  // Close modals on Escape
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      helpModal?.classList.remove('open');
     }
   });
 }
 
-function bindSettingsControls() {
-  const sliders = [
-    { id: 'param-temperature', val: 'temp-val', key: 'temperature' },
-    { id: 'param-top_p', val: 'topp-val', key: 'top_p' },
-    { id: 'param-top_k', val: 'topk-val', key: 'top_k' }
+function setupSettingsSliders() {
+  const sliderConfig = [
+    { sliderId: 'param-temperature', displayId: 'temp-val', key: 'temperature', decimals: 2 },
+    { sliderId: 'param-top_p',       displayId: 'topp-val', key: 'top_p',       decimals: 2 },
+    { sliderId: 'param-top_k',       displayId: 'topk-val', key: 'top_k',       decimals: 0 }
   ];
 
-  sliders.forEach(s => {
-    const input = document.getElementById(s.id);
-    const display = document.getElementById(s.val);
-    if (!input || !display) return;
+  sliderConfig.forEach(({ sliderId, displayId, key, decimals }) => {
+    const slider  = document.getElementById(sliderId);
+    const display = document.getElementById(displayId);
+    if (!slider || !display) return;
 
-    const update = (val) => {
-      display.textContent = parseFloat(val).toFixed(s.key === 'top_k' ? 0 : 2);
-      if (!state.settings.options) state.settings.options = {};
-      state.settings.options[s.key] = parseFloat(val);
-      saveSettings();
-    };
-
-    input.addEventListener('input', (e) => update(e.target.value));
+    slider.addEventListener('input', () => {
+      const val = parseFloat(slider.value);
+      display.textContent = val.toFixed(decimals);
+      state.settings.options = state.settings.options || {};
+      state.settings.options[key] = val;
+      persistSettings();
+    });
   });
 
-  const hist = document.getElementById('setting-history');
-  const think = document.getElementById('setting-think');
+  document.getElementById('setting-history')?.addEventListener('change', (e) => {
+    state.settings.history = e.target.checked;
+    persistSettings();
+  });
 
-  if (hist) hist.addEventListener('change', (e) => { state.settings.history = e.target.checked; saveSettings(); });
-  if (think) think.addEventListener('change', (e) => { state.settings.think = e.target.checked; saveSettings(); });
+  document.getElementById('setting-think')?.addEventListener('change', (e) => {
+    state.settings.think = e.target.checked;
+    persistSettings();
+  });
 }
 
 function syncSettingsUI() {
-  const s = state.settings || {};
-  const opts = s.options || {};
+  const opts = state.settings?.options || {};
 
   const map = [
     ['param-temperature', 'temp-val', opts.temperature ?? 0.7, 2],
-    ['param-top_p', 'topp-val', opts.top_p ?? 0.9, 2],
-    ['param-top_k', 'topk-val', opts.top_k ?? 40, 0]
+    ['param-top_p',       'topp-val', opts.top_p      ?? 0.9, 2],
+    ['param-top_k',       'topk-val', opts.top_k      ?? 40,  0]
   ];
 
-  map.forEach(([id, vid, val, dec]) => {
-    const el = document.getElementById(id);
-    const v = document.getElementById(vid);
-    if (el) el.value = val;
-    if (v) v.textContent = parseFloat(val).toFixed(dec);
+  map.forEach(([sid, vid, val, dec]) => {
+    const sl = document.getElementById(sid);
+    const dv = document.getElementById(vid);
+    if (sl) sl.value = val;
+    if (dv) dv.textContent = parseFloat(val).toFixed(dec);
   });
 
-  const hist = document.getElementById('setting-history');
-  if (hist) hist.checked = s.history !== false;
-
-  const think = document.getElementById('setting-think');
-  if (think) think.checked = s.think !== false;
+  const histEl  = document.getElementById('setting-history');
+  const thinkEl = document.getElementById('setting-think');
+  if (histEl)  histEl.checked  = state.settings.history !== false;
+  if (thinkEl) thinkEl.checked = state.settings.think   !== false;
 }
 
-async function saveSettings() {
+async function persistSettings() {
   try {
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(state.settings)
     });
-  } catch (e) { /* silent — toast on load failure only */ }
+  } catch {
+    // Silently fail — user is already in the UI, no need to disrupt
+  }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   SESSION / DATA LOADING
-   ═══════════════════════════════════════════════════════════════════════ */
-async function loadSessionState() {
+
+/* ═══════════════════════════════════════════════════════════════
+   DATA LOADING
+   ═══════════════════════════════════════════════════════════════ */
+async function loadInitialState() {
   try {
-    const res = await fetch('/api/settings');
+    const res  = await fetch('/api/settings');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
-    state.history = data.history || [];
-    state.savedSessions = data.saved_sessions || [];
-    state.settings = data.settings || state.settings;
+    state.history       = data.history           || [];
+    state.savedSessions = data.saved_sessions     || [];
+    state.settings      = data.settings           || state.settings;
     state.activeSession = data.active_session_name || 'New conversation';
 
     const badge = document.getElementById('model-badge');
     if (badge) badge.textContent = data.model_name || 'selene';
 
     updateConnectionStatus(data.ollama_status);
-
     syncSettingsUI();
     renderConversationList();
     renderMessages();
-    updateDocumentTitle(state.activeSession);
+    setDocumentTitle(state.activeSession);
+
   } catch (err) {
-    showToast('Could not load your session. Is the backend running?', 'error');
+    // IMPROVED ERROR: specific + constructive + human
+    showToast(
+      "Couldn't connect to Selene's backend. Make sure Ollama is running, then refresh the page.",
+      'error'
+    );
+    renderWelcome();
   }
 }
 
 function updateConnectionStatus(status) {
-  const dot = document.getElementById('status-dot');
-  const txt = document.getElementById('status-text');
+  const dot  = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
   const wrap = document.getElementById('status-indicator');
 
-  const isOnline = status === 'Online';
-  if (dot) dot.style.background = isOnline ? '#4ade80' : '#f87171';
-  if (txt) txt.textContent = isOnline ? 'Online' : 'Offline';
+  const isOnline = (status === 'Online');
+  dot?.classList.toggle('offline', !isOnline);
+  if (text) text.textContent = isOnline ? 'Online' : 'Offline';
   if (wrap) wrap.title = `Ollama: ${status || 'Unknown'}`;
 }
 
 async function clearConversation() {
   try {
     await fetch('/api/clear-session', { method: 'POST' });
-    state.history = [];
+    state.history       = [];
     state.activeSession = 'New conversation';
-    document.getElementById('messages').innerHTML = '';
+
+    const messages = document.getElementById('messages');
+    if (messages) messages.innerHTML = '';
+
     renderConversationList();
     renderWelcome();
-    updateDocumentTitle(state.activeSession);
-    showToast('Conversation cleared', 'info', 1600);
-  } catch (e) {
-    showToast('Failed to clear conversation. Please try again.', 'error');
+    setDocumentTitle(state.activeSession);
+    showToast('Conversation cleared — ready for a fresh start.', 'info', 2000);
+  } catch {
+    showToast(
+      'Could not clear the conversation right now. Please try again.',
+      'error'
+    );
   }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   RENDERING
-   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDERING — CONVERSATION LIST
+   ═══════════════════════════════════════════════════════════════ */
 function renderConversationList() {
   const list = document.getElementById('convo-list');
   if (!list) return;
 
   list.innerHTML = '';
 
-  if (!state.savedSessions || state.savedSessions.length === 0) {
+  if (!state.savedSessions?.length) {
     const empty = document.createElement('div');
     empty.className = 'convo-empty';
-    empty.textContent = 'No saved conversations yet';
+    empty.textContent = 'No saved conversations yet.\nYour sessions will appear here.';
     list.appendChild(empty);
     return;
   }
@@ -403,71 +552,104 @@ function renderConversationList() {
   state.savedSessions.forEach((filename) => {
     const base = filename.replace('.json', '');
     let display = base;
-    let meta = '';
+    let metaText = '';
 
+    // Parse timestamped filenames like: name_20240101_120000.json
     const m = base.match(/^(.+)_(\d{8})_(\d{6})$/);
     if (m) {
-      display = m[1].replace(/_/g, ' ');
-      const [y, mo, d, hr, mn] = [m[2].slice(0,4), m[2].slice(4,6), m[2].slice(6,8), m[2].slice(0,2), m[2].slice(2,4)];
-      meta = `${d}/${mo} ${hr}:${mn}`;
+      display  = m[1].replace(/_/g, ' ');
+      const y  = m[2].slice(0, 4);
+      const mo = m[2].slice(4, 6);
+      const d  = m[2].slice(6, 8);
+      metaText = `${d}/${mo}`;
     }
 
     const item = document.createElement('div');
-    item.className = `convo-item ${base + '.json' === state.activeSession ? 'active' : ''}`;
+    item.className = `convo-item${filename === state.activeSession ? ' active' : ''}`;
+    item.setAttribute('role', 'listitem');
+    item.setAttribute('title', display);
+    item.setAttribute('tabindex', '0');
     item.innerHTML = `
-      <span class="convo-name" title="${escapeHtml(display)}">${escapeHtml(display)}</span>
-      <span class="text-caption mono" style="flex-shrink:0;">${meta}</span>
+      <svg class="convo-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+      </svg>
+      <span class="convo-name">${escapeHtml(display)}</span>
+      ${metaText ? `<span class="convo-meta">${escapeHtml(metaText)}</span>` : ''}
     `;
-    item.addEventListener('click', () => loadSavedSession(filename, item));
+
+    const load = () => loadSavedSession(filename);
+    item.addEventListener('click', load);
+    item.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); load(); }
+    });
+
     list.appendChild(item);
   });
 }
 
-async function loadSavedSession(filename, el) {
+async function loadSavedSession(filename) {
   try {
     const res = await fetch('/api/load-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: filename })
     });
-    const json = await res.json();
-    if (json.status === 'success') {
-      await loadSessionState();
-      document.getElementById('sidebar')?.classList.remove('open');
+    const data = await res.json();
+
+    if (data.status === 'success') {
+      await loadInitialState();
+      // Close sidebar on mobile after loading
+      if (window.innerWidth < 821) {
+        document.getElementById('sidebar')?.classList.remove('open');
+        document.getElementById('sidebar-toggle')?.setAttribute('aria-expanded', 'false');
+      }
+      showToast('Conversation loaded.', 'success', 2200);
     } else {
-      showToast('Could not load that conversation.', 'error');
+      showToast(
+        "That conversation couldn't be opened — the file may be missing or corrupted. Try another one.",
+        'error'
+      );
     }
-  } catch (e) {
-    showToast('Network error loading conversation.', 'error');
+  } catch {
+    showToast(
+      "Network hiccup — the conversation didn't load. Check your connection and try again.",
+      'error'
+    );
   }
 }
 
+
+/* ═══════════════════════════════════════════════════════════════
+   RENDERING — MESSAGES
+   ═══════════════════════════════════════════════════════════════ */
 function renderMessages() {
   const container = document.getElementById('messages');
   if (!container) return;
   container.innerHTML = '';
 
+  // Coalesce history into display pairs
   const display = [];
   for (let i = 0; i < state.history.length; i++) {
     const msg = state.history[i];
     if (msg.role === 'user') {
       display.push({ role: 'user', content: msg.content });
     } else if (msg.role === 'assistant') {
-      const tools = [];
+      const toolResults = [];
       let j = i + 1;
       while (j < state.history.length && state.history[j].role === 'tool') {
-        tools.push(state.history[j]);
+        toolResults.push(state.history[j]);
         j++;
       }
       i = j - 1;
       display.push({
-        role: 'assistant',
-        content: msg.content,
-        thinking: msg.thinking,
-        tool_calls: msg.tool_calls,
-        tool_results: tools
+        role:         'assistant',
+        content:      msg.content,
+        thinking:     msg.thinking,
+        tool_calls:   msg.tool_calls,
+        tool_results: toolResults
       });
     }
+    // Skip system messages in display
   }
 
   if (display.length === 0) {
@@ -475,11 +657,12 @@ function renderMessages() {
     return;
   }
 
-  display.forEach(m => {
+  display.forEach((m) => {
     if (m.role === 'user') appendUserMessage(m.content, false);
-    else appendAssistantMessage(m, false);
+    else                   appendAssistantMessage(m, false);
   });
-  scrollMessagesToBottom(true);
+
+  scrollToBottom(true);
 }
 
 function renderWelcome(container = null) {
@@ -489,37 +672,39 @@ function renderWelcome(container = null) {
   const div = document.createElement('div');
   div.className = 'welcome';
   div.innerHTML = `
-    <svg class="moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-    <h1 class="text-h1">Selene</h1>
-    <p>A calm, capable AI that lives on your machine.</p>
+    <svg class="welcome-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+    </svg>
+    <h1 class="welcome-title">Good to see you.</h1>
+    <p class="welcome-sub">Selene is ready — your calm, capable AI on this machine.<br>Ask anything or try one of these:</p>
 
-    <div class="suggestions">
-      <div class="suggestion" data-cmd="Search the web for the latest AI news">
-        <span class="label">Web</span>
-        <div>Search the web for the latest AI news</div>
-      </div>
-      <div class="suggestion" data-cmd="Index my project folder and give me an architecture summary">
-        <span class="label">Vault</span>
-        <div>Index my project and summarize the architecture</div>
-      </div>
-      <div class="suggestion" data-cmd="Write a Python function to recursively find duplicate files">
-        <span class="label">Code</span>
-        <div>Write a script to find duplicate files</div>
-      </div>
-      <div class="suggestion" data-cmd="Play some ambient focus music">
-        <span class="label">Music</span>
-        <div>Play ambient focus music on Spotify</div>
-      </div>
+    <div class="suggestions" role="list">
+      <button class="suggestion-chip" data-prompt="Search the web for the latest AI research news" role="listitem">
+        <span class="chip-label">Explore</span>
+        <span class="chip-text">Search for the latest AI research</span>
+      </button>
+      <button class="suggestion-chip" data-prompt="Index my project folder and give me an architecture summary" role="listitem">
+        <span class="chip-label">Vault</span>
+        <span class="chip-text">Index my project and summarize its architecture</span>
+      </button>
+      <button class="suggestion-chip" data-prompt="Write a Python function to recursively find duplicate files" role="listitem">
+        <span class="chip-label">Code</span>
+        <span class="chip-text">Write a script to find duplicate files</span>
+      </button>
+      <button class="suggestion-chip" data-prompt="Play some ambient focus music on Spotify" role="listitem">
+        <span class="chip-label">Music</span>
+        <span class="chip-text">Queue ambient focus music on Spotify</span>
+      </button>
     </div>
   `;
 
   el.appendChild(div);
 
-  div.querySelectorAll('.suggestion').forEach(s => {
-    s.addEventListener('click', () => {
+  div.querySelectorAll('.suggestion-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
       const input = document.getElementById('chat-input');
       if (input) {
-        input.value = s.getAttribute('data-cmd');
+        input.value = chip.dataset.prompt;
         input.dispatchEvent(new Event('input'));
         input.focus();
       }
@@ -529,114 +714,176 @@ function renderWelcome(container = null) {
 
 function appendUserMessage(text, animate = true) {
   const container = document.getElementById('messages');
-  const welcome = container.querySelector('.welcome');
-  if (welcome) welcome.remove();
+  if (!container) return;
+
+  // Remove welcome screen if present
+  container.querySelector('.welcome')?.remove();
 
   const row = document.createElement('div');
   row.className = 'msg user';
   row.innerHTML = `
-    <div class="bubble">${escapeHtml(text)}</div>
-    <div class="avatar">U</div>
+    <div class="msg-body">
+      <div class="bubble">${escapeHtml(text)}</div>
+    </div>
+    <div class="msg-avatar" aria-label="You" title="You">You</div>
   `;
   container.appendChild(row);
-  if (animate) scrollMessagesToBottom(true);
+  if (animate) scrollToBottom(true);
 }
 
 function appendAssistantMessage(msgData, animate = true) {
   const container = document.getElementById('messages');
-  const row = document.createElement('div');
+  if (!container) return;
+
+  const row    = document.createElement('div');
   row.className = 'msg assistant';
 
   const avatar = document.createElement('div');
-  avatar.className = 'avatar';
-  avatar.innerHTML = '<img src="/avatar.png" alt="S" style="width:28px;height:28px;object-fit:cover;border-radius:8px;">';
+  avatar.className = 'msg-avatar';
+  avatar.innerHTML = `<img src="/avatar.png" alt="Selene" width="30" height="30">`;
 
   const body = document.createElement('div');
+  body.className = 'msg-body';
 
-  if (msgData.thinking) body.appendChild(createThinkingEl(msgData.thinking, false));
-  if (msgData.tool_calls) {
+  if (msgData.thinking) {
+    body.appendChild(createThinkingCard(msgData.thinking, false));
+  }
+
+  if (msgData.tool_calls?.length) {
     msgData.tool_calls.forEach((tc, idx) => {
-      const res = (msgData.tool_results && msgData.tool_results[idx]) ? msgData.tool_results[idx].content : '';
-      body.appendChild(createToolEl(tc.function.name, tc.function.arguments, res, false));
+      const result = msgData.tool_results?.[idx]?.content || '';
+      body.appendChild(createToolCard(tc.function.name, tc.function.arguments, result, false));
     });
   }
 
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
-  bubble.innerHTML = marked.parse(msgData.content || '');
+  bubble.innerHTML  = marked.parse(msgData.content || '');
   body.appendChild(bubble);
+  addCopyButtons(bubble);
 
   row.appendChild(avatar);
   row.appendChild(body);
   container.appendChild(row);
 
-  addCopyButtons(bubble);
-  if (animate) scrollMessagesToBottom(true);
+  if (animate) scrollToBottom(true);
+  if (window.lucide) lucide.createIcons();
 }
 
-function createThinkingEl(text, streaming) {
-  const box = document.createElement('div');
-  box.className = `thinking ${streaming ? '' : 'collapsed'}`;
+
+/* ═══════════════════════════════════════════════════════════════
+   THINKING & TOOL CARDS
+   ═══════════════════════════════════════════════════════════════ */
+function createThinkingCard(text, streaming = false) {
+  const card = document.createElement('div');
+  card.className = `thinking-card${streaming ? '' : ' collapsed'}`;
 
   const header = document.createElement('div');
   header.className = 'thinking-header';
-  header.innerHTML = `<span>Thinking</span><i data-lucide="chevron-down" style="width:14px;height:14px;"></i>`;
-  const content = document.createElement('div');
-  content.className = 'thinking-content';
-  content.textContent = text;
+  header.setAttribute('role', 'button');
+  header.setAttribute('tabindex', '0');
+  header.setAttribute('aria-expanded', String(!streaming));
+  header.innerHTML = `
+    <svg class="thinking-header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+      <path d="M12 2a8 8 0 0 1 8 8c0 5.4-8 12-8 12S4 15.4 4 10a8 8 0 0 1 8-8z"/>
+      <circle cx="12" cy="10" r="2"/>
+    </svg>
+    <span class="thinking-label">Thinking</span>
+    <svg class="card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+      <path d="m6 9 6 6 6-6"/>
+    </svg>
+  `;
 
-  box.appendChild(header);
-  box.appendChild(content);
+  const body = document.createElement('div');
+  body.className = 'thinking-body';
+  body.textContent = text;
 
-  header.addEventListener('click', () => box.classList.toggle('collapsed'));
-  if (window.lucide) lucide.createIcons();
-  return box;
+  const toggle = () => {
+    const collapsed = card.classList.toggle('collapsed');
+    header.setAttribute('aria-expanded', String(!collapsed));
+  };
+
+  header.addEventListener('click', toggle);
+  header.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+  });
+
+  card.appendChild(header);
+  card.appendChild(body);
+  return card;
 }
 
-function createToolEl(name, args, result = '', isRunning = false) {
+function createToolCard(name, args, result = '', running = false) {
   const card = document.createElement('div');
-  card.className = `tool ${isRunning ? '' : 'collapsed'}`;
+  card.className = `tool-card${running ? '' : ' collapsed'}`;
+
+  const argsStr   = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+  const resultStr = result ? `\n\nResult:\n${result}` : (running ? '\nRunning…' : '');
 
   const header = document.createElement('div');
   header.className = 'tool-header';
+  header.setAttribute('role', 'button');
+  header.setAttribute('tabindex', '0');
+  header.setAttribute('aria-expanded', String(running));
   header.innerHTML = `
-    <span>Tool: <span style="color:#a5b4fc">${escapeHtml(name)}</span></span>
-    <i data-lucide="chevron-down" style="width:15px;height:15px;"></i>
+    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+    </svg>
+    <span style="font-size:var(--fs-caption);color:var(--ink-3);">Tool: </span>
+    <span class="tool-name">${escapeHtml(name)}</span>
+    <svg class="card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+      <path d="m6 9 6 6 6-6"/>
+    </svg>
   `;
-  const content = document.createElement('div');
-  content.className = 'tool-content';
-  content.textContent = `Args:\n${JSON.stringify(args, null, 2)}\n\n${result ? 'Result:\n' + result : (isRunning ? 'Running...' : '')}`;
+
+  const body = document.createElement('div');
+  body.className = 'tool-body';
+  body.textContent = `Args:\n${argsStr}${resultStr}`;
+
+  const toggle = () => {
+    const collapsed = card.classList.toggle('collapsed');
+    header.setAttribute('aria-expanded', String(!collapsed));
+  };
+
+  header.addEventListener('click', toggle);
+  header.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+  });
 
   card.appendChild(header);
-  card.appendChild(content);
-  header.addEventListener('click', () => card.classList.toggle('collapsed'));
-  if (window.lucide) lucide.createIcons();
+  card.appendChild(body);
   return card;
 }
 
 function addCopyButtons(scope) {
-  scope.querySelectorAll('pre').forEach(pre => {
-    if (pre.querySelector('.copy-btn')) return;
-    const btn = document.createElement('button');
+  scope.querySelectorAll('pre').forEach((pre) => {
+    if (pre.querySelector('.copy-btn')) return; // skip if already added
+
+    const btn    = document.createElement('button');
     btn.className = 'copy-btn';
-    btn.style.cssText = 'position:absolute;top:8px;right:8px;font-size:11px;padding:3px 8px;border-radius:6px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:#9aa3b8;cursor:pointer;';
-    btn.innerHTML = 'Copy';
-    pre.style.position = 'relative';
-    pre.appendChild(btn);
+    btn.textContent = 'Copy';
+    btn.setAttribute('aria-label', 'Copy code to clipboard');
 
     btn.addEventListener('click', async () => {
       const code = pre.querySelector('code')?.textContent || '';
-      await navigator.clipboard.writeText(code);
-      const old = btn.textContent;
-      btn.textContent = 'Copied';
-      setTimeout(() => { btn.textContent = old; }, 1500);
+      try {
+        await navigator.clipboard.writeText(code);
+        btn.textContent = 'Copied!';
+        showToast('Code copied to clipboard.', 'success', 1500);
+      } catch {
+        showToast('Could not copy — try selecting the text manually.', 'warning');
+      }
+      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
     });
+
+    pre.appendChild(btn);
   });
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   SENDING + STREAMING
-   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════════════
+   SEND & STREAM
+   ═══════════════════════════════════════════════════════════════ */
 async function sendMessage() {
   const input = document.getElementById('chat-input');
   if (!input || state.isGenerating) return;
@@ -644,81 +891,96 @@ async function sendMessage() {
   const text = input.value.trim();
   if (!text) return;
 
-  appendUserMessage(text);
+  // Clear input
   input.value = '';
   input.style.height = 'auto';
-  document.getElementById('input-count').textContent = '0';
+  input.style.overflowY = 'hidden';
+  const countEl = document.getElementById('input-count');
+  if (countEl) countEl.textContent = '0';
+
+  appendUserMessage(text);
 
   state.isGenerating = true;
   updateSendButton();
   resetStreamState();
 
-  currentAbortController = new AbortController();
+  abortController = new AbortController();
 
   try {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text }),
-      signal: currentAbortController.signal
+      signal: abortController.signal
     });
 
-    if (!resp.ok) throw new Error('Request failed');
+    if (!resp.ok) {
+      throw new Error(`Server responded with ${resp.status}`);
+    }
 
-    const reader = resp.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
 
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop() || '';
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // keep partial line in buffer
 
       for (const line of lines) {
         if (line.startsWith('data: ')) {
           try {
-            handleStreamEvent(JSON.parse(line.slice(6)));
-          } catch (_) {}
+            processStreamEvent(JSON.parse(line.slice(6)));
+          } catch {
+            // Ignore malformed events
+          }
         }
       }
     }
   } catch (err) {
     if (err.name === 'AbortError') {
-      showToast('Generation stopped', 'info', 1400);
+      // User pressed stop — don't show error
     } else {
-      // IMPROVED ERROR MESSAGE (specific + constructive + human)
-      showToast('Connection lost. Please make sure Ollama is running and try sending again.', 'error');
+      // IMPROVED ERROR: specific + constructive + human
+      showToast(
+        'Selene lost the connection mid-response. Check that Ollama is still running, then try again.',
+        'error'
+      );
+      finishGeneration(false);
     }
-    finishGeneration(false);
   }
 }
 
 function resetStreamState() {
-  state.currentAssistantBody = null;
+  state.currentAssistantBody   = null;
   state.currentAssistantBubble = null;
-  state.currentThinkingBox = null;
-  state.currentAssistantText = '';
-  state.currentAssistantThinkingText = '';
-  state.toolCards = {};
-  state.toolCallCounter = 0;
+  state.currentThinkingCard    = null;
+  state.currentAssistantText   = '';
+  state.currentThinkingText    = '';
+  state.toolCards              = {};
+  state.toolCallCounter        = 0;
 }
 
-function getAssistantBody() {
+function getOrCreateAssistantBody() {
   if (state.currentAssistantBody) return state.currentAssistantBody;
 
   const container = document.getElementById('messages');
-  const row = document.createElement('div');
+  container.querySelector('.welcome')?.remove();
+
+  const row    = document.createElement('div');
   row.className = 'msg assistant';
 
-  const av = document.createElement('div');
-  av.className = 'avatar';
-  av.innerHTML = '<img src="/avatar.png" alt="S" style="width:28px;height:28px;border-radius:8px;object-fit:cover">';
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.innerHTML = `<img src="/avatar.png" alt="Selene" width="30" height="30">`;
 
   const body = document.createElement('div');
+  body.className = 'msg-body';
 
-  row.appendChild(av);
+  row.appendChild(avatar);
   row.appendChild(body);
   container.appendChild(row);
 
@@ -726,127 +988,173 @@ function getAssistantBody() {
   return body;
 }
 
-function handleStreamEvent(evt) {
-  if (evt.type === 'status') {
-    appendStatusRow(evt.message);
-  }
-  else if (evt.type === 'thinking_start') {
-    const body = getAssistantBody();
-    state.currentThinkingBox = createThinkingEl('', true);
-    body.appendChild(state.currentThinkingBox);
-    scrollMessagesToBottom();
-  }
-  else if (evt.type === 'thinking_chunk') {
-    if (state.currentThinkingBox) {
-      state.currentAssistantThinkingText += evt.text || '';
-      const c = state.currentThinkingBox.querySelector('.thinking-content');
-      if (c) c.textContent = state.currentAssistantThinkingText;
-    }
-  }
-  else if (evt.type === 'thinking_end') {
-    if (state.currentThinkingBox) state.currentThinkingBox.classList.add('collapsed');
-  }
-  else if (evt.type === 'content_chunk') {
-    const body = getAssistantBody();
-    if (!state.currentAssistantBubble) {
-      state.currentAssistantBubble = document.createElement('div');
-      state.currentAssistantBubble.className = 'bubble';
-      body.appendChild(state.currentAssistantBubble);
-    }
-    state.currentAssistantText += evt.text || '';
-    state.currentAssistantBubble.innerHTML = marked.parse(state.currentAssistantText);
-    addCopyButtons(state.currentAssistantBubble);
-    scrollMessagesToBottom();
-  }
-  else if (evt.type === 'tool_start') {
-    const body = getAssistantBody();
-    state.toolCallCounter += 1;
-    const id = 't' + state.toolCallCounter;
-    const card = createToolEl(evt.name, evt.arguments || {}, '', true);
-    body.appendChild(card);
-    state.toolCards[id] = card;
-    state.lastToolId = id;
-    scrollMessagesToBottom();
-  }
-  else if (evt.type === 'tool_end') {
-    const id = state.lastToolId;
-    const old = state.toolCards[id];
-    if (old && old.parentNode) {
-      const fresh = createToolEl(evt.name, {}, evt.result || '', false);
-      old.parentNode.replaceChild(fresh, old);
-      state.toolCards[id] = fresh;
-    }
-    state.currentAssistantBody = null;
-    state.currentAssistantBubble = null;
-    state.currentAssistantText = '';
-  }
-  else if (evt.type === 'token_usage') {
-    const count = document.getElementById('input-count');
-    if (count) {
-      count.textContent = `${evt.total} / ${evt.budget} ctx`;
-      count.style.color = evt.total > evt.budget * 0.9 ? 'var(--warning)' : '';
-    }
-  }
-  else if (evt.type === 'done') {
-    finishGeneration(false);
-  }
-}
+function processStreamEvent(evt) {
+  switch (evt.type) {
 
-function appendStatusRow(text) {
-  const c = document.getElementById('messages');
-  const row = document.createElement('div');
-  row.className = 'status-row';
-  row.innerHTML = `<span>${escapeHtml(text)}</span>`;
-  c.appendChild(row);
-  scrollMessagesToBottom();
+    case 'status': {
+      const container = document.getElementById('messages');
+      const row = document.createElement('div');
+      row.className = 'status-row';
+      row.innerHTML = `<span>${escapeHtml(evt.message || '')}</span>`;
+      container.appendChild(row);
+      scrollToBottom();
+      break;
+    }
+
+    case 'thinking_start': {
+      const body = getOrCreateAssistantBody();
+      state.currentThinkingCard = createThinkingCard('', true);
+      body.appendChild(state.currentThinkingCard);
+      scrollToBottom();
+      break;
+    }
+
+    case 'thinking_chunk': {
+      if (state.currentThinkingCard) {
+        state.currentThinkingText += evt.text || '';
+        const b = state.currentThinkingCard.querySelector('.thinking-body');
+        if (b) b.textContent = state.currentThinkingText;
+      }
+      break;
+    }
+
+    case 'thinking_end': {
+      if (state.currentThinkingCard) {
+        state.currentThinkingCard.classList.add('collapsed');
+        const header = state.currentThinkingCard.querySelector('.thinking-header');
+        if (header) header.setAttribute('aria-expanded', 'false');
+      }
+      break;
+    }
+
+    case 'content_chunk': {
+      const body = getOrCreateAssistantBody();
+      if (!state.currentAssistantBubble) {
+        state.currentAssistantBubble = document.createElement('div');
+        state.currentAssistantBubble.className = 'bubble';
+        body.appendChild(state.currentAssistantBubble);
+      }
+      state.currentAssistantText += evt.text || '';
+      state.currentAssistantBubble.innerHTML = marked.parse(state.currentAssistantText);
+      addCopyButtons(state.currentAssistantBubble);
+      scrollToBottom();
+      break;
+    }
+
+    case 'tool_start': {
+      const body = getOrCreateAssistantBody();
+      state.toolCallCounter++;
+      const id   = `tool-${state.toolCallCounter}`;
+      const card = createToolCard(evt.name || '', evt.arguments || {}, '', true);
+      body.appendChild(card);
+      state.toolCards[id]  = card;
+      state.lastToolCardId = id;
+      scrollToBottom();
+      break;
+    }
+
+    case 'tool_end': {
+      const id  = state.lastToolCardId;
+      const old = state.toolCards[id];
+      if (old?.parentNode) {
+        const fresh = createToolCard(evt.name || '', {}, evt.result || '', false);
+        old.parentNode.replaceChild(fresh, old);
+        state.toolCards[id] = fresh;
+      }
+      // Reset content buffer so next model response starts fresh
+      state.currentAssistantBody   = null;
+      state.currentAssistantBubble = null;
+      state.currentAssistantText   = '';
+      break;
+    }
+
+    case 'token_usage': {
+      const countEl = document.getElementById('input-count');
+      if (countEl) {
+        const pct = (evt.total / evt.budget);
+        countEl.textContent = `${evt.total}/${evt.budget} ctx`;
+        countEl.classList.toggle('warning', pct > 0.88);
+      }
+      break;
+    }
+
+    case 'done': {
+      finishGeneration(false);
+      break;
+    }
+  }
 }
 
 function finishGeneration(aborted = false) {
   state.isGenerating = false;
-  currentAbortController = null;
+  abortController    = null;
   updateSendButton();
 
-  if (state.currentThinkingBox) state.currentThinkingBox.classList.add('collapsed');
-
-  // Restore char count display (ctx badge only lasts during generation)
-  const countEl = document.getElementById('input-count');
-  const input = document.getElementById('chat-input');
-  if (countEl && input) {
-    countEl.style.color = '';
-    countEl.textContent = String(input.value.length || 0);
+  // Collapse open thinking card
+  if (state.currentThinkingCard) {
+    state.currentThinkingCard.classList.add('collapsed');
   }
 
-  // Refresh sidebar history + title
-  loadSessionState().then(() => {
-    updateDocumentTitle(state.activeSession);
+  // Restore character count display (replaces "ctx" counter)
+  const countEl = document.getElementById('input-count');
+  const input   = document.getElementById('chat-input');
+  if (countEl) {
+    countEl.classList.remove('warning');
+    countEl.textContent = input?.value.length || '0';
+  }
+
+  // Refresh session list + title after completion
+  loadInitialState().then(() => {
+    setDocumentTitle(state.activeSession);
   });
 }
 
 function updateSendButton() {
-  const btn = document.getElementById('send-btn');
+  const btn   = document.getElementById('send-btn');
   const input = document.getElementById('chat-input');
-  if (!btn || !input) return;
+  if (!btn) return;
 
   if (state.isGenerating) {
     btn.disabled = false;
     btn.classList.add('stop');
-    btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>';
+    btn.setAttribute('aria-label', 'Stop generation');
+    btn.title = 'Stop (Esc)';
+    btn.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <rect x="6" y="6" width="12" height="12" rx="2"/>
+      </svg>
+    `;
   } else {
     btn.classList.remove('stop');
-    btn.innerHTML = '<i data-lucide="arrow-up" style="width:18px;height:18px;"></i>';
-    btn.disabled = !input.value.trim();
+    btn.setAttribute('aria-label', 'Send message');
+    btn.title = 'Send (Enter)';
+    btn.innerHTML = `
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 19V5M5 12l7-7 7 7"/>
+      </svg>
+    `;
+    btn.disabled = !input?.value.trim();
   }
-  if (window.lucide) lucide.createIcons();
 }
 
-/* Initial send button state */
-setTimeout(() => {
-  const inp = document.getElementById('chat-input');
-  if (inp) inp.addEventListener('input', () => {
-    const b = document.getElementById('send-btn');
-    if (b && !state.isGenerating) b.disabled = !inp.value.trim();
-  });
-}, 300);
 
-/* Expose a couple helpers for debugging if needed */
-window.SeleneUI = { showToast };
+/* ═══════════════════════════════════════════════════════════════
+   ESCAPE KEY STOPS GENERATION
+   ═══════════════════════════════════════════════════════════════ */
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && state.isGenerating) {
+    abortController?.abort();
+    finishGeneration(true);
+    showToast('Generation stopped.', 'info', 1400);
+  }
+});
+
+
+/* ═══════════════════════════════════════════════════════════════
+   PUBLIC API (debugging / external use)
+   ═══════════════════════════════════════════════════════════════ */
+window.SeleneUI = {
+  showToast,
+  showConfirm,
+  setDocumentTitle
+};

@@ -4,259 +4,416 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Selene</title>
-  <meta name="description" content="Selene — the moonlit AI agent.">
+  <meta name="description" content="Selene — a calm, capable AI that lives on your machine.">
 
-  <!-- Fonts: Inter for UI + system mono -->
+  <!--
+    Fonts: Sora (display/headings) + DM Sans (body) + JetBrains Mono (code)
+    Distinctive choices that elevate the celestial aesthetic.
+  -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Space+Grotesk:wght@500;600&amp;display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
   <!-- Icons -->
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://unpkg.com/lucide@latest" defer></script>
 
-  <!-- Markdown + Syntax -->
+  <!-- Markdown rendering -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/base16/tomorrow-night.min.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 
-  <link rel="icon" href="/favicon.png">
+  <!-- Syntax highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/base16/tomorrow-night.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+
+  <link rel="icon" href="/favicon.png" type="image/png">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <!-- Subtle original moon/star background -->
-  <canvas id="bg-canvas"></canvas>
-  <div class="bg-veil"></div>
+
+  <!-- Subtle lunar dust drift background — original animation, not a Grok copy -->
+  <canvas id="bg-canvas" aria-hidden="true"></canvas>
+  <div class="bg-atmos" aria-hidden="true"></div>
 
   <div class="app">
-    <!-- SIDEBAR: Conversation history + settings toggle -->
-    <aside id="sidebar" class="sidebar">
+
+    <!-- ═══════════════════════════════════════════════════════════
+         SIDEBAR — Conversation history + settings
+         role="complementary" for assistive tech
+         ═══════════════════════════════════════════════════════════ -->
+    <aside id="sidebar" class="sidebar" role="complementary" aria-label="Conversation history and settings">
+
+      <!-- Logo / Brand -->
       <div class="sidebar-header">
         <div class="logo">
-          <svg class="logo-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+          <!-- Moon crescent SVG icon -->
+          <svg class="logo-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
           </svg>
-          <span class="logo-text">Selene</span>
+          <span class="logo-name">Selene</span>
         </div>
       </div>
 
-      <div class="sidebar-new">
-        <button id="new-chat-btn" class="btn-primary">
-          <i data-lucide="plus" style="width:16px;height:16px;"></i>
-          <span>New conversation</span>
-        </button>
-          <i data-lucide="plus" style="width:16px;height:16px;"></i>
+      <!-- New conversation button -->
+      <div class="sidebar-actions">
+        <button id="new-chat-btn" class="btn-primary" aria-label="Start a new conversation">
+          <i data-lucide="plus" style="width:15px;height:15px;" aria-hidden="true"></i>
           <span>New conversation</span>
         </button>
       </div>
 
-      <div class="sidebar-section">
-        <div class="sidebar-section-title">Conversations</div>
-        <div id="convo-list" class="convo-list">
+      <!-- Conversation list — scrolls independently -->
+      <div class="sidebar-section" role="navigation" aria-label="Saved conversations">
+        <div class="sidebar-section-label" aria-hidden="true">Conversations</div>
+        <div id="convo-list" class="convo-list" role="list" aria-label="Saved conversations list">
           <!-- Populated by JS -->
         </div>
       </div>
 
+      <!-- Footer: settings -->
       <div class="sidebar-footer">
-        <!-- Settings toggle -->
-        <div id="settings-toggle" class="settings-toggle">
-          <span style="display:flex;align-items:center;gap:8px;">
-            <i data-lucide="sliders" style="width:15px;height:15px;"></i>
+        <button
+          id="settings-toggle"
+          class="settings-toggle"
+          aria-expanded="false"
+          aria-controls="settings-panel"
+          aria-label="Toggle model settings"
+        >
+          <span class="settings-toggle-left">
+            <i data-lucide="sliders-horizontal" style="width:14px;height:14px;" aria-hidden="true"></i>
             <span>Model settings</span>
           </span>
-          <i data-lucide="chevron-down" style="width:16px;height:16px;"></i>
-        </div>
+          <i data-lucide="chevron-down" class="settings-chevron" aria-hidden="true"></i>
+        </button>
 
-        <div id="settings-panel" class="settings-panel">
+        <div id="settings-panel" class="settings-panel" role="region" aria-label="Model settings">
+
           <!-- Temperature -->
           <div class="setting-row">
-            <label>
+            <label class="setting-label" for="param-temperature">
               <span>Temperature</span>
-              <span id="temp-val" class="val mono">0.70</span>
+              <span id="temp-val" class="setting-value t-mono">0.70</span>
             </label>
-            <input type="range" id="param-temperature" class="slider" min="0" max="2" step="0.05" value="0.7">
+            <input
+              type="range"
+              id="param-temperature"
+              class="slider"
+              min="0" max="2" step="0.05" value="0.7"
+              aria-describedby="temp-desc"
+            >
+            <span id="temp-desc" class="t-caption" style="color:var(--ink-4)">
+              Higher = more creative, lower = more focused
+            </span>
           </div>
 
+          <!-- Top P -->
           <div class="setting-row">
-            <label>
+            <label class="setting-label" for="param-top_p">
               <span>Top P</span>
-              <span id="topp-val" class="val mono">0.90</span>
+              <span id="topp-val" class="setting-value t-mono">0.90</span>
             </label>
-            <input type="range" id="param-top_p" class="slider" min="0" max="1" step="0.05" value="0.9">
+            <input
+              type="range"
+              id="param-top_p"
+              class="slider"
+              min="0" max="1" step="0.05" value="0.9"
+            >
           </div>
 
+          <!-- Top K -->
           <div class="setting-row">
-            <label>
+            <label class="setting-label" for="param-top_k">
               <span>Top K</span>
-              <span id="topk-val" class="val mono">40</span>
+              <span id="topk-val" class="setting-value t-mono">40</span>
             </label>
-            <input type="range" id="param-top_k" class="slider" min="1" max="100" step="1" value="40">
+            <input
+              type="range"
+              id="param-top_k"
+              class="slider"
+              min="1" max="100" step="1" value="40"
+            >
           </div>
 
-          <div class="toggle-row" style="margin-top:4px">
-            <span>Keep history</span>
-            <label class="toggle">
-              <input type="checkbox" id="setting-history" checked>
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
+          <!-- Keep history toggle -->
           <div class="toggle-row">
-            <span>Show thinking</span>
-            <label class="toggle">
-              <input type="checkbox" id="setting-think" checked>
-              <span class="toggle-slider"></span>
+            <label for="setting-history">Keep conversation history</label>
+            <label class="toggle" aria-label="Keep conversation history">
+              <input type="checkbox" id="setting-history" checked>
+              <span class="toggle-track" aria-hidden="true"></span>
             </label>
           </div>
-        </div>
-      </div>
-    </aside>
 
-    <!-- MAIN CHAT -->
-    <main class="main">
+          <!-- Show thinking toggle -->
+          <div class="toggle-row">
+            <label for="setting-think">Show thinking</label>
+            <label class="toggle" aria-label="Show model thinking">
+              <input type="checkbox" id="setting-think" checked>
+              <span class="toggle-track" aria-hidden="true"></span>
+            </label>
+          </div>
+
+        </div><!-- /settings-panel -->
+      </div><!-- /sidebar-footer -->
+
+    </aside><!-- /sidebar -->
+
+    <!-- ═══════════════════════════════════════════════════════════
+         MAIN CHAT AREA
+         ═══════════════════════════════════════════════════════════ -->
+    <main class="main" role="main">
+
       <!-- Top bar -->
-      <header class="topbar">
+      <header class="topbar" role="banner">
         <div class="topbar-left">
-          <button id="sidebar-toggle" class="icon-btn" aria-label="Toggle sidebar">
-            <i data-lucide="panel-left"></i>
+          <button
+            id="sidebar-toggle"
+            class="icon-btn"
+            aria-label="Toggle sidebar"
+            aria-expanded="true"
+            aria-controls="sidebar"
+          >
+            <i data-lucide="panel-left" style="width:17px;height:17px;" aria-hidden="true"></i>
           </button>
-          <span id="topbar-title" class="topbar-title">New conversation</span>
-          <span id="model-badge" class="model-badge">selene</span>
+
+          <span id="topbar-title" class="topbar-title" aria-live="polite">New conversation</span>
+          <span id="model-badge" class="model-badge" aria-label="Active model">selene</span>
         </div>
 
         <div class="topbar-right">
-          <div class="status-indicator" id="status-indicator" title="Checking connection...">
-            <span id="status-dot" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#4ade80;"></span>
-            <span id="status-text" class="text-caption" style="margin-left:6px;">Online</span>
+          <!-- Connection status -->
+          <div
+            class="status-dot-wrap"
+            id="status-indicator"
+            role="status"
+            aria-live="polite"
+            aria-label="Connection status"
+            title="Ollama connection"
+          >
+            <span id="status-dot" class="status-dot" aria-hidden="true"></span>
+            <span id="status-text" class="t-caption">Online</span>
           </div>
 
-          <button id="help-btn" class="icon-btn" aria-label="Help and commands" title="Help">
-            <i data-lucide="help-circle"></i>
+          <!-- Help -->
+          <button
+            id="help-btn"
+            class="icon-btn"
+            aria-label="Show available commands and help"
+            title="Commands & tools"
+          >
+            <i data-lucide="circle-help" style="width:17px;height:17px;" aria-hidden="true"></i>
           </button>
-          <button id="clear-btn" class="icon-btn" aria-label="Clear conversation" title="Clear chat">
-            <i data-lucide="trash-2"></i>
+
+          <!-- Clear -->
+          <button
+            id="clear-btn"
+            class="icon-btn"
+            aria-label="Clear this conversation"
+            title="Clear conversation"
+          >
+            <i data-lucide="trash-2" style="width:16px;height:16px;" aria-hidden="true"></i>
           </button>
         </div>
       </header>
 
-      <!-- Conversation window -->
-      <div id="messages" class="messages" aria-live="polite" role="log">
-        <!-- Welcome or messages injected by JS -->
+      <!-- Conversation messages window -->
+      <div
+        id="messages"
+        class="messages"
+        role="log"
+        aria-live="polite"
+        aria-label="Conversation messages"
+        aria-atomic="false"
+      >
+        <!-- Welcome screen or messages are injected by JS -->
       </div>
 
-      <!-- CHATBOX -->
-      <div class="composer">
-        <div class="composer-inner">
+      <!-- ─── CHATBOX (Composer) ──────────────────────────────── -->
+      <div class="composer" role="region" aria-label="Message input">
+        <div class="composer-wrap">
           <textarea
             id="chat-input"
             class="chat-textarea"
             rows="1"
             placeholder="What can Selene do for you today?"
-            aria-label="Message input"
+            aria-label="Type your message to Selene"
+            aria-multiline="true"
+            autocomplete="off"
+            spellcheck="true"
           ></textarea>
 
-          <div class="composer-right">
-            <div id="input-count" class="count mono" aria-live="polite">0</div>
-            <button id="send-btn" class="send-btn" disabled aria-label="Send message">
-              <i data-lucide="arrow-up" style="width:18px;height:18px;"></i>
+          <div class="composer-controls">
+            <div
+              id="input-count"
+              class="input-count t-mono"
+              aria-live="polite"
+              aria-label="Character count"
+            >0</div>
+
+            <button
+              id="send-btn"
+              class="send-btn"
+              disabled
+              aria-label="Send message"
+              title="Send (Enter)"
+            >
+              <i data-lucide="arrow-up" style="width:17px;height:17px;" aria-hidden="true"></i>
             </button>
           </div>
         </div>
       </div>
-    </main>
-  </div>
 
-  <!-- Toast container (ARIA live region) -->
-  <div id="toast-container" class="toast-container" role="status" aria-live="polite" aria-atomic="false"></div>
+    </main><!-- /main -->
+  </div><!-- /app -->
 
-  <!-- Help modal -->
-  <div id="help-modal" class="modal">
-    <div class="modal-card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <div style="font-weight:600;font-size:1.1rem;">Commands &amp; Tools</div>
-        <button class="icon-btn close-help" aria-label="Close"><i data-lucide="x"></i></button>
+  <!-- ═══════════════════════════════════════════════════════════
+       TOAST / NOTIFICATION CONTAINER
+       role="status" for info/success; JS upgrades to role="alert"
+       for errors/warnings so screen readers announce immediately.
+       ═══════════════════════════════════════════════════════════ -->
+  <div
+    id="toast-container"
+    class="toast-container"
+    aria-label="Notifications"
+  ></div>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       HELP MODAL
+       ═══════════════════════════════════════════════════════════ -->
+  <div
+    id="help-modal"
+    class="modal-backdrop"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="help-modal-title"
+  >
+    <div class="modal-card" role="document">
+      <div class="modal-header">
+        <h2 id="help-modal-title" class="modal-title">Commands &amp; Tools</h2>
+        <button class="icon-btn close-modal" aria-label="Close help">
+          <i data-lucide="x" style="width:17px;height:17px;" aria-hidden="true"></i>
+        </button>
       </div>
 
-      <div style="margin-bottom:18px;">
-        <div class="text-small" style="color:var(--ink-3);margin-bottom:8px;">Slash commands work in the chat input.</div>
-        <table class="help-table">
-          <tbody>
-            <tr><td class="mono">/help</td><td>Show this help</td></tr>
-            <tr><td class="mono">/clear</td><td>Clear conversation</td></tr>
-            <tr><td class="mono">/save [name]</td><td>Save this session</td></tr>
-            <tr><td class="mono">/load [name]</td><td>Load a previous session</td></tr>
-            <tr><td class="mono">/set parameter &lt;name&gt; &lt;val&gt;</td><td>Change model params</td></tr>
-            <tr><td class="mono">/set think / nothink</td><td>Toggle reasoning</td></tr>
-            <tr><td class="mono">/quit</td><td>Exit</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="text-caption">Tools: web search, file reading, code, Spotify, vault RAG, Obsidian notes.</div>
+      <p class="modal-hint">Slash commands work directly in the chat input.</p>
+
+      <table class="help-table" aria-label="Available slash commands">
+        <tbody>
+          <tr><td>/help</td><td>Show this help</td></tr>
+          <tr><td>/clear</td><td>Clear conversation and memory</td></tr>
+          <tr><td>/save [name]</td><td>Save this session with an optional name</td></tr>
+          <tr><td>/load [name]</td><td>Load a previously saved session</td></tr>
+          <tr><td>/set parameter &lt;name&gt; &lt;val&gt;</td><td>Adjust model parameters (e.g., temperature)</td></tr>
+          <tr><td>/set think / nothink</td><td>Toggle reasoning mode on or off</td></tr>
+          <tr><td>/show parameters</td><td>Display current model settings</td></tr>
+          <tr><td>/vault add &lt;path&gt;</td><td>Index a file or folder for RAG search</td></tr>
+          <tr><td>/vault search &lt;query&gt;</td><td>Search your indexed vault</td></tr>
+          <tr><td>/quit</td><td>Close the session</td></tr>
+        </tbody>
+      </table>
+
+      <p class="modal-tools-note">
+        <strong style="color:var(--ink-0)">Active tools:</strong>
+        Web search &nbsp;·&nbsp; File reading &nbsp;·&nbsp; Code execution &nbsp;·&nbsp;
+        Spotify control &nbsp;·&nbsp; Vault RAG &nbsp;·&nbsp; Obsidian notes
+      </p>
     </div>
   </div>
 
+  <!-- Main application script -->
   <script src="/app.js"></script>
 
-  <!-- Original subtle celestial canvas (not a grok copy) -->
+  <!-- ═══════════════════════════════════════════════════════════
+       ORIGINAL LUNAR DUST BACKGROUND
+       Concept: micro-particles that drift slowly like moondust,
+       with an occasional brief glint on larger ones.
+       NOT Grok's twinkling stars — completely different behavior.
+       ═══════════════════════════════════════════════════════════ -->
   <script>
   (function initBackground() {
     const canvas = document.getElementById('bg-canvas');
     if (!canvas) return;
     const ctx = canvas.getContext('2d', { alpha: true });
-    let w = 0, h = 0, stars = [];
+    let w = 0, h = 0;
+    let particles = [];
+    let raf = null;
 
     function resize() {
-      w = canvas.width = window.innerWidth;
+      w = canvas.width  = window.innerWidth;
       h = canvas.height = window.innerHeight;
-      stars = [];
-      const count = Math.floor((w * h) / 6200); // sparse
+      buildParticles();
+    }
+
+    function buildParticles() {
+      // Sparse — ~1 particle per 8000px² of screen
+      const count = Math.floor((w * h) / 8000);
+      particles = [];
       for (let i = 0; i < count; i++) {
-        stars.push({
+        const r = Math.random() * 1.1 + 0.2;   // 0.2–1.3px radius
+        particles.push({
           x: Math.random() * w,
-          y: Math.random() * h * 0.92,
-          r: Math.random() * 1.15 + 0.35,
-          a: Math.random() * 0.55 + 0.18,
-          tw: (Math.random() - 0.5) * 0.014,
-          phase: Math.random() * Math.PI * 2
+          y: Math.random() * h,
+          r,
+          // Base opacity: very low — 0.06 to 0.22
+          baseAlpha: Math.random() * 0.16 + 0.06,
+          // Drift speed — very slow horizontal movement
+          vx: (Math.random() * 0.15 + 0.04) * (Math.random() < 0.5 ? 1 : -1),
+          // Gentle sine oscillation params
+          oscAmp:  Math.random() * 0.18 + 0.04,
+          oscFreq: Math.random() * 0.0006 + 0.0002,
+          oscPhase: Math.random() * Math.PI * 2,
+          // Glint — only particles > 0.8r can glint; glint probability is low
+          canGlint: r > 0.8,
+          glinting: false,
+          glintProgress: 0,
         });
       }
     }
 
-    function draw() {
+    let lastT = 0;
+    function draw(t) {
+      raf = requestAnimationFrame(draw);
+      const dt = t - lastT;
+      lastT = t;
+      if (dt > 100) return; // skip if tab was in background
+
       ctx.clearRect(0, 0, w, h);
 
-      // Very faint distant nebula wash
-      const g = ctx.createRadialGradient(w*0.82, h*0.2, 40, w*0.78, h*0.18, Math.max(w,h)*0.55);
-      g.addColorStop(0, 'rgba(140,130,255,0.035)');
-      g.addColorStop(1, 'rgba(60,50,120,0.008)');
-      ctx.fillStyle = g;
-      ctx.fillRect(0,0,w,h);
+      for (const p of particles) {
+        // Move
+        p.x += p.vx;
+        if (p.x > w + 4) p.x = -4;
+        if (p.x < -4)    p.x = w + 4;
 
-      // Sparse gentle twinkling stars
-      const t = Date.now() / 1000;
-      for (const s of stars) {
-        const alpha = s.a + Math.sin(t * 0.7 + s.phase) * s.tw;
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(235,240,255,${Math.max(0.08, Math.min(0.85, alpha))})`;
-        ctx.fill();
+        // Sine oscillation on y
+        const osc = Math.sin(t * p.oscFreq + p.oscPhase) * p.oscAmp;
+        const drawY = p.y + osc * 60; // oscillates ±60px over time
 
-        // occasional micro cross on larger stars — extremely subtle
-        if (s.r > 1.0 && alpha > 0.55) {
-          ctx.strokeStyle = `rgba(235,240,255,${alpha * 0.25})`;
-          ctx.lineWidth = 0.6;
-          ctx.beginPath();
-          ctx.moveTo(s.x - s.r*2.6, s.y);
-          ctx.lineTo(s.x + s.r*2.6, s.y);
-          ctx.moveTo(s.x, s.y - s.r*2.6);
-          ctx.lineTo(s.x, s.y + s.r*2.6);
-          ctx.stroke();
+        // Glint logic — a brief brightness spike
+        if (p.canGlint && !p.glinting && Math.random() < 0.00008) {
+          p.glinting = true;
+          p.glintProgress = 0;
         }
+
+        let alpha = p.baseAlpha;
+        if (p.glinting) {
+          // Triangle pulse: ramp up to peak then fade
+          p.glintProgress += dt * 0.0025;
+          if (p.glintProgress < 1) {
+            alpha = p.baseAlpha + (0.7 - p.baseAlpha) * Math.sin(p.glintProgress * Math.PI);
+          } else {
+            p.glinting = false;
+            p.glintProgress = 0;
+          }
+        }
+
+        ctx.beginPath();
+        ctx.arc(p.x, drawY, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(210, 220, 255, ${Math.min(0.85, alpha)})`;
+        ctx.fill();
       }
-      requestAnimationFrame(draw);
     }
 
     window.addEventListener('resize', resize, { passive: true });
     resize();
-    draw();
+    requestAnimationFrame(draw);
   })();
   </script>
 </body>
