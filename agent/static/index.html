@@ -1,468 +1,263 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Selene — AI Agent</title>
-    <meta name="description" content="Selene AI Agent — a professional local AI assistant with tools, web search, and document reasoning.">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Selene</title>
+  <meta name="description" content="Selene — the moonlit AI agent.">
 
-    <!-- Fonts: Cormorant Garamond (display) + DM Mono (mono) + Syne (UI) -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;0,700;1,300;1,400&family=DM+Mono:wght@300;400;500&family=Syne:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Fonts: Inter for UI + system mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Space+Grotesk:wght@500;600&amp;display=swap" rel="stylesheet">
 
-    <!-- Icons -->
-    <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
 
-    <!-- Markdown & Syntax Highlighting -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/base16/tomorrow-night.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <!-- Markdown + Syntax -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/base16/tomorrow-night.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 
-    <!-- App Styles -->
-    <link rel="icon" type="image/png" href="/favicon.png">
-    <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/favicon.png">
+  <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-    <!-- Star Field Canvas -->
-    <canvas id="star-canvas" class="star-canvas"></canvas>
+  <!-- Subtle original moon/star background -->
+  <canvas id="bg-canvas"></canvas>
+  <div class="bg-veil"></div>
 
-    <!-- Aurora gradient overlay -->
-    <div class="aurora-overlay"></div>
-
-    <div class="app-layout">
-
-        <!-- Sidebar -->
-        <aside id="sidebar" class="sidebar">
-
-            <!-- Sidebar glow edge -->
-            <div class="sidebar-glow-edge"></div>
-
-            <div class="sidebar-header">
-                <div class="logo">
-                    <div class="logo-icon">
-                        <!-- Crescent moon -->
-                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none">
-                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-                        </svg>
-                    </div>
-                    <div class="logo-text">
-                        <span class="logo-title">SELENE</span>
-                        <span class="logo-subtitle">AI AGENT</span>
-                    </div>
-                </div>
-                <button id="close-sidebar" class="icon-btn close-sidebar-btn" style="display: none;" title="Close sidebar">
-                    <i data-lucide="x"></i>
-                </button>
-            </div>
-
-            <div class="sidebar-scroll">
-                <div class="sidebar-actions">
-                    <button id="new-chat-btn" class="btn btn-primary">
-                        <i data-lucide="plus" style="width: 15px; height: 15px;"></i>
-                        New Conversation
-                    </button>
-                </div>
-
-                <div class="sidebar-tabs">
-                    <button class="tab-btn active" data-target="tab-sessions">Sessions</button>
-                    <button class="tab-btn" data-target="tab-settings">Settings</button>
-                </div>
-
-                <!-- Sessions Tab -->
-                <div id="tab-sessions" class="tab-content active">
-                    <div class="sidebar-section">
-                        <div class="section-title">
-                            <i data-lucide="history" style="width: 12px; height: 12px;"></i>
-                            Saved Sessions
-                        </div>
-                        <div id="sessions-list" class="sessions-list">
-                            <div class="loading-placeholder">
-                                <div class="loading-dots"><span></span><span></span><span></span></div>
-                                Loading sessions...
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Settings Tab -->
-                <div id="tab-settings" class="tab-content">
-                    <div class="sidebar-section">
-                        <div class="section-title">
-                            <i data-lucide="sliders" style="width: 12px; height: 12px;"></i>
-                            Model Parameters
-                        </div>
-
-                        <div class="setting-item">
-                            <div class="setting-label">
-                                <span>Temperature</span>
-                                <span id="temp-val" class="setting-value">0.4</span>
-                            </div>
-                            <div class="slider-track">
-                                <input type="range" id="param-temperature" class="slider" min="0" max="2" step="0.1" value="0.4">
-                            </div>
-                        </div>
-
-                        <div class="setting-item">
-                            <div class="setting-label">
-                                <span>Top-P</span>
-                                <span id="topp-val" class="setting-value">0.9</span>
-                            </div>
-                            <div class="slider-track">
-                                <input type="range" id="param-top_p" class="slider" min="0" max="1" step="0.05" value="0.9">
-                            </div>
-                        </div>
-
-                        <div class="setting-item">
-                            <div class="setting-label">
-                                <span>Top-K</span>
-                                <span id="topk-val" class="setting-value">40</span>
-                            </div>
-                            <div class="slider-track">
-                                <input type="range" id="param-top_k" class="slider" min="1" max="100" step="1" value="40">
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="sidebar-section">
-                        <div class="section-title">
-                            <i data-lucide="settings-2" style="width: 12px; height: 12px;"></i>
-                            Behavior
-                        </div>
-
-                        <div class="setting-item toggle-item">
-                            <div class="setting-details">
-                                <span class="setting-name">Conversation History</span>
-                                <span class="setting-desc">Remember past messages</span>
-                            </div>
-                            <label class="switch">
-                                <input type="checkbox" id="setting-history" checked>
-                                <span class="switch-slider"></span>
-                            </label>
-                        </div>
-
-                        <div class="setting-item toggle-item">
-                            <div class="setting-details">
-                                <span class="setting-name">Thinking Process</span>
-                                <span class="setting-desc">Show model reasoning</span>
-                            </div>
-                            <label class="switch">
-                                <input type="checkbox" id="setting-think" checked>
-                                <span class="switch-slider"></span>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="sidebar-section">
-                        <div class="section-title">
-                            <i data-lucide="terminal" style="width: 12px; height: 12px;"></i>
-                            System Prompt
-                        </div>
-                        <textarea id="system-prompt" class="textarea-prompt" placeholder="Leave blank to use default Selene persona..."></textarea>
-                        <button id="apply-prompt-btn" class="btn btn-secondary btn-sm">Apply Changes</button>
-                    </div>
-                </div>
-            </div>
-
-            <div class="sidebar-footer">
-                <button id="save-session-btn" class="btn btn-ghost btn-sm sidebar-save-btn">
-                    <i data-lucide="save" style="width: 13px; height: 13px;"></i>
-                    Save Session
-                </button>
-                <div class="sidebar-version">Selene v1.0</div>
-            </div>
-        </aside>
-
-        <!-- Main Content -->
-        <main class="main-content">
-
-            <!-- Navbar -->
-            <nav class="navbar">
-                <div class="nav-left">
-                    <button id="menu-toggle" class="icon-btn menu-btn" title="Toggle Sidebar">
-                        <i data-lucide="panel-left"></i>
-                    </button>
-                    <div class="navbar-brand">
-                        <div class="navbar-moon-icon">
-                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-                            </svg>
-                        </div>
-                        <span id="current-session-title" class="nav-session-title">Active Session</span>
-                        <span id="model-badge" class="badge">selene</span>
-                    </div>
-                </div>
-                <div class="nav-right">
-                    <div class="status-indicator" title="Ollama Status: Checking...">
-                        <div class="status-dot online"></div>
-                        <span id="connection-status" class="status-text">Online</span>
-                    </div>
-                    <button id="help-btn" class="icon-btn" title="Help & Commands">
-                        <i data-lucide="terminal"></i>
-                    </button>
-                    <button id="clear-history-btn" class="icon-btn" title="Clear Conversation">
-                        <i data-lucide="trash-2"></i>
-                    </button>
-                </div>
-            </nav>
-
-            <!-- Chat Messages -->
-            <div id="chat-messages" class="chat-messages">
-                <!-- Welcome Screen / Messages will be injected here -->
-            </div>
-
-            <!-- Input Area -->
-            <div class="input-container">
-                <!-- Autocomplete Popup -->
-                <div id="autocomplete-popup" class="autocomplete-popup"></div>
-
-                <div class="input-wrapper" style="position: relative;">
-                    <textarea id="user-input" class="chat-input" placeholder="Ask Selene anything..." rows="1"></textarea>
-                    <div id="token-usage" class="token-usage" style="display: none;">0 / 8192 ctx</div>
-                    <button id="send-btn" class="send-btn" disabled>
-                        <i data-lucide="arrow-up" style="width: 17px; height: 17px;"></i>
-                    </button>
-                </div>
-                <div class="input-footer">
-                    <kbd>Enter</kbd> to send &nbsp;·&nbsp; <kbd>Shift</kbd>+<kbd>Enter</kbd> for new line &nbsp;·&nbsp; <kbd>/</kbd> for commands
-                </div>
-            </div>
-        </main>
-
-    </div>
-
-    <!-- ── Modals ──────────────────────────────────────────── -->
-
-    <!-- Save Session Modal -->
-    <div id="save-modal" class="modal-overlay">
-        <div class="modal">
-            <div class="modal-header">
-                <div class="modal-title-group">
-                    <i data-lucide="save" style="width: 16px; height: 16px; color: var(--accent-violet);"></i>
-                    <h3>Save Session</h3>
-                </div>
-                <button class="icon-btn close-modal-btn"><i data-lucide="x"></i></button>
-            </div>
-            <div class="modal-body">
-                <p>Enter a name for this conversation to save it for later.</p>
-                <input type="text" id="save-session-name" class="modal-input" placeholder="e.g., Project Planning">
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-ghost close-modal-btn">Cancel</button>
-                <button id="confirm-save-btn" class="btn btn-primary">
-                    <i data-lucide="save" style="width: 14px; height: 14px;"></i>
-                    Save
-                </button>
-            </div>
+  <div class="app">
+    <!-- SIDEBAR: Conversation history + settings toggle -->
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <svg class="logo-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+          <span class="logo-text">Selene</span>
         </div>
-    </div>
+      </div>
 
-    <!-- Help Modal -->
-    <div id="help-modal" class="modal-overlay">
-        <div class="modal modal-wide">
-            <div class="modal-header">
-                <div class="modal-title-group">
-                    <i data-lucide="terminal" style="width: 16px; height: 16px; color: var(--accent-violet);"></i>
-                    <h3>Commands & Capabilities</h3>
-                </div>
-                <button class="icon-btn close-modal-btn"><i data-lucide="x"></i></button>
-            </div>
-            <div class="modal-body">
-                <div class="help-section">
-                    <h4>Available Tools</h4>
-                    <div class="help-grid">
-                        <div class="help-tool-item">
-                            <span class="help-tool-icon">🔍</span>
-                            <span>Web Search (DuckDuckGo)</span>
-                        </div>
-                        <div class="help-tool-item">
-                            <span class="help-tool-icon">📄</span>
-                            <span>Read Documents (PDF, DOCX, TXT)</span>
-                        </div>
-                        <div class="help-tool-item">
-                            <span class="help-tool-icon">💻</span>
-                            <span>View Source Code</span>
-                        </div>
-                        <div class="help-tool-item">
-                            <span class="help-tool-icon">🌐</span>
-                            <span>Open Browser URLs</span>
-                        </div>
-                        <div class="help-tool-item">
-                            <span class="help-tool-icon">🎵</span>
-                            <span>Control Spotify Playback</span>
-                        </div>
-                        <div class="help-tool-item">
-                            <span class="help-tool-icon">📚</span>
-                            <span>Search Indexed Vaults (RAG)</span>
-                        </div>
-                        <div class="help-tool-item">
-                            <span class="help-tool-icon">📝</span>
-                            <span>Create Files & Obsidian Notes</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="help-section">
-                    <h4>Slash Commands</h4>
-                    <div class="help-commands-container">
-                        <table class="help-table">
-                            <thead>
-                                <tr>
-                                    <th>Command</th>
-                                    <th>Description</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr><td>/help</td><td>Show this help menu</td></tr>
-                                <tr><td>/clear</td><td>Clear history &amp; system override</td></tr>
-                                <tr><td>/save [name]</td><td>Save current session file</td></tr>
-                                <tr><td>/load [name]</td><td>Load a saved session file</td></tr>
-                                <tr><td>/set parameter &lt;n&gt; &lt;v&gt;</td><td>Set parameter (e.g. temperature 0.7)</td></tr>
-                                <tr><td>/set system &lt;prompt&gt;</td><td>Set custom system prompt override</td></tr>
-                                <tr><td>/set history / nohistory</td><td>Enable/disable conversation history</td></tr>
-                                <tr><td>/set think / nothink</td><td>Enable/disable model thinking process</td></tr>
-                                <tr><td>/show parameters / system</td><td>Show current parameters/prompt</td></tr>
-                                <tr><td>/vault list / aliases</td><td>List indexed vaults or aliases</td></tr>
-                                <tr><td>/vault add &lt;path&gt;</td><td>Index file or folder to vault</td></tr>
-                                <tr><td>/vault search &lt;query&gt;</td><td>Search indexed content</td></tr>
-                                <tr><td>/vault delete &lt;source&gt;</td><td>Remove source from vault</td></tr>
-                                <tr><td>/quit / /exit</td><td>Exit the agent session</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
+      <div class="sidebar-new">
+        <button id="new-chat-btn" class="btn-primary">
+          <i data-lucide="plus" style="width:16px;height:16px;"></i>
+          <span>New conversation</span>
+        </button>
+          <i data-lucide="plus" style="width:16px;height:16px;"></i>
+          <span>New conversation</span>
+        </button>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-section-title">Conversations</div>
+        <div id="convo-list" class="convo-list">
+          <!-- Populated by JS -->
         </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <!-- Settings toggle -->
+        <div id="settings-toggle" class="settings-toggle">
+          <span style="display:flex;align-items:center;gap:8px;">
+            <i data-lucide="sliders" style="width:15px;height:15px;"></i>
+            <span>Model settings</span>
+          </span>
+          <i data-lucide="chevron-down" style="width:16px;height:16px;"></i>
+        </div>
+
+        <div id="settings-panel" class="settings-panel">
+          <!-- Temperature -->
+          <div class="setting-row">
+            <label>
+              <span>Temperature</span>
+              <span id="temp-val" class="val mono">0.70</span>
+            </label>
+            <input type="range" id="param-temperature" class="slider" min="0" max="2" step="0.05" value="0.7">
+          </div>
+
+          <div class="setting-row">
+            <label>
+              <span>Top P</span>
+              <span id="topp-val" class="val mono">0.90</span>
+            </label>
+            <input type="range" id="param-top_p" class="slider" min="0" max="1" step="0.05" value="0.9">
+          </div>
+
+          <div class="setting-row">
+            <label>
+              <span>Top K</span>
+              <span id="topk-val" class="val mono">40</span>
+            </label>
+            <input type="range" id="param-top_k" class="slider" min="1" max="100" step="1" value="40">
+          </div>
+
+          <div class="toggle-row" style="margin-top:4px">
+            <span>Keep history</span>
+            <label class="toggle">
+              <input type="checkbox" id="setting-history" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <span>Show thinking</span>
+            <label class="toggle">
+              <input type="checkbox" id="setting-think" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- MAIN CHAT -->
+    <main class="main">
+      <!-- Top bar -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <button id="sidebar-toggle" class="icon-btn" aria-label="Toggle sidebar">
+            <i data-lucide="panel-left"></i>
+          </button>
+          <span id="topbar-title" class="topbar-title">New conversation</span>
+          <span id="model-badge" class="model-badge">selene</span>
+        </div>
+
+        <div class="topbar-right">
+          <div class="status-indicator" id="status-indicator" title="Checking connection...">
+            <span id="status-dot" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#4ade80;"></span>
+            <span id="status-text" class="text-caption" style="margin-left:6px;">Online</span>
+          </div>
+
+          <button id="help-btn" class="icon-btn" aria-label="Help and commands" title="Help">
+            <i data-lucide="help-circle"></i>
+          </button>
+          <button id="clear-btn" class="icon-btn" aria-label="Clear conversation" title="Clear chat">
+            <i data-lucide="trash-2"></i>
+          </button>
+        </div>
+      </header>
+
+      <!-- Conversation window -->
+      <div id="messages" class="messages" aria-live="polite" role="log">
+        <!-- Welcome or messages injected by JS -->
+      </div>
+
+      <!-- CHATBOX -->
+      <div class="composer">
+        <div class="composer-inner">
+          <textarea
+            id="chat-input"
+            class="chat-textarea"
+            rows="1"
+            placeholder="What can Selene do for you today?"
+            aria-label="Message input"
+          ></textarea>
+
+          <div class="composer-right">
+            <div id="input-count" class="count mono" aria-live="polite">0</div>
+            <button id="send-btn" class="send-btn" disabled aria-label="Send message">
+              <i data-lucide="arrow-up" style="width:18px;height:18px;"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Toast container (ARIA live region) -->
+  <div id="toast-container" class="toast-container" role="status" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- Help modal -->
+  <div id="help-modal" class="modal">
+    <div class="modal-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <div style="font-weight:600;font-size:1.1rem;">Commands &amp; Tools</div>
+        <button class="icon-btn close-help" aria-label="Close"><i data-lucide="x"></i></button>
+      </div>
+
+      <div style="margin-bottom:18px;">
+        <div class="text-small" style="color:var(--ink-3);margin-bottom:8px;">Slash commands work in the chat input.</div>
+        <table class="help-table">
+          <tbody>
+            <tr><td class="mono">/help</td><td>Show this help</td></tr>
+            <tr><td class="mono">/clear</td><td>Clear conversation</td></tr>
+            <tr><td class="mono">/save [name]</td><td>Save this session</td></tr>
+            <tr><td class="mono">/load [name]</td><td>Load a previous session</td></tr>
+            <tr><td class="mono">/set parameter &lt;name&gt; &lt;val&gt;</td><td>Change model params</td></tr>
+            <tr><td class="mono">/set think / nothink</td><td>Toggle reasoning</td></tr>
+            <tr><td class="mono">/quit</td><td>Exit</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="text-caption">Tools: web search, file reading, code, Spotify, vault RAG, Obsidian notes.</div>
     </div>
+  </div>
 
-    <!-- App Logic -->
-    <script src="/app.js"></script>
+  <script src="/app.js"></script>
 
-    <!-- Star Animation Script -->
-    <script>
-    (function() {
-        const canvas = document.getElementById('star-canvas');
-        const ctx = canvas.getContext('2d');
-        let stars = [];
-        let shootingStars = [];
-        let animFrame;
-        let W, H;
+  <!-- Original subtle celestial canvas (not a grok copy) -->
+  <script>
+  (function initBackground() {
+    const canvas = document.getElementById('bg-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d', { alpha: true });
+    let w = 0, h = 0, stars = [];
 
-        function resize() {
-            W = canvas.width = window.innerWidth;
-            H = canvas.height = window.innerHeight;
-            generateStars();
+    function resize() {
+      w = canvas.width = window.innerWidth;
+      h = canvas.height = window.innerHeight;
+      stars = [];
+      const count = Math.floor((w * h) / 6200); // sparse
+      for (let i = 0; i < count; i++) {
+        stars.push({
+          x: Math.random() * w,
+          y: Math.random() * h * 0.92,
+          r: Math.random() * 1.15 + 0.35,
+          a: Math.random() * 0.55 + 0.18,
+          tw: (Math.random() - 0.5) * 0.014,
+          phase: Math.random() * Math.PI * 2
+        });
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, w, h);
+
+      // Very faint distant nebula wash
+      const g = ctx.createRadialGradient(w*0.82, h*0.2, 40, w*0.78, h*0.18, Math.max(w,h)*0.55);
+      g.addColorStop(0, 'rgba(140,130,255,0.035)');
+      g.addColorStop(1, 'rgba(60,50,120,0.008)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,w,h);
+
+      // Sparse gentle twinkling stars
+      const t = Date.now() / 1000;
+      for (const s of stars) {
+        const alpha = s.a + Math.sin(t * 0.7 + s.phase) * s.tw;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(235,240,255,${Math.max(0.08, Math.min(0.85, alpha))})`;
+        ctx.fill();
+
+        // occasional micro cross on larger stars — extremely subtle
+        if (s.r > 1.0 && alpha > 0.55) {
+          ctx.strokeStyle = `rgba(235,240,255,${alpha * 0.25})`;
+          ctx.lineWidth = 0.6;
+          ctx.beginPath();
+          ctx.moveTo(s.x - s.r*2.6, s.y);
+          ctx.lineTo(s.x + s.r*2.6, s.y);
+          ctx.moveTo(s.x, s.y - s.r*2.6);
+          ctx.lineTo(s.x, s.y + s.r*2.6);
+          ctx.stroke();
         }
+      }
+      requestAnimationFrame(draw);
+    }
 
-        function rand(min, max) { return Math.random() * (max - min) + min; }
-
-        function generateStars() {
-            stars = [];
-            const count = Math.floor((W * H) / 3800);
-            for (let i = 0; i < count; i++) {
-                stars.push({
-                    x: rand(0, W),
-                    y: rand(0, H),
-                    r: rand(0.2, 1.6),
-                    opacity: rand(0.15, 0.9),
-                    twinkleSpeed: rand(0.003, 0.018),
-                    twinkleDir: Math.random() > 0.5 ? 1 : -1,
-                    baseOpacity: rand(0.15, 0.9),
-                    color: pickStarColor()
-                });
-            }
-        }
-
-        function pickStarColor() {
-            const colors = [
-                'rgba(255,255,255,',
-                'rgba(210,220,255,',
-                'rgba(190,200,255,',
-                'rgba(220,200,255,',
-                'rgba(255,220,200,'
-            ];
-            return colors[Math.floor(Math.random() * colors.length)];
-        }
-
-        function spawnShootingStar() {
-            if (shootingStars.length >= 2) return;
-            if (Math.random() > 0.004) return;
-            const startX = rand(W * 0.1, W * 0.9);
-            const startY = rand(H * 0.05, H * 0.4);
-            const angle = rand(25, 50) * Math.PI / 180;
-            shootingStars.push({
-                x: startX,
-                y: startY,
-                vx: Math.cos(angle) * rand(8, 16),
-                vy: Math.sin(angle) * rand(8, 16),
-                length: rand(80, 180),
-                opacity: 1,
-                fade: rand(0.012, 0.022),
-                width: rand(1, 2.2),
-                trail: []
-            });
-        }
-
-        function draw(ts) {
-            ctx.clearRect(0, 0, W, H);
-
-            // Draw twinkling stars
-            for (const s of stars) {
-                s.opacity += s.twinkleSpeed * s.twinkleDir;
-                if (s.opacity > s.baseOpacity + 0.3 || s.opacity < s.baseOpacity - 0.25) {
-                    s.twinkleDir *= -1;
-                }
-                s.opacity = Math.max(0.05, Math.min(1, s.opacity));
-
-                ctx.beginPath();
-                ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-                ctx.fillStyle = s.color + s.opacity + ')';
-                ctx.fill();
-
-                // Occasional sparkle cross for brighter stars
-                if (s.r > 1.1 && s.opacity > 0.7) {
-                    ctx.strokeStyle = s.color + (s.opacity * 0.4) + ')';
-                    ctx.lineWidth = 0.5;
-                    ctx.beginPath();
-                    ctx.moveTo(s.x - s.r * 2.5, s.y);
-                    ctx.lineTo(s.x + s.r * 2.5, s.y);
-                    ctx.moveTo(s.x, s.y - s.r * 2.5);
-                    ctx.lineTo(s.x, s.y + s.r * 2.5);
-                    ctx.stroke();
-                }
-            }
-
-            // Shooting stars
-            spawnShootingStar();
-            shootingStars = shootingStars.filter(ss => ss.opacity > 0.01);
-            for (const ss of shootingStars) {
-                const tailX = ss.x - (ss.vx / Math.hypot(ss.vx, ss.vy)) * ss.length;
-                const tailY = ss.y - (ss.vy / Math.hypot(ss.vx, ss.vy)) * ss.length;
-
-                const grad = ctx.createLinearGradient(tailX, tailY, ss.x, ss.y);
-                grad.addColorStop(0, `rgba(255,255,255,0)`);
-                grad.addColorStop(0.7, `rgba(200,210,255,${ss.opacity * 0.5})`);
-                grad.addColorStop(1, `rgba(255,255,255,${ss.opacity})`);
-
-                ctx.beginPath();
-                ctx.moveTo(tailX, tailY);
-                ctx.lineTo(ss.x, ss.y);
-                ctx.strokeStyle = grad;
-                ctx.lineWidth = ss.width;
-                ctx.lineCap = 'round';
-                ctx.stroke();
-
-                ss.x += ss.vx;
-                ss.y += ss.vy;
-                ss.opacity -= ss.fade;
-            }
-
-            animFrame = requestAnimationFrame(draw);
-        }
-
-        window.addEventListener('resize', resize);
-        resize();
-        draw();
-    })();
-    </script>
+    window.addEventListener('resize', resize, { passive: true });
+    resize();
+    draw();
+  })();
+  </script>
 </body>
 </html>
