@@ -256,7 +256,56 @@ document.addEventListener('DOMContentLoaded', () => {
   setupLibraries();
   setupEventListeners();
   loadInitialState();
+  init3DEffects();
 });
+
+function init3DEffects() {
+  if (typeof gsap === 'undefined') return;
+
+  // Track mouse globally for 3D tilts
+  const body = document.body;
+
+  body.addEventListener('mousemove', (e) => {
+    const { clientX, clientY } = e;
+    const { innerWidth, innerHeight } = window;
+
+    // Normalize coordinates (-1 to 1)
+    const xPos = (clientX / innerWidth - 0.5) * 2;
+    const yPos = (clientY / innerHeight - 0.5) * 2;
+
+    // Smooth 3D tilt on the composer
+    const composer = document.querySelector('.composer-wrap');
+    if (composer) {
+      gsap.to(composer, {
+        rotationY: xPos * 4,
+        rotationX: -yPos * 4,
+        ease: "power2.out",
+        duration: 0.6
+      });
+    }
+
+    // Subtle floating parallax for the welcome screen
+    const welcome = document.querySelector('.welcome');
+    if (welcome) {
+      gsap.to(welcome, {
+        rotationY: xPos * 6,
+        rotationX: -yPos * 6,
+        x: xPos * -15,
+        y: yPos * -15,
+        ease: "power3.out",
+        duration: 0.8
+      });
+    }
+  });
+
+  // Reset when mouse leaves window
+  body.addEventListener('mouseleave', () => {
+    const composer = document.querySelector('.composer-wrap');
+    const welcome = document.querySelector('.welcome');
+    if (composer) gsap.to(composer, { rotationY: 0, rotationX: 0, ease: "power2.out", duration: 0.8 });
+    if (welcome) gsap.to(welcome, { rotationY: 0, rotationX: 0, x: 0, y: 0, ease: "power3.out", duration: 1 });
+  });
+}
 
 function setupLibraries() {
   // Configure marked for safe, highlighted markdown
@@ -728,6 +777,14 @@ function appendUserMessage(text, animate = true) {
     <div class="msg-avatar" aria-label="You" title="You">You</div>
   `;
   container.appendChild(row);
+
+  if (animate && typeof gsap !== 'undefined') {
+    gsap.fromTo(row,
+      { opacity: 0, y: 20, rotationX: -15, translateZ: -20 },
+      { opacity: 1, y: 0, rotationX: 0, translateZ: 0, duration: 0.6, ease: "back.out(1.5)" }
+    );
+  }
+
   if (animate) scrollToBottom(true);
 }
 
@@ -765,6 +822,13 @@ function appendAssistantMessage(msgData, animate = true) {
   row.appendChild(avatar);
   row.appendChild(body);
   container.appendChild(row);
+
+  if (animate && typeof gsap !== 'undefined') {
+    gsap.fromTo(row,
+      { opacity: 0, y: 20, rotationX: 10, translateZ: -20 },
+      { opacity: 1, y: 0, rotationX: 0, translateZ: 0, duration: 0.6, ease: "back.out(1.2)" }
+    );
+  }
 
   if (animate) scrollToBottom(true);
   if (window.lucide) lucide.createIcons();
