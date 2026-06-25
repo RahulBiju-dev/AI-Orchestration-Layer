@@ -73,7 +73,17 @@ def _estimate_tokens(text: str) -> int:
 _interrupted = False
 
 def _sigquit_handler(signum, frame):
+    """Handle SIGQUIT signal to interrupt the current LLM generation stream.
+    
+    Sets the global _interrupted flag to True, which is checked during
+    token streaming to gracefully abort generation without crashing the agent.
+    
+    Args:
+        signum: The signal number.
+        frame: The current stack frame.
+    """
     global _interrupted
+    # Mark as interrupted so the streaming loop can break
     _interrupted = True
 
 
@@ -1134,8 +1144,10 @@ def run() -> None:
     while True:
         # ── User input ────────────────────────────────────────────────
         try:
+            # Prompt the user for input and strip surrounding whitespace
             user_input = _console.input("[green bold]>>> [/]").strip()
         except EOFError:
+            # Exit loop if EOF (Ctrl+D) is encountered
             break
 
         if not user_input:

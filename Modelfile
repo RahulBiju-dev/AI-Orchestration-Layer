@@ -44,7 +44,11 @@ Formatting & Tone:
 - Use clean, well-documented markdown code blocks for all commands and scripts.
 """
 
+# Adjust the randomness of the output (0.4 is somewhat deterministic but allows creativity)
 PARAMETER temperature 0.4
+# Define the context window size (8192 tokens)
 PARAMETER num_ctx 8192
+# Maximum number of tokens to predict/generate per response
 PARAMETER num_predict 2048
+# Number of tokens to process in parallel
 PARAMETER num_batch 512

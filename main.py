@@ -19,13 +19,27 @@ _console = Console()
 
 
 def _get_modelfile_path() -> str:
-    """Return the path to the Modelfile, handling PyInstaller's temp directory."""
+    """Return the path to the Modelfile, handling PyInstaller's temp directory.
+    
+    When running as a packaged PyInstaller executable, files are extracted to a 
+    temporary _MEIPASS directory. Otherwise, they are relative to this script.
+    
+    Returns:
+        str: Absolute path to the Modelfile.
+    """
     if hasattr(sys, '_MEIPASS'):
+        # PyInstaller extracts bundled files to sys._MEIPASS
         return os.path.join(sys._MEIPASS, 'Modelfile')
+    # Default behavior: look in the same directory as main.py
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Modelfile')
 
 def _ensure_model() -> None:
-    """Create the custom model from the Modelfile if it doesn't already exist."""
+    """Create the custom model from the Modelfile if it doesn't already exist.
+    
+    Checks Ollama's local registry for the required model. If missing, it triggers
+    a build process using the provided Modelfile to ensure the agent has the correct
+    environment and persona.
+    """
     try:
         # Check if the required custom model is already present in Ollama
         ollama.show(MODEL_NAME)
