@@ -23,7 +23,7 @@ from agent.core import MODEL_NAME, _trim_history
 from tools.registry import TOOL_DISPATCH, TOOL_SCHEMAS
 
 # Setup directories
-STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "selene-ui")
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 _SESSIONS_DIR = os.path.expanduser("~/.selene-agent/sessions")
 
 # Global Application State
