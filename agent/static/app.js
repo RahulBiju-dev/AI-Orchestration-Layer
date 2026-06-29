@@ -1,1224 +1,832 @@
-/**
- * Selene — app.js (complete ground-up rewrite)
- *
- * Implements:
- *   - Full toast/notification system (success/error/warning/info, auto-dismiss,
- *     hover-pause, progress bar, ARIA live regions, manual dismiss)
- *   - Auto-resizing textarea (expands up to maxHeight, then scrolls)
- *   - Character / context-token count display
- *   - Dynamic document titles: "{Conversation Name} — Selene"
- *   - Streaming SSE handler (thinking, tool cards, content chunks)
- *   - Improved, human-friendly error messages (specific + constructive)
- *   - Settings persistence and sync
- *   - Session load/save with proper UX feedback
- *   - showConfirm() — replaces window.confirm() with a toast-based prompt
- */
+"use strict";
 
-'use strict';
+const DEFAULT_SETTINGS = {
+  options: { temperature: 0.7, top_p: 0.9, top_k: 40, num_ctx: 8192 },
+  verbose: false,
+  wordwrap: true,
+  system: "",
+  history: true,
+  format: "",
+  think: true
+};
 
-/* ═══════════════════════════════════════════════════════════════
-   STATE
-   ═══════════════════════════════════════════════════════════════ */
+const SLASH_COMMANDS = [
+  { command: "/help", description: "Show available commands" },
+  { command: "/clear", description: "Clear conversation history" },
+  { command: "/save ", description: "Save current session with an optional name" },
+  { command: "/load ", description: "Load a saved session by name or index" },
+  { command: "/set parameter ", description: "Set a model parameter, e.g. temperature 0.7" },
+  { command: "/set system \"\"", description: "Set the system prompt for this session" },
+  { command: "/set history", description: "Enable conversation history" },
+  { command: "/set nohistory", description: "Disable conversation history" },
+  { command: "/set wordwrap", description: "Enable word wrapping" },
+  { command: "/set nowordwrap", description: "Disable word wrapping" },
+  { command: "/set format json", description: "Force JSON output from the model" },
+  { command: "/set noformat", description: "Disable forced output format" },
+  { command: "/set verbose", description: "Show generation stats after each response" },
+  { command: "/set quiet", description: "Hide generation stats" },
+  { command: "/set think", description: "Enable model thinking/reasoning" },
+  { command: "/set nothink", description: "Disable model thinking" },
+  { command: "/show parameters", description: "Show current session parameters" },
+  { command: "/show system", description: "Show the active system prompt" },
+  { command: "/show model", description: "Show model info" },
+  { command: "/vault list", description: "List indexed vault collections" },
+  { command: "/vault aliases", description: "List registered vault aliases" },
+  { command: "/vault alias ", description: "Register a friendly alias for a collection" },
+  { command: "/vault rename ", description: "Rename a vault collection" },
+  { command: "/vault add ", description: "Add a file or folder to the searchable vault" },
+  { command: "/vault search ", description: "Search the indexed vault" },
+  { command: "/vault delete ", description: "Delete indexed vault chunks by source or path" },
+  { command: "/quit", description: "Exit the agent" },
+  { command: "/exit", description: "Exit the agent" },
+  { command: "/q", description: "Exit the agent" }
+];
+
 const state = {
-  activeSession: 'New conversation',
   history: [],
-  settings: {
-    options: { temperature: 0.7, top_p: 0.9, top_k: 40 },
-    history: true,
-    think: true,
-    system: ''
-  },
+  settings: cloneSettings(DEFAULT_SETTINGS),
   savedSessions: [],
+  activeSessionName: "New conversation",
+  modelName: "selene",
   isGenerating: false,
-  // Streaming refs
-  currentAssistantBody:   null,
-  currentAssistantBubble: null,
-  currentThinkingCard:    null,
-  currentAssistantText:   '',
-  currentThinkingText:    '',
-  toolCards:              {},
-  toolCallCounter:        0
+  controller: null,
+  stream: {
+    assistantStack: null,
+    assistantBubble: null,
+    assistantText: "",
+    thinkingBlock: null,
+    thinkingText: "",
+    lastToolBlock: null
+  },
+  slash: {
+    open: false,
+    selected: 0,
+    matches: []
+  }
 };
 
-let abortController = null;
+const el = {};
 
-
-/* ═══════════════════════════════════════════════════════════════
-   TOAST / NOTIFICATION SYSTEM
-
-   Requirements met:
-   ✓ 4 types: success, error, warning, info
-   ✓ Auto-dismiss (errors 8 s, warnings 5 s, info 3.8 s, success 3.2 s)
-   ✓ Manual dismiss (× button)
-   ✓ Stacks cleanly (top-right)
-   ✓ ARIA live regions: role="alert" for error/warning (immediate),
-                        role="status" for success/info (polite)
-   ✓ Pause on hover — dismissal timer pauses while hovered
-   ✓ Progress bar shows remaining time
-   ═══════════════════════════════════════════════════════════════ */
-const TOAST_DURATIONS = { success: 3200, info: 3800, warning: 5200, error: 0 }; // 0 = must dismiss
-
-const TOAST_ICONS = {
-  success: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`,
-  error:   `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
-  warning: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>`,
-  info:    `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>`
-};
-
-/**
- * Show a toast notification.
- * @param {string} message     User-facing message text
- * @param {'success'|'error'|'warning'|'info'} type  Notification type
- * @param {number|null} duration  Override ms (0 = permanent until dismissed, null = default)
- * @returns {HTMLElement} The toast element
- */
-function showToast(message, type = 'info', duration = null) {
-  const container = document.getElementById('toast-container');
-  if (!container) return null;
-
-  const life = duration !== null ? duration : (TOAST_DURATIONS[type] ?? 3800);
-
-  const toast = document.createElement('div');
-  toast.className = `toast ${type}`;
-  // ARIA: errors/warnings announce immediately; info/success are polite
-  toast.setAttribute('role', (type === 'error' || type === 'warning') ? 'alert' : 'status');
-  toast.setAttribute('aria-live', (type === 'error' || type === 'warning') ? 'assertive' : 'polite');
-
-  toast.innerHTML = `
-    <span class="toast-icon">${TOAST_ICONS[type] || TOAST_ICONS.info}</span>
-    <span class="toast-message">${escapeHtml(message)}</span>
-    <button class="toast-close" aria-label="Dismiss notification">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
-        <path d="M18 6 6 18M6 6l12 12"/>
-      </svg>
-    </button>
-    ${life > 0 ? `<div class="toast-progress"><div class="toast-progress-bar" style="width:100%"></div></div>` : ''}
-  `;
-
-  let timerId = null;
-  let paused = false;
-  let remaining = life;
-  let startTime = null;
-  const progressBar = toast.querySelector('.toast-progress-bar');
-
-  function dismiss() {
-    if (!toast.isConnected) return;
-    toast.classList.add('leaving');
-    toast.addEventListener('transitionend', () => {
-      toast.remove();
-    }, { once: true });
-    // Fallback in case transition doesn't fire
-    setTimeout(() => toast.remove(), 300);
-  }
-
-  function startTimer() {
-    if (life <= 0) return;
-    startTime = Date.now();
-    if (progressBar) {
-      progressBar.style.transition = `width ${remaining}ms linear`;
-      progressBar.style.width = '0%';
-    }
-    timerId = setTimeout(dismiss, remaining);
-  }
-
-  function pauseTimer() {
-    if (!timerId) return;
-    clearTimeout(timerId);
-    timerId = null;
-    remaining = remaining - (Date.now() - startTime);
-    if (progressBar) {
-      const pct = (remaining / life) * 100;
-      progressBar.style.transition = 'none';
-      progressBar.style.width = `${Math.max(0, pct)}%`;
-    }
-  }
-
-  function resumeTimer() {
-    if (life <= 0 || remaining <= 0) return;
-    startTimer();
-  }
-
-  toast.addEventListener('mouseenter', () => { paused = true; pauseTimer(); });
-  toast.addEventListener('mouseleave', () => { paused = false; resumeTimer(); });
-  toast.querySelector('.toast-close').addEventListener('click', dismiss);
-
-  container.appendChild(toast);
-  startTimer();
-
-  // Expose dismiss for external use (e.g., confirm toasts)
-  toast._dismiss = dismiss;
-  return toast;
-}
-
-/**
- * Replace window.confirm() — shows a warning toast with Confirm + Cancel buttons.
- * @param {string}   message    Text to display
- * @param {Function} onConfirm  Called on confirm
- * @param {Function} onCancel   Called on cancel (optional)
- */
-function showConfirm(message, onConfirm, onCancel) {
-  const container = document.getElementById('toast-container');
-  if (!container) { if (onConfirm) onConfirm(); return; }
-
-  const toast = document.createElement('div');
-  toast.className = 'toast warning';
-  toast.setAttribute('role', 'alertdialog');
-  toast.setAttribute('aria-live', 'assertive');
-  toast.setAttribute('aria-label', 'Confirmation required');
-
-  toast.innerHTML = `
-    <span class="toast-icon">${TOAST_ICONS.warning}</span>
-    <div class="toast-message" style="display:flex;flex-direction:column;gap:8px;">
-      <span>${escapeHtml(message)}</span>
-      <div style="display:flex;gap:8px;">
-        <button id="confirm-yes" style="background:rgba(240,112,112,0.15);color:#f07070;border:1px solid rgba(240,112,112,0.3);padding:4px 12px;border-radius:7px;font-size:12px;cursor:pointer;font-family:inherit;">
-          Confirm
-        </button>
-        <button id="confirm-no" style="background:rgba(255,255,255,0.06);color:var(--ink-2);border:1px solid var(--border);padding:4px 12px;border-radius:7px;font-size:12px;cursor:pointer;font-family:inherit;">
-          Cancel
-        </button>
-      </div>
-    </div>
-    <button class="toast-close" aria-label="Cancel">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
-        <path d="M18 6 6 18M6 6l12 12"/>
-      </svg>
-    </button>
-  `;
-
-  const dismiss = () => {
-    toast.classList.add('leaving');
-    setTimeout(() => toast.remove(), 300);
-  };
-
-  toast.querySelector('#confirm-yes').addEventListener('click', () => {
-    dismiss();
-    onConfirm?.();
-  });
-  toast.querySelector('#confirm-no').addEventListener('click', () => {
-    dismiss();
-    onCancel?.();
-  });
-  toast.querySelector('.toast-close').addEventListener('click', () => {
-    dismiss();
-    onCancel?.();
-  });
-
-  container.appendChild(toast);
-}
-
-
-/* ═══════════════════════════════════════════════════════════════
-   UTILITIES
-   ═══════════════════════════════════════════════════════════════ */
-function escapeHtml(str) {
-  if (!str) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-/**
- * Update the document title.
- * Pattern: "{Conversation Name} — Selene" or just "Selene" for new conversations.
- * Ensures browser tabs, history, and bookmarks are meaningful.
- * @param {string} title - Conversation name or empty for default
- */
-function setDocumentTitle(title) {
-  const name = (title || '').trim();
-  if (!name || name === 'New conversation' || name === 'Active Session') {
-    document.title = 'Selene';
-  } else {
-    document.title = `${name} — Selene`;
-  }
-}
-
-function scrollToBottom(force = false) {
-  const el = document.getElementById('messages');
-  if (!el) return;
-  if (force) {
-    el.scrollTop = el.scrollHeight;
-    return;
-  }
-  // Auto-scroll only when near bottom (within 140px)
-  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
-  if (nearBottom) el.scrollTop = el.scrollHeight;
-}
-
-
-/* ═══════════════════════════════════════════════════════════════
-   INITIALIZATION
-   ═══════════════════════════════════════════════════════════════ */
-document.addEventListener('DOMContentLoaded', () => {
-  setupLibraries();
-  setupEventListeners();
-  loadInitialState();
-  init3DEffects();
+document.addEventListener("DOMContentLoaded", () => {
+  bindElements();
+  bindEvents();
+  loadState();
 });
 
-function init3DEffects() {
-  if (typeof gsap === 'undefined') return;
-
-  // Track mouse globally for 3D tilts
-  const body = document.body;
-
-  body.addEventListener('mousemove', (e) => {
-    const { clientX, clientY } = e;
-    const { innerWidth, innerHeight } = window;
-
-    // Normalize coordinates (-1 to 1)
-    const xPos = (clientX / innerWidth - 0.5) * 2;
-    const yPos = (clientY / innerHeight - 0.5) * 2;
-
-    // Smooth 3D tilt on the composer
-    const composer = document.querySelector('.composer-wrap');
-    if (composer) {
-      gsap.to(composer, {
-        rotationY: xPos * 4,
-        rotationX: -yPos * 4,
-        ease: "power2.out",
-        duration: 0.6
-      });
-    }
-
-    // Subtle floating parallax for the welcome screen
-    const welcome = document.querySelector('.welcome');
-    if (welcome) {
-      gsap.to(welcome, {
-        rotationY: xPos * 6,
-        rotationX: -yPos * 6,
-        x: xPos * -15,
-        y: yPos * -15,
-        ease: "power3.out",
-        duration: 0.8
-      });
-    }
-  });
-
-  // Reset when mouse leaves window
-  body.addEventListener('mouseleave', () => {
-    const composer = document.querySelector('.composer-wrap');
-    const welcome = document.querySelector('.welcome');
-    if (composer) gsap.to(composer, { rotationY: 0, rotationX: 0, ease: "power2.out", duration: 0.8 });
-    if (welcome) gsap.to(welcome, { rotationY: 0, rotationX: 0, x: 0, y: 0, ease: "power3.out", duration: 1 });
-  });
+function bindElements() {
+  el.messages = document.getElementById("messages");
+  el.form = document.getElementById("composer-form");
+  el.input = document.getElementById("chat-input");
+  el.send = document.getElementById("send-btn");
+  el.contextLabel = document.getElementById("context-label");
+  el.contextFill = document.getElementById("context-fill");
+  el.contextMeter = document.querySelector(".context-meter");
+  el.sessionList = document.getElementById("session-list");
+  el.connection = document.getElementById("connection-label");
+  el.title = document.getElementById("chat-title");
+  el.history = document.getElementById("setting-history");
+  el.think = document.getElementById("setting-think");
+  el.temperature = document.getElementById("setting-temperature");
+  el.temperatureValue = document.getElementById("temperature-value");
+  el.context = document.getElementById("setting-context");
+  el.slashMenu = document.getElementById("slash-menu");
 }
 
-function setupLibraries() {
-  // Configure marked for safe, highlighted markdown
-  if (window.marked) {
-    marked.setOptions({
-      highlight: (code, lang) => {
-        if (window.hljs) {
-          const language = hljs.getLanguage(lang) ? lang : 'plaintext';
-          return hljs.highlight(code, { language }).value;
-        }
-        return escapeHtml(code);
-      },
-      langPrefix: 'hljs language-',
-      gfm: true,
-      breaks: false
-    });
-  }
-
-  // Init lucide icons after DOM is ready
-  if (window.lucide) lucide.createIcons();
-}
-
-function setupEventListeners() {
-  // ── Sidebar toggle ────────────────────────────────────────────
-  const sidebar     = document.getElementById('sidebar');
-  const sidebarToggleBtn = document.getElementById('sidebar-toggle');
-
-  sidebarToggleBtn?.addEventListener('click', () => {
-    const isOpen = sidebar.classList.toggle('open');
-    sidebarToggleBtn.setAttribute('aria-expanded', String(isOpen));
+function bindEvents() {
+  el.form?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (state.isGenerating) stopGeneration();
+    else sendMessage();
   });
 
-  // Close sidebar on outside click (mobile)
-  document.addEventListener('click', (e) => {
-    if (
-      window.innerWidth < 821 &&
-      sidebar?.classList.contains('open') &&
-      !sidebar.contains(e.target) &&
-      e.target.id !== 'sidebar-toggle'
-    ) {
-      sidebar.classList.remove('open');
-      sidebarToggleBtn?.setAttribute('aria-expanded', 'false');
+  el.input?.addEventListener("input", () => {
+    resizeComposer();
+    updateComposerState();
+    updateSlashMenu();
+  });
+
+  el.input?.addEventListener("keydown", (event) => {
+    if (handleSlashKeydown(event)) return;
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (state.isGenerating) stopGeneration();
+      else sendMessage();
     }
   });
 
-  // ── New chat ──────────────────────────────────────────────────
-  document.getElementById('new-chat-btn')?.addEventListener('click', () => {
-    clearConversation();
-  });
-
-  // ── Composer (chatbox) ────────────────────────────────────────
-  const textarea = document.getElementById('chat-input');
-  const sendBtn  = document.getElementById('send-btn');
-  const countEl  = document.getElementById('input-count');
-
-  const MAX_TEXTAREA_HEIGHT = 220; // px — requirement: expand then scroll
-
-  function resizeTextarea() {
-    if (!textarea) return;
-    textarea.style.height = 'auto';
-    const next = Math.min(textarea.scrollHeight, MAX_TEXTAREA_HEIGHT);
-    textarea.style.height = `${next}px`;
-    // Switch to scrollable when at max
-    textarea.style.overflowY = textarea.scrollHeight > MAX_TEXTAREA_HEIGHT ? 'auto' : 'hidden';
-
-    // Update character count
-    if (countEl) countEl.textContent = String(textarea.value.length);
-    updateSendButton();
-  }
-
-  textarea?.addEventListener('input', resizeTextarea);
-
-  textarea?.addEventListener('keydown', (e) => {
-    // Enter sends; Shift+Enter inserts newline
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      if (!state.isGenerating && textarea.value.trim()) {
-        sendMessage();
-      }
+  document.addEventListener("click", (event) => {
+    if (!el.slashMenu?.contains(event.target) && event.target !== el.input) {
+      closeSlashMenu();
     }
   });
 
-  // Prime on load
-  requestAnimationFrame(resizeTextarea);
+  document.getElementById("new-chat-btn")?.addEventListener("click", clearConversation);
+  document.getElementById("clear-btn")?.addEventListener("click", clearConversation);
+  document.getElementById("save-btn")?.addEventListener("click", saveSession);
 
-  sendBtn?.addEventListener('click', () => {
-    if (state.isGenerating) {
-      // Stop button
-      abortController?.abort();
-      finishGeneration(true);
-    } else {
-      sendMessage();
-    }
-  });
-
-  // ── Settings panel ────────────────────────────────────────────
-  const settingsToggleBtn = document.getElementById('settings-toggle');
-  const settingsPanel     = document.getElementById('settings-panel');
-  const settingsChevron   = settingsToggleBtn?.querySelector('.settings-chevron');
-
-  settingsToggleBtn?.addEventListener('click', () => {
-    const isOpen = settingsPanel.classList.toggle('open');
-    settingsChevron?.classList.toggle('open', isOpen);
-    settingsToggleBtn.setAttribute('aria-expanded', String(isOpen));
-  });
-
-  setupSettingsSliders();
-
-  // ── Clear ─────────────────────────────────────────────────────
-  document.getElementById('clear-btn')?.addEventListener('click', () => {
-    showConfirm(
-      'Clear this conversation? This cannot be undone.',
-      () => clearConversation(),
-      null
-    );
-  });
-
-  // ── Help modal ────────────────────────────────────────────────
-  const helpModal = document.getElementById('help-modal');
-
-  document.getElementById('help-btn')?.addEventListener('click', () => {
-    helpModal?.classList.add('open');
-    helpModal?.querySelector('.close-modal')?.focus();
-  });
-
-  helpModal?.addEventListener('click', (e) => {
-    // Close on backdrop click
-    if (e.target === helpModal) helpModal.classList.remove('open');
-  });
-
-  helpModal?.querySelector('.close-modal')?.addEventListener('click', () => {
-    helpModal.classList.remove('open');
-  });
-
-  // Close modals on Escape
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      helpModal?.classList.remove('open');
-    }
-  });
-}
-
-function setupSettingsSliders() {
-  const sliderConfig = [
-    { sliderId: 'param-temperature', displayId: 'temp-val', key: 'temperature', decimals: 2 },
-    { sliderId: 'param-top_p',       displayId: 'topp-val', key: 'top_p',       decimals: 2 },
-    { sliderId: 'param-top_k',       displayId: 'topk-val', key: 'top_k',       decimals: 0 }
-  ];
-
-  sliderConfig.forEach(({ sliderId, displayId, key, decimals }) => {
-    const slider  = document.getElementById(sliderId);
-    const display = document.getElementById(displayId);
-    if (!slider || !display) return;
-
-    slider.addEventListener('input', () => {
-      const val = parseFloat(slider.value);
-      display.textContent = val.toFixed(decimals);
-      state.settings.options = state.settings.options || {};
-      state.settings.options[key] = val;
-      persistSettings();
-    });
-  });
-
-  document.getElementById('setting-history')?.addEventListener('change', (e) => {
-    state.settings.history = e.target.checked;
+  el.history?.addEventListener("change", () => {
+    state.settings.history = el.history.checked;
     persistSettings();
   });
 
-  document.getElementById('setting-think')?.addEventListener('change', (e) => {
-    state.settings.think = e.target.checked;
+  el.think?.addEventListener("change", () => {
+    state.settings.think = el.think.checked;
     persistSettings();
   });
+
+  el.temperature?.addEventListener("input", () => {
+    const value = Number(el.temperature.value);
+    state.settings.options = state.settings.options || {};
+    state.settings.options.temperature = value;
+    el.temperatureValue.textContent = value.toFixed(2);
+    persistSettings();
+  });
+
+  el.context?.addEventListener("change", () => {
+    state.settings.options = state.settings.options || {};
+    state.settings.options.num_ctx = Number(el.context.value);
+    persistSettings();
+    updateContextMeter();
+  });
+}
+
+async function loadState() {
+  try {
+    const response = await fetch("/api/settings");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+
+    state.history = data.history || [];
+    state.savedSessions = data.saved_sessions || [];
+    state.settings = mergeSettings(data.settings || {});
+    state.activeSessionName = data.active_session_name || "New conversation";
+    state.modelName = data.model_name || "selene";
+
+    el.connection.textContent = data.ollama_status === "Online" ? "Ollama online" : "Ollama offline";
+    document.title = titleForSession(state.activeSessionName);
+    el.title.textContent = cleanSessionName(state.activeSessionName);
+
+    syncSettingsUI();
+    renderSessions();
+    renderMessages();
+    updateComposerState();
+  } catch (error) {
+    el.connection.textContent = "Backend unavailable";
+    toast("Could not reach Selene. Make sure the backend and Ollama are running.");
+    renderWelcome();
+  }
+}
+
+function mergeSettings(settings) {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    options: {
+      ...DEFAULT_SETTINGS.options,
+      ...(settings.options || {})
+    }
+  };
+}
+
+function cloneSettings(settings) {
+  return JSON.parse(JSON.stringify(settings));
 }
 
 function syncSettingsUI() {
-  const opts = state.settings?.options || {};
+  if (el.history) el.history.checked = state.settings.history !== false;
+  if (el.think) el.think.checked = state.settings.think !== false;
 
-  const map = [
-    ['param-temperature', 'temp-val', opts.temperature ?? 0.7, 2],
-    ['param-top_p',       'topp-val', opts.top_p      ?? 0.9, 2],
-    ['param-top_k',       'topk-val', opts.top_k      ?? 40,  0]
-  ];
+  const temp = Number(state.settings.options?.temperature ?? 0.7);
+  if (el.temperature) el.temperature.value = String(temp);
+  if (el.temperatureValue) el.temperatureValue.textContent = temp.toFixed(2);
 
-  map.forEach(([sid, vid, val, dec]) => {
-    const sl = document.getElementById(sid);
-    const dv = document.getElementById(vid);
-    if (sl) sl.value = val;
-    if (dv) dv.textContent = parseFloat(val).toFixed(dec);
-  });
-
-  const histEl  = document.getElementById('setting-history');
-  const thinkEl = document.getElementById('setting-think');
-  if (histEl)  histEl.checked  = state.settings.history !== false;
-  if (thinkEl) thinkEl.checked = state.settings.think   !== false;
+  const ctx = String(contextBudget());
+  if (el.context) {
+    const hasOption = [...el.context.options].some((option) => option.value === ctx);
+    if (!hasOption) {
+      const option = document.createElement("option");
+      option.value = ctx;
+      option.textContent = `${Math.round(Number(ctx) / 1024)}k`;
+      el.context.appendChild(option);
+    }
+    el.context.value = ctx;
+  }
 }
 
 async function persistSettings() {
   try {
-    await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(state.settings)
     });
   } catch {
-    // Silently fail — user is already in the UI, no need to disrupt
+    toast("Settings could not be saved.");
   }
 }
 
+function renderSessions() {
+  if (!el.sessionList) return;
+  el.sessionList.innerHTML = "";
 
-/* ═══════════════════════════════════════════════════════════════
-   DATA LOADING
-   ═══════════════════════════════════════════════════════════════ */
-async function loadInitialState() {
-  try {
-    const res  = await fetch('/api/settings');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-
-    state.history       = data.history           || [];
-    state.savedSessions = data.saved_sessions     || [];
-    state.settings      = data.settings           || state.settings;
-    state.activeSession = data.active_session_name || 'New conversation';
-
-    const badge = document.getElementById('model-badge');
-    if (badge) badge.textContent = data.model_name || 'selene';
-
-    updateConnectionStatus(data.ollama_status);
-    syncSettingsUI();
-    renderConversationList();
-    renderMessages();
-    setDocumentTitle(state.activeSession);
-
-  } catch (err) {
-    // IMPROVED ERROR: specific + constructive + human
-    showToast(
-      "Couldn't connect to Selene's backend. Make sure Ollama is running, then refresh the page.",
-      'error'
-    );
-    renderWelcome();
-  }
-}
-
-function updateConnectionStatus(status) {
-  const dot  = document.getElementById('status-dot');
-  const text = document.getElementById('status-text');
-  const wrap = document.getElementById('status-indicator');
-
-  const isOnline = (status === 'Online');
-  dot?.classList.toggle('offline', !isOnline);
-  if (text) text.textContent = isOnline ? 'Online' : 'Offline';
-  if (wrap) wrap.title = `Ollama: ${status || 'Unknown'}`;
-}
-
-async function clearConversation() {
-  try {
-    await fetch('/api/clear-session', { method: 'POST' });
-    state.history       = [];
-    state.activeSession = 'New conversation';
-
-    const messages = document.getElementById('messages');
-    if (messages) messages.innerHTML = '';
-
-    renderConversationList();
-    renderWelcome();
-    setDocumentTitle(state.activeSession);
-    showToast('Conversation cleared — ready for a fresh start.', 'info', 2000);
-  } catch {
-    showToast(
-      'Could not clear the conversation right now. Please try again.',
-      'error'
-    );
-  }
-}
-
-
-/* ═══════════════════════════════════════════════════════════════
-   RENDERING — CONVERSATION LIST
-   ═══════════════════════════════════════════════════════════════ */
-function renderConversationList() {
-  const list = document.getElementById('convo-list');
-  if (!list) return;
-
-  list.innerHTML = '';
-
-  if (!state.savedSessions?.length) {
-    const empty = document.createElement('div');
-    empty.className = 'convo-empty';
-    empty.textContent = 'No saved conversations yet.\nYour sessions will appear here.';
-    list.appendChild(empty);
+  if (!state.savedSessions.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-sessions";
+    empty.textContent = "Saved chats will appear here.";
+    el.sessionList.appendChild(empty);
     return;
   }
 
-  state.savedSessions.forEach((filename) => {
-    const base = filename.replace('.json', '');
-    let display = base;
-    let metaText = '';
-
-    // Parse timestamped filenames like: name_20240101_120000.json
-    const m = base.match(/^(.+)_(\d{8})_(\d{6})$/);
-    if (m) {
-      display  = m[1].replace(/_/g, ' ');
-      const y  = m[2].slice(0, 4);
-      const mo = m[2].slice(4, 6);
-      const d  = m[2].slice(6, 8);
-      metaText = `${d}/${mo}`;
-    }
-
-    const item = document.createElement('div');
-    item.className = `convo-item${filename === state.activeSession ? ' active' : ''}`;
-    item.setAttribute('role', 'listitem');
-    item.setAttribute('title', display);
-    item.setAttribute('tabindex', '0');
-    item.innerHTML = `
-      <svg class="convo-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-      </svg>
-      <span class="convo-name">${escapeHtml(display)}</span>
-      ${metaText ? `<span class="convo-meta">${escapeHtml(metaText)}</span>` : ''}
-    `;
-
-    const load = () => loadSavedSession(filename);
-    item.addEventListener('click', load);
-    item.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); load(); }
-    });
-
-    list.appendChild(item);
+  state.savedSessions.forEach((name) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "session-item";
+    button.textContent = cleanSessionName(name);
+    button.title = name;
+    button.addEventListener("click", () => loadSession(name));
+    el.sessionList.appendChild(button);
   });
 }
 
-async function loadSavedSession(filename) {
-  try {
-    const res = await fetch('/api/load-session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: filename })
-    });
-    const data = await res.json();
-
-    if (data.status === 'success') {
-      await loadInitialState();
-      // Close sidebar on mobile after loading
-      if (window.innerWidth < 821) {
-        document.getElementById('sidebar')?.classList.remove('open');
-        document.getElementById('sidebar-toggle')?.setAttribute('aria-expanded', 'false');
-      }
-      showToast('Conversation loaded.', 'success', 2200);
-    } else {
-      showToast(
-        "That conversation couldn't be opened — the file may be missing or corrupted. Try another one.",
-        'error'
-      );
-    }
-  } catch {
-    showToast(
-      "Network hiccup — the conversation didn't load. Check your connection and try again.",
-      'error'
-    );
-  }
-}
-
-
-/* ═══════════════════════════════════════════════════════════════
-   RENDERING — MESSAGES
-   ═══════════════════════════════════════════════════════════════ */
 function renderMessages() {
-  const container = document.getElementById('messages');
-  if (!container) return;
-  container.innerHTML = '';
+  el.messages.innerHTML = "";
+  const display = toDisplayMessages(state.history);
 
-  // Coalesce history into display pairs
-  const display = [];
-  for (let i = 0; i < state.history.length; i++) {
-    const msg = state.history[i];
-    if (msg.role === 'user') {
-      display.push({ role: 'user', content: msg.content });
-    } else if (msg.role === 'assistant') {
-      const toolResults = [];
-      let j = i + 1;
-      while (j < state.history.length && state.history[j].role === 'tool') {
-        toolResults.push(state.history[j]);
-        j++;
-      }
-      i = j - 1;
-      display.push({
-        role:         'assistant',
-        content:      msg.content,
-        thinking:     msg.thinking,
-        tool_calls:   msg.tool_calls,
-        tool_results: toolResults
-      });
-    }
-    // Skip system messages in display
-  }
-
-  if (display.length === 0) {
-    renderWelcome(container);
+  if (!display.length) {
+    renderWelcome();
     return;
   }
 
-  display.forEach((m) => {
-    if (m.role === 'user') appendUserMessage(m.content, false);
-    else                   appendAssistantMessage(m, false);
+  display.forEach((message) => {
+    if (message.role === "user") {
+      appendUserMessage(message.content, false);
+    } else {
+      appendAssistantMessage(message, false);
+    }
   });
-
   scrollToBottom(true);
 }
 
-function renderWelcome(container = null) {
-  const el = container || document.getElementById('messages');
-  if (!el) return;
+function toDisplayMessages(history) {
+  const display = [];
+  for (let i = 0; i < history.length; i += 1) {
+    const message = history[i];
+    if (message.role === "system") continue;
+    if (message.role === "user") {
+      display.push({ role: "user", content: message.content || "" });
+      continue;
+    }
+    if (message.role === "assistant") {
+      const toolResults = [];
+      let j = i + 1;
+      while (history[j]?.role === "tool") {
+        toolResults.push(history[j]);
+        j += 1;
+      }
+      display.push({
+        role: "assistant",
+        content: message.content || "",
+        thinking: message.thinking || "",
+        toolCalls: message.tool_calls || [],
+        toolResults
+      });
+      i = j - 1;
+    }
+  }
+  return display;
+}
 
-  const div = document.createElement('div');
-  div.className = 'welcome';
-  div.innerHTML = `
-    <svg class="welcome-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-    </svg>
-    <h1 class="welcome-title">Good to see you.</h1>
-    <p class="welcome-sub">Selene is ready — your calm, capable AI on this machine.<br>Ask anything or try one of these:</p>
-
-    <div class="suggestions" role="list">
-      <button class="suggestion-chip" data-prompt="Search the web for the latest AI research news" role="listitem">
-        <span class="chip-label">Explore</span>
-        <span class="chip-text">Search for the latest AI research</span>
-      </button>
-      <button class="suggestion-chip" data-prompt="Index my project folder and give me an architecture summary" role="listitem">
-        <span class="chip-label">Vault</span>
-        <span class="chip-text">Index my project and summarize its architecture</span>
-      </button>
-      <button class="suggestion-chip" data-prompt="Write a Python function to recursively find duplicate files" role="listitem">
-        <span class="chip-label">Code</span>
-        <span class="chip-text">Write a script to find duplicate files</span>
-      </button>
-      <button class="suggestion-chip" data-prompt="Play some ambient focus music on Spotify" role="listitem">
-        <span class="chip-label">Music</span>
-        <span class="chip-text">Queue ambient focus music on Spotify</span>
-      </button>
+function renderWelcome() {
+  el.messages.innerHTML = `
+    <div class="welcome">
+      <h3>Selene</h3>
+      <p>A clean local AI chat interface for thinking, tools, and answers in one dark workspace.</p>
+      <div class="suggestions">
+        <button class="suggestion" type="button" data-prompt="Summarize this project and identify the most important files.">
+          Project summary <span>Understand the workspace</span>
+        </button>
+        <button class="suggestion" type="button" data-prompt="Search the web for the latest AI developer tooling news.">
+          Web research <span>Use tools when needed</span>
+        </button>
+        <button class="suggestion" type="button" data-prompt="Help me debug a Python error step by step.">
+          Debug with me <span>Reason through a problem</span>
+        </button>
+        <button class="suggestion" type="button" data-prompt="/help">
+          Commands <span>Show slash commands</span>
+        </button>
+      </div>
     </div>
   `;
 
-  el.appendChild(div);
-
-  div.querySelectorAll('.suggestion-chip').forEach((chip) => {
-    chip.addEventListener('click', () => {
-      const input = document.getElementById('chat-input');
-      if (input) {
-        input.value = chip.dataset.prompt;
-        input.dispatchEvent(new Event('input'));
-        input.focus();
-      }
+  el.messages.querySelectorAll(".suggestion").forEach((button) => {
+    button.addEventListener("click", () => {
+      el.input.value = button.dataset.prompt || "";
+      resizeComposer();
+      updateComposerState();
+      el.input.focus();
     });
   });
 }
 
-function appendUserMessage(text, animate = true) {
-  const container = document.getElementById('messages');
-  if (!container) return;
-
-  // Remove welcome screen if present
-  container.querySelector('.welcome')?.remove();
-
-  const row = document.createElement('div');
-  row.className = 'msg user';
-  row.innerHTML = `
-    <div class="msg-body">
-      <div class="bubble">${escapeHtml(text)}</div>
-    </div>
-    <div class="msg-avatar" aria-label="You" title="You">You</div>
-  `;
-  container.appendChild(row);
-
-  if (animate && typeof gsap !== 'undefined') {
-    gsap.fromTo(row,
-      { opacity: 0, y: 20, rotationX: -15, translateZ: -20 },
-      { opacity: 1, y: 0, rotationX: 0, translateZ: 0, duration: 0.6, ease: "back.out(1.5)" }
-    );
-  }
-
-  if (animate) scrollToBottom(true);
+function appendUserMessage(text, scroll = true) {
+  el.messages.querySelector(".welcome")?.remove();
+  const row = messageShell("user", "You");
+  row.stack.appendChild(bubble(text, false));
+  el.messages.appendChild(row.root);
+  if (scroll) scrollToBottom(true);
 }
 
-function appendAssistantMessage(msgData, animate = true) {
-  const container = document.getElementById('messages');
-  if (!container) return;
+function appendAssistantMessage(message, scroll = true) {
+  el.messages.querySelector(".welcome")?.remove();
+  const row = messageShell("assistant", "S");
 
-  const row    = document.createElement('div');
-  row.className = 'msg assistant';
-
-  const avatar = document.createElement('div');
-  avatar.className = 'msg-avatar';
-  avatar.innerHTML = `<img src="/avatar.png" alt="Selene" width="30" height="30">`;
-
-  const body = document.createElement('div');
-  body.className = 'msg-body';
-
-  if (msgData.thinking) {
-    body.appendChild(createThinkingCard(msgData.thinking, false));
+  if (message.thinking) {
+    row.stack.appendChild(detailBlock("Thinking", "reasoning", message.thinking, false));
   }
 
-  if (msgData.tool_calls?.length) {
-    msgData.tool_calls.forEach((tc, idx) => {
-      const result = msgData.tool_results?.[idx]?.content || '';
-      body.appendChild(createToolCard(tc.function.name, tc.function.arguments, result, false));
-    });
-  }
-
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.innerHTML  = marked.parse(msgData.content || '');
-  body.appendChild(bubble);
-  addCopyButtons(bubble);
-
-  row.appendChild(avatar);
-  row.appendChild(body);
-  container.appendChild(row);
-
-  if (animate && typeof gsap !== 'undefined') {
-    gsap.fromTo(row,
-      { opacity: 0, y: 20, rotationX: 10, translateZ: -20 },
-      { opacity: 1, y: 0, rotationX: 0, translateZ: 0, duration: 0.6, ease: "back.out(1.2)" }
-    );
-  }
-
-  if (animate) scrollToBottom(true);
-  if (window.lucide) lucide.createIcons();
-}
-
-
-/* ═══════════════════════════════════════════════════════════════
-   THINKING & TOOL CARDS
-   ═══════════════════════════════════════════════════════════════ */
-function createThinkingCard(text, streaming = false) {
-  const card = document.createElement('div');
-  card.className = `thinking-card${streaming ? '' : ' collapsed'}`;
-
-  const header = document.createElement('div');
-  header.className = 'thinking-header';
-  header.setAttribute('role', 'button');
-  header.setAttribute('tabindex', '0');
-  header.setAttribute('aria-expanded', String(!streaming));
-  header.innerHTML = `
-    <svg class="thinking-header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-      <path d="M12 2a8 8 0 0 1 8 8c0 5.4-8 12-8 12S4 15.4 4 10a8 8 0 0 1 8-8z"/>
-      <circle cx="12" cy="10" r="2"/>
-    </svg>
-    <span class="thinking-label">Thinking</span>
-    <svg class="card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
-      <path d="m6 9 6 6 6-6"/>
-    </svg>
-  `;
-
-  const body = document.createElement('div');
-  body.className = 'thinking-body';
-  body.textContent = text;
-
-  const toggle = () => {
-    const collapsed = card.classList.toggle('collapsed');
-    header.setAttribute('aria-expanded', String(!collapsed));
-  };
-
-  header.addEventListener('click', toggle);
-  header.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+  message.toolCalls?.forEach((call, index) => {
+    const fn = call.function || {};
+    const result = message.toolResults?.[index]?.content || "";
+    const args = formatJSON(fn.arguments || {});
+    const body = `Arguments:\n${args}${result ? `\n\nResult:\n${result}` : ""}`;
+    row.stack.appendChild(detailBlock(fn.name || "tool", "tool", body, false));
   });
 
-  card.appendChild(header);
-  card.appendChild(body);
-  return card;
+  if (message.content) row.stack.appendChild(bubble(message.content, true));
+  el.messages.appendChild(row.root);
+  if (scroll) scrollToBottom(true);
 }
 
-function createToolCard(name, args, result = '', running = false) {
-  const card = document.createElement('div');
-  card.className = `tool-card${running ? '' : ' collapsed'}`;
+function messageShell(role, avatarText) {
+  const root = document.createElement("article");
+  root.className = `message ${role}`;
 
-  const argsStr   = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
-  const resultStr = result ? `\n\nResult:\n${result}` : (running ? '\nRunning…' : '');
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = avatarText;
 
-  const header = document.createElement('div');
-  header.className = 'tool-header';
-  header.setAttribute('role', 'button');
-  header.setAttribute('tabindex', '0');
-  header.setAttribute('aria-expanded', String(running));
-  header.innerHTML = `
-    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-    </svg>
-    <span style="font-size:var(--fs-caption);color:var(--ink-3);">Tool: </span>
-    <span class="tool-name">${escapeHtml(name)}</span>
-    <svg class="card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
-      <path d="m6 9 6 6 6-6"/>
-    </svg>
+  const stack = document.createElement("div");
+  stack.className = "message-stack";
+
+  root.append(avatar, stack);
+  return { root, stack };
+}
+
+function bubble(content, markdown) {
+  const node = document.createElement("div");
+  node.className = "bubble";
+  node.innerHTML = markdown ? renderMarkdown(content) : escapeHTML(content).replace(/\n/g, "<br>");
+  return node;
+}
+
+function detailBlock(title, label, content, running) {
+  const block = document.createElement("section");
+  block.className = `detail-block open${running ? " running" : ""}`;
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "block-toggle";
+  toggle.innerHTML = `
+    <span class="block-title">${escapeHTML(title)} <span class="pill">${escapeHTML(label)}</span></span>
+    <span aria-hidden="true">+</span>
   `;
 
-  const body = document.createElement('div');
-  body.className = 'tool-body';
-  body.textContent = `Args:\n${argsStr}${resultStr}`;
+  const body = document.createElement("div");
+  body.className = "block-body";
+  body.textContent = content || (running ? "Running..." : "");
 
-  const toggle = () => {
-    const collapsed = card.classList.toggle('collapsed');
-    header.setAttribute('aria-expanded', String(!collapsed));
-  };
-
-  header.addEventListener('click', toggle);
-  header.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
-  });
-
-  card.appendChild(header);
-  card.appendChild(body);
-  return card;
+  toggle.addEventListener("click", () => block.classList.toggle("open"));
+  block.append(toggle, body);
+  return block;
 }
 
-function addCopyButtons(scope) {
-  scope.querySelectorAll('pre').forEach((pre) => {
-    if (pre.querySelector('.copy-btn')) return; // skip if already added
-
-    const btn    = document.createElement('button');
-    btn.className = 'copy-btn';
-    btn.textContent = 'Copy';
-    btn.setAttribute('aria-label', 'Copy code to clipboard');
-
-    btn.addEventListener('click', async () => {
-      const code = pre.querySelector('code')?.textContent || '';
-      try {
-        await navigator.clipboard.writeText(code);
-        btn.textContent = 'Copied!';
-        showToast('Code copied to clipboard.', 'success', 1500);
-      } catch {
-        showToast('Could not copy — try selecting the text manually.', 'warning');
-      }
-      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
-    });
-
-    pre.appendChild(btn);
-  });
-}
-
-
-/* ═══════════════════════════════════════════════════════════════
-   SEND & STREAM
-   ═══════════════════════════════════════════════════════════════ */
 async function sendMessage() {
-  const input = document.getElementById('chat-input');
-  if (!input || state.isGenerating) return;
-
-  const text = input.value.trim();
+  if (state.isGenerating) return;
+  const text = el.input.value.trim();
   if (!text) return;
 
-  // Clear input
-  input.value = '';
-  input.style.height = 'auto';
-  input.style.overflowY = 'hidden';
-  const countEl = document.getElementById('input-count');
-  if (countEl) countEl.textContent = '0';
-
+  closeSlashMenu();
   appendUserMessage(text);
+  el.input.value = "";
+  resizeComposer();
+  updateComposerState();
 
   state.isGenerating = true;
-  updateSendButton();
-  resetStreamState();
-
-  abortController = new AbortController();
+  state.controller = new AbortController();
+  resetStream();
+  updateComposerState();
 
   try {
-    const resp = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: text }),
-      signal: abortController.signal
+      signal: state.controller.signal
     });
-
-    if (!resp.ok) {
-      throw new Error(`Server responded with ${resp.status}`);
-    }
-
-    const reader  = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || ''; // keep partial line in buffer
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            processStreamEvent(JSON.parse(line.slice(6)));
-          } catch {
-            // Ignore malformed events
-          }
-        }
-      }
-    }
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      // User pressed stop — don't show error
-    } else {
-      // IMPROVED ERROR: specific + constructive + human
-      showToast(
-        'Selene lost the connection mid-response. Check that Ollama is still running, then try again.',
-        'error'
-      );
-      finishGeneration(false);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    await readEventStream(response);
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      toast("Selene lost the response stream. Check Ollama and try again.");
+      finishGeneration();
     }
   }
 }
 
-function resetStreamState() {
-  state.currentAssistantBody   = null;
-  state.currentAssistantBubble = null;
-  state.currentThinkingCard    = null;
-  state.currentAssistantText   = '';
-  state.currentThinkingText    = '';
-  state.toolCards              = {};
-  state.toolCallCounter        = 0;
-}
+async function readEventStream(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
 
-function getOrCreateAssistantBody() {
-  if (state.currentAssistantBody) return state.currentAssistantBody;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
 
-  const container = document.getElementById('messages');
-  container.querySelector('.welcome')?.remove();
-
-  const row    = document.createElement('div');
-  row.className = 'msg assistant';
-
-  const avatar = document.createElement('div');
-  avatar.className = 'msg-avatar';
-  avatar.innerHTML = `<img src="/avatar.png" alt="Selene" width="30" height="30">`;
-
-  const body = document.createElement('div');
-  body.className = 'msg-body';
-
-  row.appendChild(avatar);
-  row.appendChild(body);
-  container.appendChild(row);
-
-  state.currentAssistantBody = body;
-  return body;
-}
-
-function processStreamEvent(evt) {
-  switch (evt.type) {
-
-    case 'status': {
-      const container = document.getElementById('messages');
-      const row = document.createElement('div');
-      row.className = 'status-row';
-      row.innerHTML = `<span>${escapeHtml(evt.message || '')}</span>`;
-      container.appendChild(row);
-      scrollToBottom();
-      break;
-    }
-
-    case 'thinking_start': {
-      const body = getOrCreateAssistantBody();
-      state.currentThinkingCard = createThinkingCard('', true);
-      body.appendChild(state.currentThinkingCard);
-      scrollToBottom();
-      break;
-    }
-
-    case 'thinking_chunk': {
-      if (state.currentThinkingCard) {
-        state.currentThinkingText += evt.text || '';
-        const b = state.currentThinkingCard.querySelector('.thinking-body');
-        if (b) b.textContent = state.currentThinkingText;
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      try {
+        handleStreamEvent(JSON.parse(line.slice(6)));
+      } catch {
+        // Ignore malformed SSE chunks.
       }
-      break;
-    }
-
-    case 'thinking_end': {
-      if (state.currentThinkingCard) {
-        state.currentThinkingCard.classList.add('collapsed');
-        const header = state.currentThinkingCard.querySelector('.thinking-header');
-        if (header) header.setAttribute('aria-expanded', 'false');
-      }
-      break;
-    }
-
-    case 'content_chunk': {
-      const body = getOrCreateAssistantBody();
-      if (!state.currentAssistantBubble) {
-        state.currentAssistantBubble = document.createElement('div');
-        state.currentAssistantBubble.className = 'bubble';
-        body.appendChild(state.currentAssistantBubble);
-      }
-      state.currentAssistantText += evt.text || '';
-      state.currentAssistantBubble.innerHTML = marked.parse(state.currentAssistantText);
-      addCopyButtons(state.currentAssistantBubble);
-      scrollToBottom();
-      break;
-    }
-
-    case 'tool_start': {
-      const body = getOrCreateAssistantBody();
-      state.toolCallCounter++;
-      const id   = `tool-${state.toolCallCounter}`;
-      const card = createToolCard(evt.name || '', evt.arguments || {}, '', true);
-      body.appendChild(card);
-      state.toolCards[id]  = card;
-      state.lastToolCardId = id;
-      scrollToBottom();
-      break;
-    }
-
-    case 'tool_end': {
-      const id  = state.lastToolCardId;
-      const old = state.toolCards[id];
-      if (old?.parentNode) {
-        const fresh = createToolCard(evt.name || '', {}, evt.result || '', false);
-        old.parentNode.replaceChild(fresh, old);
-        state.toolCards[id] = fresh;
-      }
-      // Reset content buffer so next model response starts fresh
-      state.currentAssistantBody   = null;
-      state.currentAssistantBubble = null;
-      state.currentAssistantText   = '';
-      break;
-    }
-
-    case 'token_usage': {
-      const countEl = document.getElementById('input-count');
-      if (countEl) {
-        const pct = (evt.total / evt.budget);
-        countEl.textContent = `${evt.total}/${evt.budget} ctx`;
-        countEl.classList.toggle('warning', pct > 0.88);
-      }
-      break;
-    }
-
-    case 'done': {
-      finishGeneration(false);
-      break;
     }
   }
 }
 
-function finishGeneration(aborted = false) {
+function handleStreamEvent(event) {
+  switch (event.type) {
+    case "status":
+      appendStatus(event.message || "");
+      break;
+    case "thinking_start":
+      ensureAssistantStack();
+      state.stream.thinkingBlock = detailBlock("Thinking", "reasoning", "", true);
+      state.stream.assistantStack.appendChild(state.stream.thinkingBlock);
+      scrollToBottom();
+      break;
+    case "thinking_chunk":
+      state.stream.thinkingText += event.text || "";
+      setBlockBody(state.stream.thinkingBlock, state.stream.thinkingText);
+      break;
+    case "thinking_end":
+      state.stream.thinkingBlock?.classList.remove("running");
+      state.stream.thinkingBlock?.classList.remove("open");
+      break;
+    case "tool_start":
+      ensureAssistantStack();
+      state.stream.lastToolBlock = detailBlock(event.name || "tool", "tool", `Arguments:\n${formatJSON(event.arguments || {})}`, true);
+      state.stream.assistantStack.appendChild(state.stream.lastToolBlock);
+      scrollToBottom();
+      break;
+    case "tool_end":
+      if (state.stream.lastToolBlock) {
+        state.stream.lastToolBlock.classList.remove("running");
+        setBlockBody(state.stream.lastToolBlock, `Result:\n${event.result || ""}`);
+      }
+      resetStream();
+      break;
+    case "content_chunk":
+      ensureAssistantStack();
+      if (!state.stream.assistantBubble) {
+        state.stream.assistantBubble = document.createElement("div");
+        state.stream.assistantBubble.className = "bubble";
+        state.stream.assistantStack.appendChild(state.stream.assistantBubble);
+      }
+      state.stream.assistantText += event.text || event.content || "";
+      state.stream.assistantBubble.innerHTML = renderMarkdown(state.stream.assistantText);
+      scrollToBottom();
+      break;
+    case "token_usage":
+      updateContextMeter(event.total, event.budget);
+      break;
+    case "done":
+      if (event.history) state.history = event.history;
+      finishGeneration();
+      break;
+  }
+}
+
+function ensureAssistantStack() {
+  if (state.stream.assistantStack) return;
+  const row = messageShell("assistant", "S");
+  el.messages.querySelector(".welcome")?.remove();
+  el.messages.appendChild(row.root);
+  state.stream.assistantStack = row.stack;
+}
+
+function resetStream() {
+  state.stream.assistantStack = null;
+  state.stream.assistantBubble = null;
+  state.stream.assistantText = "";
+  state.stream.thinkingBlock = null;
+  state.stream.thinkingText = "";
+  state.stream.lastToolBlock = null;
+}
+
+function finishGeneration() {
   state.isGenerating = false;
-  abortController    = null;
-  updateSendButton();
+  state.controller = null;
+  resetStream();
+  updateComposerState();
+}
 
-  // Collapse open thinking card
-  if (state.currentThinkingCard) {
-    state.currentThinkingCard.classList.add('collapsed');
+function stopGeneration() {
+  state.controller?.abort();
+  toast("Generation stopped.");
+  finishGeneration();
+}
+
+function appendStatus(text) {
+  const status = document.createElement("div");
+  status.className = "status-line";
+  status.textContent = text;
+  el.messages.appendChild(status);
+  scrollToBottom();
+}
+
+function setBlockBody(block, text) {
+  const body = block?.querySelector(".block-body");
+  if (body) body.textContent = text;
+}
+
+async function clearConversation() {
+  if (state.isGenerating) stopGeneration();
+  try {
+    await fetch("/api/clear-session", { method: "POST" });
+    state.history = [];
+    state.activeSessionName = "New conversation";
+    el.title.textContent = "New conversation";
+    document.title = "Selene";
+    renderWelcome();
+    updateContextMeter();
+  } catch {
+    toast("Could not clear the conversation.");
+  }
+}
+
+async function saveSession() {
+  const name = window.prompt("Save this chat as:", cleanSessionName(state.activeSessionName));
+  if (name === null) return;
+  try {
+    const response = await fetch("/api/save-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name })
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    toast("Session saved.");
+    loadState();
+  } catch {
+    toast("Could not save this session.");
+  }
+}
+
+async function loadSession(name) {
+  try {
+    const response = await fetch("/api/load-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name })
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    await loadState();
+    toast("Session loaded.");
+  } catch {
+    toast("Could not load that session.");
+  }
+}
+
+function updateComposerState() {
+  const hasText = Boolean(el.input?.value.trim());
+  if (el.send) {
+    el.send.disabled = !state.isGenerating && !hasText;
+    el.send.textContent = state.isGenerating ? "Stop" : "Send";
+    el.send.classList.toggle("stop", state.isGenerating);
+  }
+  updateContextMeter();
+}
+
+function updateSlashMenu() {
+  if (!el.input || !el.slashMenu) return;
+
+  const text = el.input.value;
+  const cursor = el.input.selectionStart ?? text.length;
+  const beforeCursor = text.slice(0, cursor);
+
+  if (!beforeCursor.startsWith("/") || beforeCursor.includes("\n") || state.isGenerating) {
+    closeSlashMenu();
+    return;
   }
 
-  // Restore character count display (replaces "ctx" counter)
-  const countEl = document.getElementById('input-count');
-  const input   = document.getElementById('chat-input');
-  if (countEl) {
-    countEl.classList.remove('warning');
-    countEl.textContent = input?.value.length || '0';
+  const query = beforeCursor.toLowerCase();
+  const matches = SLASH_COMMANDS
+    .filter((item) => {
+      const haystack = `${item.command} ${item.description}`.toLowerCase();
+      return haystack.includes(query) || item.command.toLowerCase().startsWith(query);
+    })
+    .slice(0, 10);
+
+  state.slash.open = true;
+  state.slash.matches = matches;
+  state.slash.selected = Math.min(state.slash.selected, Math.max(matches.length - 1, 0));
+  renderSlashMenu();
+}
+
+function renderSlashMenu() {
+  if (!el.slashMenu) return;
+  el.slashMenu.innerHTML = "";
+  el.slashMenu.classList.toggle("open", state.slash.open);
+
+  if (!state.slash.open) return;
+
+  if (!state.slash.matches.length) {
+    const empty = document.createElement("div");
+    empty.className = "slash-empty";
+    empty.textContent = "No matching commands";
+    el.slashMenu.appendChild(empty);
+    return;
   }
 
-  // Refresh session list + title after completion
-  loadInitialState().then(() => {
-    setDocumentTitle(state.activeSession);
+  state.slash.matches.forEach((item, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `slash-item${index === state.slash.selected ? " active" : ""}`;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(index === state.slash.selected));
+    button.innerHTML = `
+      <span class="slash-command">${escapeHTML(item.command)}</span>
+      <span class="slash-desc">${escapeHTML(item.description)}</span>
+    `;
+    button.addEventListener("mouseenter", () => {
+      state.slash.selected = index;
+      renderSlashMenu();
+    });
+    button.addEventListener("click", () => chooseSlashCommand(index));
+    el.slashMenu.appendChild(button);
   });
 }
 
-function updateSendButton() {
-  const btn   = document.getElementById('send-btn');
-  const input = document.getElementById('chat-input');
-  if (!btn) return;
+function handleSlashKeydown(event) {
+  if (!state.slash.open) return false;
 
-  if (state.isGenerating) {
-    btn.disabled = false;
-    btn.classList.add('stop');
-    btn.setAttribute('aria-label', 'Stop generation');
-    btn.title = 'Stop (Esc)';
-    btn.innerHTML = `
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-        <rect x="6" y="6" width="12" height="12" rx="2"/>
-      </svg>
-    `;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveSlashSelection(1);
+    return true;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveSlashSelection(-1);
+    return true;
+  }
+  if (event.key === "Tab") {
+    event.preventDefault();
+    chooseSlashCommand();
+    return true;
+  }
+  if (event.key === "Enter" && !event.shiftKey && state.slash.matches.length) {
+    event.preventDefault();
+    chooseSlashCommand();
+    return true;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeSlashMenu();
+    return true;
+  }
+  return false;
+}
+
+function moveSlashSelection(delta) {
+  const count = state.slash.matches.length;
+  if (!count) return;
+  state.slash.selected = (state.slash.selected + delta + count) % count;
+  renderSlashMenu();
+}
+
+function chooseSlashCommand(index = state.slash.selected) {
+  const item = state.slash.matches[index];
+  if (!item || !el.input) return;
+
+  const suffix = item.command.endsWith(" ") || item.command.endsWith("\"\"") ? "" : " ";
+  el.input.value = `${item.command}${suffix}`;
+
+  if (item.command.endsWith("\"\"")) {
+    const cursor = item.command.length - 1;
+    el.input.setSelectionRange(cursor, cursor);
   } else {
-    btn.classList.remove('stop');
-    btn.setAttribute('aria-label', 'Send message');
-    btn.title = 'Send (Enter)';
-    btn.innerHTML = `
-      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 19V5M5 12l7-7 7 7"/>
-      </svg>
-    `;
-    btn.disabled = !input?.value.trim();
+    const cursor = el.input.value.length;
+    el.input.setSelectionRange(cursor, cursor);
+  }
+
+  closeSlashMenu();
+  resizeComposer();
+  updateComposerState();
+  el.input.focus();
+}
+
+function closeSlashMenu() {
+  state.slash.open = false;
+  state.slash.selected = 0;
+  state.slash.matches = [];
+  if (el.slashMenu) {
+    el.slashMenu.classList.remove("open");
+    el.slashMenu.innerHTML = "";
   }
 }
 
+function updateContextMeter(forcedUsed = null, forcedBudget = null) {
+  const budget = forcedBudget || contextBudget();
+  const used = forcedUsed ?? estimatedContextTokens();
+  const pct = Math.min(100, Math.round((used / budget) * 100));
 
-/* ═══════════════════════════════════════════════════════════════
-   ESCAPE KEY STOPS GENERATION
-   ═══════════════════════════════════════════════════════════════ */
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && state.isGenerating) {
-    abortController?.abort();
-    finishGeneration(true);
-    showToast('Generation stopped.', 'info', 1400);
+  if (el.contextLabel) el.contextLabel.textContent = `${used} / ${budget}`;
+  if (el.contextFill) el.contextFill.style.width = `${pct}%`;
+  if (el.contextMeter) {
+    el.contextMeter.classList.toggle("warn", pct >= 75 && pct < 90);
+    el.contextMeter.classList.toggle("hot", pct >= 90);
   }
-});
+}
 
+function estimatedContextTokens() {
+  const historyText = state.history
+    .map((message) => `${message.content || ""}\n${message.thinking || ""}`)
+    .join("\n");
+  return estimateTokens(`${historyText}\n${el.input?.value || ""}`);
+}
 
-/* ═══════════════════════════════════════════════════════════════
-   PUBLIC API (debugging / external use)
-   ═══════════════════════════════════════════════════════════════ */
-window.SeleneUI = {
-  showToast,
-  showConfirm,
-  setDocumentTitle
-};
+function estimateTokens(text) {
+  return Math.max(0, Math.ceil(String(text || "").length / 4));
+}
+
+function contextBudget() {
+  return Number(state.settings.options?.num_ctx || 8192);
+}
+
+function resizeComposer() {
+  if (!el.input) return;
+  el.input.style.height = "auto";
+  el.input.style.height = `${Math.min(el.input.scrollHeight, 220)}px`;
+}
+
+function scrollToBottom(force = false) {
+  if (!el.messages) return;
+  const nearBottom = el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight < 160;
+  if (force || nearBottom) el.messages.scrollTop = el.messages.scrollHeight;
+}
+
+function renderMarkdown(text) {
+  const escaped = escapeHTML(text || "");
+  const withCode = escaped.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
+  return withCode
+    .split(/\n{2,}/)
+    .map((chunk) => {
+      if (chunk.startsWith("<pre>")) return chunk;
+      return `<p>${chunk.replace(/\n/g, "<br>")}</p>`;
+    })
+    .join("");
+}
+
+function formatJSON(value) {
+  if (typeof value === "string") {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function escapeHTML(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function cleanSessionName(name) {
+  const base = String(name || "New conversation").replace(/\.json$/, "");
+  return base
+    .replace(/_\d{8}_\d{6}$/, "")
+    .replace(/_/g, " ")
+    .replace(/^Active Session$/, "New conversation");
+}
+
+function titleForSession(name) {
+  const clean = cleanSessionName(name);
+  return clean === "New conversation" ? "Selene" : `${clean} - Selene`;
+}
+
+function toast(message) {
+  const node = document.createElement("div");
+  node.className = "toast";
+  node.textContent = message;
+  document.getElementById("toast-region")?.appendChild(node);
+  setTimeout(() => node.remove(), 3600);
+}
