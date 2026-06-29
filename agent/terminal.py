@@ -141,28 +141,34 @@ def _print_status(icon: str, message: str, color: str = "cyan") -> None:
 
 def print_welcome_header() -> None:
     """Print the terminal app header."""
-    from rich.align import Align
     from rich.text import Text
 
-    logo = Text.assemble(
-        (
-            r"""
-        *          .                  .
-              _..._
-           .::::   `.
-          :::::      :       ____  _____ _     _____ _   _ _____
-          `::::.   .'       / ___|| ____| |   | ____| \ | | ____|
-             `''''`         \___ \|  _| | |   |  _| |  \| |  _|
-        .                    ___) | |___| |___| |___| |\  | |___
-             *              |____/|_____|_____|_____|_| \_|_____|
-        """.strip("\n"),
-            "cyan",
-        ),
-        ("\n                         N I G H T   M O D E   A G E N T\n", "dim"),
-    )
-
+    logo_lines = [
+        r"*          .                  .",
+        r"      _..._",
+        r"   .::::   `.",
+        r"  :::::      :       ____  _____ _     _____ _   _ _____",
+        r"  `::::.   .'       / ___|| ____| |   | ____| \ | | ____|",
+        r"     `''''`         \___ \|  _| | |   |  _| |  \| |  _|",
+        r".                    ___) | |___| |___| |___| |\  | |___",
+        r"     *              |____/|_____|_____|_____|_| \_|_____|",
+        "",
+        r"                 N I G H T   M O D E   A G E N T",
+    ]
+    width = min(_console.size.width, 100)
+    block_width = max(len(line) for line in logo_lines)
+    left_margin = max((width - block_width) // 2, 0)
     _console.print()
-    _console.print(Align.center(logo))
+    for index, line in enumerate(logo_lines):
+        style = "dim cyan" if index == len(logo_lines) - 1 else "cyan"
+        padded_line = f"{' ' * left_margin}{line}"
+        _console.print(
+            Text(padded_line, style=style),
+            markup=False,
+            highlight=False,
+            no_wrap=True,
+            overflow="crop",
+        )
     _console.print()
 
 
