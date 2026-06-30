@@ -7,7 +7,8 @@
   "scripts": {
     "start": "electron .",
     "build:backend": "pyinstaller selene-backend.spec --clean",
-    "build": "rm -rf dist-electron && CI=true electron-builder build --publish never",
+    "build:appimage": "rm -rf dist-electron && CI=true ELECTRON_RUN_AS_NODE=1 ./node_modules/electron/dist/electron -e 'process.noAsar=true;require(\"./node_modules/electron-builder/out/cli/cli.js\")' build --publish never",
+    "build": "bun run build:backend && bun run build:appimage",
     "publish": "electron-builder build --linux --win --mac --publish always"
   },
   "build": {
@@ -17,7 +18,8 @@
       "category": "public.app-category.productivity"
     },
     "linux": {
-      "target": ["AppImage"]
+      "target": ["AppImage"],
+      "category": "Utility"
     },
     "win": {
       "target": ["nsis"]
