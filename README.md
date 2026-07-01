@@ -128,7 +128,7 @@ The **context window** (`num_ctx`) is the maximum number of tokens the model can
 The agent manages this automatically:
 
 - **Default `num_ctx` is 8192** — sized to fit the model + KV cache entirely in GPU VRAM on consumer GPUs (4-8GB).
-- **History trimming** keeps the conversation context within a ~6000 token budget. When the history grows too large, the oldest messages are dropped while preserving the system prompt and the most recent exchanges.
+- **History trimming and compaction** keep the prompt within the active token budget. Near 90% usage, older turns are summarized and passed through the context optimizer while system instructions and recent exchanges remain intact; hard trimming remains the final bound.
 - Both values can be overridden at runtime via `/set parameter num_ctx <value>`.
 
 ---
@@ -177,6 +177,55 @@ The agent autonomously decides when to call tools based on the user's query:
 | 🗑️ **Vault Delete** | Remove indexed entries by source path or delete entire collections |
 | 🏷️ **Vault Aliases** | List registered human-friendly names that map to vault collections |
 | 📓 **Obsidian Notes** | Create structured Obsidian-optimised notes with YAML frontmatter, WikiLinks, and version control |
+| 🕸️ **Knowledge Graph Builder** | Map typed relationships and discover evidence-traceable causal paths, conflicts, central concepts, and feedback cycles |
+| 📈 **Simulation Runner** | Execute recurrence, Euler, scenario, and Monte Carlo models with deterministic seeds and distribution summaries |
+| 🔌 **API Orchestrator** | Manage API auth refresh, bounded retries, deprecation signals, response limits, and endpoint failover |
+| 🧠 **Context Memory Optimizer** | Compact conversations while preserving instructions, recent turns, decisions, constraints, facts, and links |
+| 🧭 **Reasoning Chain Debugger** | Audit explicit claim/evidence graphs for unsupported leaps, missing references, cycles, and confidence problems |
+| ⚙️ **Automated Routine Executor** | Define natural-language workflow macros, preview their actions, and execute approved local commands/apps/URLs |
+
+### Advanced Tool Safety Model
+
+The advanced tools are deliberately bounded:
+
+- Graph inferences include the exact supporting edge path; the builder does not invent edges from labels.
+- Simulation equations use a restricted arithmetic parser—never Python `eval`—and workloads are capped. Forecasts remain conditional on the supplied assumptions.
+- API credentials are referenced by environment-variable name rather than passed as literal secrets. Retries, timeouts, response sizes, and failover endpoints are capped.
+- Memory optimisation is extractive and reports before/after token estimates. Automatic background compaction uses the same optimizer after generating its factual summary.
+- The reasoning debugger audits supplied claims, dependencies, assumptions, and evidence IDs. It does not expose private model chain-of-thought; it produces an accountable evidence graph and Mermaid diagram.
+- Routines live in gitignored `.selene/routines.json`. Runs default to a dry-run preview and require `dry_run=false` plus `confirmed=true` after user approval. Commands use argument arrays with `shell=False` and remain in the project workspace.
+
+Example simulation model:
+
+```json
+{
+  "variables": {"inventory": 100, "demand": 12},
+  "equations": {
+    "inventory": "max(0, inventory - demand)",
+    "demand": "max(0, demand + normal(0, 1.5))"
+  },
+  "steps": 30,
+  "trials": 200,
+  "seed": 42
+}
+```
+
+Example routine definition:
+
+```json
+{
+  "action": "define",
+  "name": "morning workspace",
+  "routine": {
+    "triggers": ["start my morning"],
+    "actions": [
+      {"type": "open_app", "argv": ["code", "."]},
+      {"type": "open_url", "url": "https://example.com/dashboard"},
+      {"type": "command", "argv": ["git", "status", "--short"]}
+    ]
+  }
+}
+```
 
 ### Terminal Interface
 - **Rich Markdown streaming** via `rich.Live` with automatic scroll management
@@ -223,6 +272,9 @@ The agent autonomously decides when to call tools based on the user's query:
                                                   │ ChromaDB │
                                                   │ (.chroma)│
                                                   └──────────┘
+
+  advanced tools: knowledge graph · simulation · API orchestration
+                  context memory · reasoning audit · routine macros
 
  Browser (Web UI)
  ┌──────────────────────────────────────────────┐
@@ -535,7 +587,13 @@ AI-CLI-Agent/
 │   ├── obsi_vault_writer.py   # Obsidian-optimised structured note creation
 │   ├── vault_indexer.py       # Document chunking, ChromaDB indexing, alias registry
 │   ├── vault_search.py        # Vector similarity search with alias resolution
-│   └── vault_embeddings.py    # Ollama embedding API helpers
+│   ├── vault_embeddings.py    # Ollama embedding API helpers
+│   ├── knowledge_graph_builder.py # Typed semantic graph inference
+│   ├── run_simulation.py      # Safe dynamic and Monte Carlo models
+│   ├── api_orchestrator.py    # Resilient authenticated HTTP lifecycle
+│   ├── context_memory_optimizer.py # Long-context compaction
+│   ├── reasoning_chain_debugger.py # Explicit evidence-graph audit
+│   └── automated_routine_executor.py # Persistent preview-first macros
 │
 ├── .agents/                   # Agent configuration
 ├── sessions/                  # Saved session JSON files

@@ -174,9 +174,13 @@ def _compact_history_bg(history: list[dict], session: dict, start_idx: int, end_
         )
         summary = response.message.content or ""
         if summary:
-            # Safely replace the sublist in the live history.
-            # In Python, list slice assignment is thread-safe due to the GIL.
-            history[start_idx:end_idx] = [
+            from tools.context_memory_optimizer import context_memory_optimizer
+            optimized = json.loads(context_memory_optimizer(
+                [{"role": "assistant", "content": summary}],
+                target_tokens=max(512, int(session.get("options", {}).get("num_ctx", 8192) * 0.25)),
+                preserve_recent=1,
+            ))
+            history[start_idx:end_idx] = optimized.get("messages") or [
                 {"role": "assistant", "content": f"[System Note: Older conversation compacted]\n{summary}"}
             ]
     except Exception as e:

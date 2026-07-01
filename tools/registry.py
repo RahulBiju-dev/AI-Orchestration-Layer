@@ -17,6 +17,12 @@ from tools.app_launcher import open_app
 from tools.vault_indexer import delete_vault_item, index_vault, list_vault_aliases, list_vaults
 from tools.vault_search import search_vault
 from tools.obsi_vault_writer import create_structured_note
+from tools.knowledge_graph_builder import knowledge_graph_builder
+from tools.run_simulation import run_simulation
+from tools.api_orchestrator import api_orchestrator
+from tools.context_memory_optimizer import context_memory_optimizer
+from tools.reasoning_chain_debugger import reasoning_chain_debugger
+from tools.automated_routine_executor import automated_routine_executor
 
 # ── Schema definitions ────────────────────────────────────────────────
 
@@ -344,6 +350,116 @@ TOOL_SCHEMAS.extend([
     },
 ])
 
+# Reasoning, prediction, integration, memory, and workflow tools.
+TOOL_SCHEMAS.extend([
+    {
+        "type": "function",
+        "function": {
+            "name": "knowledge_graph_builder",
+            "description": "Build a concept/relationship graph and discover explainable multi-hop causal paths, conflicts, feedback cycles, and central concepts. Inferences are grounded only in supplied edges.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "concepts": {"type": "array", "items": {"type": "object"}, "description": "Concept objects with id, optional label, and optional attributes."},
+                    "relationships": {"type": "array", "items": {"type": "object"}, "description": "Edges with source, target, type, optional weight (0-1), and evidence."},
+                    "query": {"type": "object", "description": "Optional source, target, and relation_types filter."},
+                    "max_depth": {"type": "integer", "description": "Maximum inference path length (1-8, default 4)."}
+                },
+                "required": ["concepts", "relationships"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_simulation",
+            "description": "Run bounded discrete-time what-if or Monte Carlo simulations from explicit variables and equations. Use recurrence for next-state equations or euler for rates of change.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "variables": {"type": "object", "description": "Initial numeric state keyed by variable name."},
+                    "equations": {"type": "object", "description": "Safe arithmetic expression for each updated variable; may use step, time, dt, normal(), and uniform()."},
+                    "steps": {"type": "integer"}, "dt": {"type": "number"},
+                    "mode": {"type": "string", "enum": ["recurrence", "euler"]},
+                    "scenarios": {"type": "array", "items": {"type": "object"}, "description": "Named scenarios containing variable overrides."},
+                    "trials": {"type": "integer", "description": "Monte Carlo trials (1-1000)."},
+                    "seed": {"type": "integer", "description": "Optional reproducibility seed."}
+                },
+                "required": ["variables", "equations"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "api_orchestrator",
+            "description": "Manage a resilient HTTP API call with environment-based authentication, OAuth client-credential refresh, exponential backoff, deprecation detection, and alternative endpoint failover.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "request": {"type": "object", "description": "HTTP method, url, headers, params, json/data body, timeout, and response limit."},
+                    "auth": {"type": "object", "description": "Auth config. Use environment-variable names, never literal secrets. Types: none, bearer, api_key, basic, oauth2_client_credentials."},
+                    "retry": {"type": "object", "description": "max_attempts (up to 6) and base_delay."},
+                    "alternative_endpoints": {"type": "array", "items": {"type": "string"}},
+                    "documentation": {"type": "object", "description": "Optional OpenAPI-like base_url and paths map used to find non-deprecated alternatives."}
+                },
+                "required": ["request"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "context_memory_optimizer",
+            "description": "Compress explicit conversation messages into compact memory while retaining system instructions, recent turns, decisions, constraints, facts, tool results, and semantic links.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "messages": {"type": "array", "items": {"type": "object"}},
+                    "target_tokens": {"type": "integer"},
+                    "preserve_recent": {"type": "integer"},
+                    "critical_terms": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["messages"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reasoning_chain_debugger",
+            "description": "Audit an explicit claim/evidence rationale for missing support, bad references, circular dependencies, ambiguity, and unjustified confidence. It does not expose hidden model chain-of-thought.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "conclusion": {"type": "string"},
+                    "steps": {"type": "array", "items": {"type": "object"}, "description": "Steps with id, claim, depends_on, evidence_ids, assumption, and confidence."},
+                    "evidence": {"type": "array", "items": {"type": "object"}, "description": "Evidence records with stable id and source."}
+                },
+                "required": ["conclusion", "steps"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "automated_routine_executor",
+            "description": "Define, store, list, preview, run, or delete reusable local workflow macros. Always preview first; actual execution requires dry_run=false and confirmed=true after user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "define", "show", "run", "delete"]},
+                    "name": {"type": "string"}, "trigger": {"type": "string"},
+                    "routine": {"type": "object", "description": "description, natural-language triggers, and actions. Action types: command/open_app with argv arrays, open_url, delay."},
+                    "dry_run": {"type": "boolean", "description": "Defaults true. Keep true to preview."},
+                    "confirmed": {"type": "boolean", "description": "Must be true for execution/deletion after explicit user approval."}
+                },
+                "required": ["action"]
+            }
+        }
+    }
+])
+
 # ── Dispatch map ──────────────────────────────────────────────────────
 # Maps function names to their Python callables.
 
@@ -366,4 +482,10 @@ TOOL_DISPATCH.update({
     "list_vaults": list_vaults,
     "list_vault_aliases": list_vault_aliases,
     "create_structured_note": create_structured_note,
+    "knowledge_graph_builder": knowledge_graph_builder,
+    "run_simulation": run_simulation,
+    "api_orchestrator": api_orchestrator,
+    "context_memory_optimizer": context_memory_optimizer,
+    "reasoning_chain_debugger": reasoning_chain_debugger,
+    "automated_routine_executor": automated_routine_executor,
 })
