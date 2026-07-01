@@ -24,6 +24,40 @@ class LegacyToolTests(unittest.TestCase):
     def test_desktop_exec_codes_are_removed_without_shell_parsing(self):
         self.assertEqual(app_launcher._clean_exec_line('viewer --name "A B" %U %%'), ["viewer", "--name", "A B", "%"])
 
+    def test_linux_app_matcher_resolves_common_name_to_desktop_entry(self):
+        apps = [{
+            "filename": "code.desktop",
+            "name": "Visual Studio Code",
+            "generic_name": "Text Editor",
+            "keywords": ["vscode"],
+            "exec": "/usr/share/code/code %F",
+            "terminal": False,
+        }]
+        matched, suggestions = app_launcher._find_matching_app("VS Code", apps)
+        self.assertIs(matched, apps[0])
+        self.assertEqual(suggestions, [])
+
+    def test_linux_app_matcher_uses_name_abbreviation_without_known_alias(self):
+        apps = [{
+            "filename": "example.desktop",
+            "name": "Visual Studio Code",
+            "generic_name": "",
+            "keywords": [],
+            "exec": "/opt/editor/bin/code %F",
+            "terminal": False,
+        }]
+        matched, _ = app_launcher._find_matching_app("VS Code", apps)
+        self.assertIs(matched, apps[0])
+
+    def test_linux_app_matcher_does_not_choose_an_ambiguous_alias(self):
+        apps = [
+            {"filename": "one.desktop", "name": "One", "generic_name": "File Manager", "keywords": [], "exec": "one", "terminal": False},
+            {"filename": "two.desktop", "name": "Two", "generic_name": "File Manager", "keywords": [], "exec": "two", "terminal": False},
+        ]
+        matched, suggestions = app_launcher._find_matching_app("file manager", apps)
+        self.assertIsNone(matched)
+        self.assertEqual(suggestions, ["One", "Two"])
+
     def test_windows_app_launch_uses_startfile_not_shell(self):
         with patch.object(app_launcher.sys, "platform", "win32"), patch.object(app_launcher.os, "startfile", create=True) as start:
             result = json.loads(app_launcher.open_app('safe & literal'))
@@ -35,6 +69,20 @@ class LegacyToolTests(unittest.TestCase):
             self.assertIn("Successfully", open_browser("example.com/path"))
             self.assertEqual(opened.call_args.args[0], "https://example.com/path")
             open_browser("release notes please")
+            self.assertTrue(opened.call_args.args[0].startswith("https://duckduckgo.com/?q="))
+
+    def test_browser_resolves_common_web_app_names(self):
+        with patch("tools.browser.webbrowser.open", return_value=True) as opened:
+            open_browser("Google Mail")
+            self.assertEqual(opened.call_args.args[0], "https://mail.google.com/")
+            open_browser("google-docs")
+            self.assertEqual(opened.call_args.args[0], "https://docs.google.com/")
+            open_browser("Figma")
+            self.assertEqual(opened.call_args.args[0], "https://www.figma.com/")
+
+    def test_browser_does_not_treat_generic_app_words_as_aliases(self):
+        with patch("tools.browser.webbrowser.open", return_value=True) as opened:
+            open_browser("documents")
             self.assertTrue(opened.call_args.args[0].startswith("https://duckduckgo.com/?q="))
 
     def test_code_reader_streams_ranges_and_scanner_skips_dependencies(self):

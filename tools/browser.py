@@ -8,6 +8,52 @@ import urllib.parse
 import webbrowser
 import re
 
+
+# Web apps do not have an OS-level metadata registry like Linux .desktop files.
+# Keep this list limited to branded, unambiguous names so normal search queries
+# do not unexpectedly turn into site launches.
+_WEB_APPS = {
+    "https://calendar.google.com/": ("google calendar",),
+    "https://docs.google.com/": ("google docs", "google documents"),
+    "https://drive.google.com/": ("google drive",),
+    "https://mail.google.com/": ("gmail", "google mail"),
+    "https://maps.google.com/": ("google maps",),
+    "https://meet.google.com/": ("google meet",),
+    "https://sheets.google.com/": ("google sheets",),
+    "https://slides.google.com/": ("google slides",),
+    "https://www.youtube.com/": ("youtube", "youtube web"),
+    "https://github.com/": ("github", "github web"),
+    "https://gitlab.com/": ("gitlab", "gitlab web"),
+    "https://app.slack.com/": ("slack", "slack web", "slack web app"),
+    "https://discord.com/app": ("discord", "discord web", "discord web app"),
+    "https://teams.microsoft.com/": ("microsoft teams", "teams web"),
+    "https://outlook.office.com/mail/": ("outlook", "microsoft outlook", "outlook web"),
+    "https://www.office.com/": ("microsoft 365", "office 365", "office web"),
+    "https://www.notion.so/": ("notion", "notion web", "notion web app"),
+    "https://www.figma.com/": ("figma", "figma web", "figma web app"),
+    "https://web.whatsapp.com/": ("whatsapp", "whatsapp web"),
+    "https://web.telegram.org/": ("telegram", "telegram web"),
+    "https://open.spotify.com/": ("spotify", "spotify web", "spotify web player"),
+}
+
+
+def _normalize_web_app_name(value: str) -> str:
+    """Normalize spacing and punctuation in a human-facing web-app name."""
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+_WEB_APP_ALIASES = {
+    _normalize_web_app_name(alias): url
+    for url, aliases in _WEB_APPS.items()
+    for alias in aliases
+}
+
+
+def _resolve_web_app(query: str) -> str | None:
+    """Resolve a known, unambiguous web-app name to its canonical URL."""
+    return _WEB_APP_ALIASES.get(_normalize_web_app_name(query))
+
+
 def open_browser(query: str) -> str:
     """
     Open the default web browser to a specific URL or search query.
@@ -30,7 +76,7 @@ def open_browser(query: str) -> str:
     if len(query) > 4096 or any(ord(char) < 32 for char in query):
         return "Error: Invalid browser query."
 
-    # Determine if the query is a direct URL or requires formatting
+    # Determine if the query is a direct URL, a known web app, or a search.
     parsed = urllib.parse.urlsplit(query)
     if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
         # The query is already a fully formed URL
@@ -39,6 +85,8 @@ def open_browser(query: str) -> str:
         # Simple heuristic for domains like "youtube.com" (contains dot, no spaces)
         # Prefix with https:// to form a valid URL
         url = f"https://{query}"
+    elif web_app_url := _resolve_web_app(query):
+        url = web_app_url
     else:
         # The query appears to be a search term; format it as a Google search URL
         # URL encode the query to handle spaces and special characters properly

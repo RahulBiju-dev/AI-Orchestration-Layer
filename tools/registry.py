@@ -180,13 +180,13 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "open_browser",
-            "description": "Open the default web browser to a URL or search query.",
+            "description": "Open the default browser to a URL, a named web app (e.g. Gmail or Google Docs), or a search query.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "URL or search term to open.",
+                        "description": "URL, common web-app name, or search term to open.",
                     }
                 },
                 "required": ["query"],

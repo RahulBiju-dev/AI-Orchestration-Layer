@@ -65,7 +65,10 @@ def _parse_desktop_file(file_path: str) -> dict | None:
             key = key.strip()
             val = val.strip()
             # Only store standard keys we care about
-            if key in ("Name", "Exec", "Terminal", "NoDisplay", "Hidden", "TryExec", "Type"):
+            if key in (
+                "Name", "GenericName", "Keywords", "Exec", "Terminal",
+                "NoDisplay", "Hidden", "TryExec", "Type",
+            ):
                 entry_data[key] = val
 
     if entry_data and "Name" in entry_data and "Exec" in entry_data:
@@ -135,6 +138,12 @@ def _get_installed_apps() -> list[dict]:
                         "filename": file_name,
                         "filepath": file_path,
                         "name": entry.get("Name", ""),
+                        "generic_name": entry.get("GenericName", ""),
+                        "keywords": [
+                            keyword.strip()
+                            for keyword in entry.get("Keywords", "").split(";")
+                            if keyword.strip()
+                        ],
                         "exec": entry.get("Exec", ""),
                         "terminal": entry.get("Terminal", "false").lower() in ("true", "1")
                     })
@@ -178,6 +187,44 @@ def _find_terminal_emulator() -> str | None:
     return None
 
 
+def _normalize_app_name(value: str) -> str:
+    """Normalize a human-facing app name for comparisons (``VS Code`` -> ``vscode``)."""
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _name_aliases(value: str) -> set[str]:
+    """Build compact aliases for names such as ``Visual Studio Code`` -> ``vscode``."""
+    words = re.findall(r"[\w]+", value.casefold(), flags=re.UNICODE)
+    if not words:
+        return set()
+
+    aliases = {_normalize_app_name(value)}
+    if len(words) > 1:
+        aliases.add("".join(word[0] for word in words))
+        # People commonly abbreviate a product prefix but retain its final word:
+        # Visual Studio Code -> VS Code, Android Studio -> A Studio.
+        for split_at in range(1, len(words)):
+            aliases.add("".join(word[0] for word in words[:split_at]) + "".join(words[split_at:]))
+    return {alias for alias in aliases if alias}
+
+
+def _app_aliases(app: dict) -> set[str]:
+    """Return names by which a Linux desktop entry can reasonably be requested."""
+    filename = app.get("filename", "")
+    if filename.casefold().endswith(".desktop"):
+        filename = filename[:-8]
+
+    aliases = _name_aliases(app.get("name", ""))
+    aliases.update(_name_aliases(app.get("generic_name", "")))
+    aliases.update(_normalize_app_name(keyword) for keyword in app.get("keywords", []))
+    aliases.add(_normalize_app_name(filename))
+
+    command = _clean_exec_line(app.get("exec", ""))
+    if command:
+        aliases.add(_normalize_app_name(os.path.basename(command[0])))
+    return {alias for alias in aliases if alias}
+
+
 def _find_matching_app(query: str, apps: list[dict]) -> tuple[dict | None, list[str]]:
     """
     Search for a matching desktop app based on query.
@@ -186,8 +233,10 @@ def _find_matching_app(query: str, apps: list[dict]) -> tuple[dict | None, list[
     query_clean = query.strip().lower()
     if not query_clean:
         return None, []
+    query_normalized = _normalize_app_name(query)
 
     exact_matches = []
+    alias_matches = []
     name_substring_matches = []
     filename_substring_matches = []
     exec_substring_matches = []
@@ -202,6 +251,13 @@ def _find_matching_app(query: str, apps: list[dict]) -> tuple[dict | None, list[
         # 1. Exact name or exact desktop filename match
         if query_clean == name or query_clean == filename_no_ext:
             exact_matches.append(app)
+            continue
+
+        # Desktop metadata is a better source of aliases than a hard-coded
+        # package-name table. It covers distro packages, Flatpaks, and locally
+        # installed apps, including common abbreviations such as VS Code.
+        if query_normalized in _app_aliases(app):
+            alias_matches.append(app)
             continue
 
         # 2. Substring match of display Name
@@ -222,6 +278,11 @@ def _find_matching_app(query: str, apps: list[dict]) -> tuple[dict | None, list[
     # Return matches in order of priority
     if exact_matches:
         return exact_matches[0], []
+
+    if alias_matches:
+        if len(alias_matches) == 1:
+            return alias_matches[0], []
+        return None, sorted({app["name"] for app in alias_matches})[:10]
 
     if name_substring_matches:
         if len(name_substring_matches) == 1:
