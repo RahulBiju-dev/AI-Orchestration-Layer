@@ -14,14 +14,30 @@ from tools.app_launcher import open_app
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-STORE_PATH = PROJECT_ROOT / ".selene" / "routines.json"
+DATA_DIR = Path(
+    os.path.abspath(os.path.expanduser(os.environ.get("SELENE_DATA_DIR", "~/.selene-agent")))
+)
+STORE_PATH = DATA_DIR / "routines.json"
+LEGACY_STORE_PATH = PROJECT_ROOT / ".selene" / "routines.json"
 MAX_ACTIONS = 50
 AUTOMATIC_ACTION_TYPES = {"open_app", "delay"}
 
 
 def _load() -> dict[str, dict]:
+    store = STORE_PATH
+    # Older releases kept routines inside the source checkout. Import that file
+    # once so upgrades preserve existing routines while all future writes use
+    # the per-user application data directory.
+    if not store.exists() and LEGACY_STORE_PATH.is_file():
+        try:
+            value = json.loads(LEGACY_STORE_PATH.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                _save(value)
+                return value
+        except (OSError, json.JSONDecodeError):
+            pass
     try:
-        value = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+        value = json.loads(store.read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else {}
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return {}

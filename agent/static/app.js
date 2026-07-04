@@ -808,11 +808,22 @@ function finishGeneration() {
   updateComposerState();
 }
 
-function stopGeneration() {
+function resetComposer() {
+  closeSlashMenu();
+  if (!el.input) return;
+  el.input.disabled = false;
+  el.input.readOnly = false;
+  el.input.value = "";
+  resizeComposer();
+  updateComposerState();
+  requestAnimationFrame(() => el.input?.focus({ preventScroll: true }));
+}
+
+function stopGeneration({ refresh = true } = {}) {
   state.controller?.abort();
   toast("Generation stopped.");
   finishGeneration();
-  refreshSessions().catch(() => {});
+  if (refresh) refreshSessions().catch(() => {});
 }
 
 function appendStatus(text) {
@@ -839,20 +850,27 @@ async function clearConversation() {
 }
 
 async function newConversation() {
-  if (state.isGenerating) stopGeneration();
+  // The new-session response already contains the updated session list. Avoid
+  // a competing refresh from the cancelled stream restoring stale UI state.
+  if (state.isGenerating) stopGeneration({ refresh: false });
   try {
     const response = await fetch("/api/new-session", { method: "POST" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
     state.history = [];
     state.activeSessionName = "New conversation";
+    state.savedSessions = data.saved_sessions || state.savedSessions;
     el.title.textContent = "New conversation";
     document.title = "Selene";
     state.followOutput = true;
+    resetStream();
     renderWelcome();
     updateContextMeter();
-    await refreshSessions();
+    renderSessions();
+    resetComposer();
   } catch {
     toast("Could not start a new conversation.");
+    resetComposer();
   }
 }
 

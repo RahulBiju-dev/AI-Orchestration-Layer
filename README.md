@@ -218,7 +218,7 @@ The advanced tools are deliberately bounded:
 - API credentials are referenced by environment-variable name rather than passed as literal secrets. Retries, timeouts, response sizes, and failover endpoints are capped.
 - Memory optimisation is extractive and reports before/after token estimates. Automatic background compaction uses the same optimizer after generating its factual summary.
 - The reasoning debugger audits supplied claims, dependencies, assumptions, and evidence IDs. It does not expose private model chain-of-thought; it produces an accountable evidence graph and Mermaid diagram.
-- Routines live in gitignored `.selene/routines.json`. Command and URL runs default to a dry-run preview and require `dry_run=false` plus `confirmed=true` after user approval. App/delay-only routines can receive persistent approval when defined, allowing an exact saved trigger to run them later without another prompt. Commands use argument arrays with `shell=False` and remain in the project workspace.
+- Routines live in `~/.selene-agent/routines.json` (or `$SELENE_DATA_DIR/routines.json`) so they persist across conversations, application restarts, and upgrades. Existing routines from `.selene/routines.json` are imported automatically. Command and URL runs default to a dry-run preview and require `dry_run=false` plus `confirmed=true` after user approval. App/delay-only routines can receive persistent approval when defined, allowing an exact saved trigger to run them later without another prompt. Commands use argument arrays with `shell=False` and remain in the project workspace.
 - App actions accept only installed application display names. Shells, terminals, paths, URLs, command flags, and arbitrary PATH binaries are rejected; all launches are detached and shell-free.
 
 Example simulation model:
@@ -630,7 +630,7 @@ AI-CLI-Agent/
 └── .gitignore
 ```
 
-Runtime vault and codebase-index data is kept outside the checkout in `~/.selene-agent/` by default. This includes `vaults/`, `.chroma/`, and `codebase_indexes.json`. Override the parent directory with `SELENE_DATA_DIR=/your/path`.
+Runtime data is kept outside the checkout in `~/.selene-agent/` by default. This includes `routines.json`, `vaults/`, `.chroma/`, and `codebase_indexes.json`. Override the parent directory with `SELENE_DATA_DIR=/your/path`.
 
 ### Key Design Decisions
 
