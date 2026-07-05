@@ -277,6 +277,7 @@ Example routine definition:
   "action": "define",
   "name": "morning workspace",
   "routine": {
+    "description": "Open Antigravity and VS Code for the morning workspace.",
     "allow_automatic": true,
     "triggers": ["start my morning"],
     "actions": [

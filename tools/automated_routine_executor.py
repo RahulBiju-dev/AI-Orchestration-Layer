@@ -17,6 +17,7 @@ DATA_DIR = Path(
 STORE_PATH = DATA_DIR / "routines.json"
 LEGACY_STORE_PATH = PROJECT_ROOT / ".selene" / "routines.json"
 MAX_ACTIONS = 50
+MAX_TRIGGERS = 25
 AUTOMATIC_ACTION_TYPES = {"open_app", "delay", "tool"}
 AUTOMATIC_TOOL_NAMES = {"open_app", "launch_apps"}
 CONFIRMATION_TOOL_NAMES = {*AUTOMATIC_TOOL_NAMES, "open_terminal_at_path"}
@@ -58,19 +59,61 @@ def _resolve(routines: dict[str, dict], name: str | None, trigger: str | None) -
     if name and name in routines:
         return name, routines[name]
     normalized = (trigger or "").strip().casefold()
-    matches = []
+    exact_matches = []
+    phrase_matches = []
     for routine_name, routine in routines.items():
         values = [routine_name, *routine.get("triggers", [])]
-        if any(normalized == str(value).strip().casefold() for value in values):
-            matches.append((routine_name, routine))
-    return matches[0] if len(matches) == 1 else (None, None)
+        normalized_values = [str(value).strip().casefold() for value in values if str(value).strip()]
+        if normalized in normalized_values:
+            exact_matches.append((routine_name, routine))
+        elif any(value in normalized for value in normalized_values):
+            phrase_matches.append((routine_name, routine))
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    return phrase_matches[0] if not exact_matches and len(phrase_matches) == 1 else (None, None)
+
+
+def _normalized_triggers(routine: dict, legacy_trigger: str | None = None) -> list[str]:
+    """Normalize and deduplicate trigger phrases while accepting the old argument."""
+    raw_triggers = routine.get("triggers", [])
+    if not isinstance(raw_triggers, list):
+        return []
+    values = [*raw_triggers, *([legacy_trigger] if legacy_trigger else [])]
+    triggers = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        cleaned = value.strip()
+        normalized = cleaned.casefold()
+        if normalized not in seen:
+            seen.add(normalized)
+            triggers.append(cleaned)
+    return triggers
 
 
 def _validate(routine: dict) -> list[str]:
     errors = []
+    description = routine.get("description")
+    if not isinstance(description, str) or not description.strip():
+        errors.append("routine.description must clearly describe the routine and cannot be empty")
+    elif len(description.strip()) > 500:
+        errors.append("routine.description may contain at most 500 characters")
+    raw_triggers = routine.get("triggers")
+    if not isinstance(raw_triggers, list) or not raw_triggers:
+        errors.append("routine.triggers must be a non-empty array of user phrases")
+    elif len(raw_triggers) > MAX_TRIGGERS:
+        errors.append(f"A routine may contain at most {MAX_TRIGGERS} triggers")
+    else:
+        for index, value in enumerate(raw_triggers):
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"triggers[{index}] must be a non-empty string")
+            elif len(value.strip()) > 200:
+                errors.append(f"triggers[{index}] may contain at most 200 characters")
     actions = routine.get("actions", [])
     if not isinstance(actions, list) or not actions:
-        return ["routine.actions must be a non-empty array"]
+        errors.append("routine.actions must be a non-empty array")
+        return errors
     if len(actions) > MAX_ACTIONS:
         errors.append(f"A routine may contain at most {MAX_ACTIONS} actions")
     for index, item in enumerate(actions):
@@ -221,35 +264,31 @@ def automated_routine_executor(
     if action == "define":
         if not name or not routine:
             return json.dumps({"error": "name and routine are required for define"})
-        errors = _validate(routine)
+        candidate = dict(routine)
+        candidate["description"] = str(candidate.get("description", "")).strip()
+        candidate["triggers"] = _normalized_triggers(candidate, trigger)
+        errors = _validate(candidate)
         if errors:
             return json.dumps({"error": "Invalid routine", "details": errors})
-        wants_automatic = routine.get("allow_automatic") is True
+        wants_automatic = candidate.get("allow_automatic") is True
         if wants_automatic and not confirmed:
             return json.dumps({
                 "error": "Persistent automatic execution requires confirmed=true after the user approves the preview.",
-                "routine": routine,
+                "routine": candidate,
             }, ensure_ascii=False)
-        triggers = [str(value) for value in routine.get("triggers", [])]
-        # ``trigger`` is a first-class tool argument and is the form models most
-        # naturally use when defining a routine.  Older code silently discarded
-        # it, leaving saved routines with no usable trigger phrases.
-        if trigger and not any(
-            trigger.strip().casefold() == value.strip().casefold()
-            for value in triggers
-        ):
-            triggers.append(trigger.strip())
         routines[name] = {
-            "description": str(routine.get("description", "")),
-            "triggers": triggers,
-            "actions": routine["actions"],
+            "description": candidate["description"],
+            "triggers": candidate["triggers"],
+            "actions": candidate["actions"],
             "automatic_approved": wants_automatic and confirmed is True,
         }
         _save(routines)
         return json.dumps({
             "ok": True,
             "defined": name,
-            "action_count": len(routine["actions"]),
+            "description": candidate["description"],
+            "triggers": candidate["triggers"],
+            "action_count": len(candidate["actions"]),
             "automatic_approved": wants_automatic and confirmed is True,
             "store": str(STORE_PATH),
         })

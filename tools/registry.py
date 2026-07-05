@@ -560,8 +560,36 @@ TOOL_SCHEMAS.extend([
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["list", "define", "show", "run", "delete"]},
-                    "name": {"type": "string"}, "trigger": {"type": "string"},
-                    "routine": {"type": "object", "description": "description, natural-language triggers, and actions. Use {type: open_app, app_name: <display name>} for one app, or {type: tool, tool_name: launch_apps, arguments: {app_names: [...]}} for several. Other registered tools may also be called with type: tool, but only app-launch tools and delays can run automatically. Set allow_automatic=true only when the user explicitly wants exact triggers to run without another prompt."},
+                    "name": {"type": "string"},
+                    "trigger": {"type": "string", "description": "Legacy single trigger accepted for compatibility. For new definitions, put every phrase in routine.triggers."},
+                    "routine": {
+                        "type": "object",
+                        "description": "Complete routine definition. Infer a useful description from the user's request and preserve their trigger wording and example usages. Never leave description or triggers empty.",
+                        "properties": {
+                            "description": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "Concise explanation of the routine's purpose and actions, derived from the user's request."
+                            },
+                            "triggers": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 25,
+                                "items": {"type": "string", "minLength": 1},
+                                "description": "Natural-language phrases that identify this routine. Include the canonical phrase and each example usage supplied by the user."
+                            },
+                            "actions": {
+                                "type": "array",
+                                "minItems": 1,
+                                "description": "Ordered actions. Use {type: open_app, app_name: <display name>} for one app, or {type: tool, tool_name: launch_apps, arguments: {app_names: [...]}} for several. Other registered tools may be called with type: tool."
+                            },
+                            "allow_automatic": {
+                                "type": "boolean",
+                                "description": "Set true only when the user explicitly requests persistent automatic execution; only app-launch and delay actions qualify."
+                            }
+                        },
+                        "required": ["description", "triggers", "actions"]
+                    },
                     "dry_run": {"type": "boolean", "description": "Optional. Set true to preview a run; action=show always previews and action=run executes by default."},
                     "confirmed": {"type": "boolean", "description": "Must be true for execution/deletion after explicit user approval, and when granting persistent approval to an automatic app-only routine."}
                 },
