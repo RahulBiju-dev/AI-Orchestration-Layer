@@ -206,7 +206,7 @@ def automated_routine_executor(
     name: str | None = None,
     routine: dict | None = None,
     trigger: str | None = None,
-    dry_run: bool = True,
+    dry_run: bool = False,
     confirmed: bool = False,
 ) -> str:
     """Manage workflow macros with per-run or narrowly scoped persistent approval."""
@@ -226,9 +226,18 @@ def automated_routine_executor(
                 "error": "Persistent automatic execution requires confirmed=true after the user approves the preview.",
                 "routine": routine,
             }, ensure_ascii=False)
+        triggers = [str(value) for value in routine.get("triggers", [])]
+        # ``trigger`` is a first-class tool argument and is the form models most
+        # naturally use when defining a routine.  Older code silently discarded
+        # it, leaving saved routines with no usable trigger phrases.
+        if trigger and not any(
+            trigger.strip().casefold() == value.strip().casefold()
+            for value in triggers
+        ):
+            triggers.append(trigger.strip())
         routines[name] = {
             "description": str(routine.get("description", "")),
-            "triggers": [str(value) for value in routine.get("triggers", [])],
+            "triggers": triggers,
             "actions": routine["actions"],
             "automatic_approved": wants_automatic and confirmed is True,
         }
@@ -258,11 +267,14 @@ def automated_routine_executor(
         and _trigger_matches(selected, trigger)
         and _is_safe_automatic_routine(selected)
     )
-    if action == "show" or dry_run:
+    # ``show`` is always a preview. ``run`` executes unless the caller
+    # explicitly asks for a dry run; requiring dry_run=false as well as
+    # action="run" made approved routine calls silently do nothing.
+    if action == "show" or dry_run is True:
         requirement = (
-            "This exact trigger is persistently approved; call run with dry_run=false and the trigger."
+            "This exact trigger is persistently approved; call run with the trigger."
             if automatic_trigger
-            else "Call run with dry_run=false and confirmed=true after user approval."
+            else "Call run with confirmed=true after user approval."
         )
         return json.dumps({
             "name": resolved_name,

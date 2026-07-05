@@ -540,7 +540,7 @@ TOOL_SCHEMAS.extend([
                     "action": {"type": "string", "enum": ["list", "define", "show", "run", "delete"]},
                     "name": {"type": "string"}, "trigger": {"type": "string"},
                     "routine": {"type": "object", "description": "description, natural-language triggers, and actions. Use {type: open_app, app_name: <display name>} for one app, or {type: tool, tool_name: launch_apps, arguments: {app_names: [...]}} for several. Other registered tools may also be called with type: tool, but only app-launch tools and delays can run automatically. Set allow_automatic=true only when the user explicitly wants exact triggers to run without another prompt."},
-                    "dry_run": {"type": "boolean", "description": "Defaults true. Keep true to preview."},
+                    "dry_run": {"type": "boolean", "description": "Optional. Set true to preview a run; action=show always previews and action=run executes by default."},
                     "confirmed": {"type": "boolean", "description": "Must be true for execution/deletion after explicit user approval, and when granting persistent approval to an automatic app-only routine."}
                 },
                 "required": ["action"]
