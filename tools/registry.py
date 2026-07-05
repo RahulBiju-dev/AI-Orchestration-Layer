@@ -14,6 +14,7 @@ from tools.code import view_code
 from tools.spotify import spotify_play
 from tools.browser import open_browser
 from tools.app_launcher import launch_apps, open_app
+from tools.terminal_launcher import open_terminal_at_path
 from tools.vault_indexer import delete_vault_item, index_vault, list_vault_aliases, list_vaults
 from tools.vault_search import search_vault
 from tools.obsi_vault_writer import create_structured_note
@@ -235,6 +236,27 @@ TOOL_SCHEMAS: list[dict] = [
                     "prompt": {"type": "string", "description": "Optional focused question or description instruction."}
                 },
                 "required": ["image_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_terminal_at_path",
+            "description": "Open a new terminal window with its working directory set to an existing local directory. Requires explicit user approval and never accepts a command to execute.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Existing local directory to open in the terminal."
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Must be true only when the user explicitly requested this terminal launch."
+                    }
+                },
+                "required": ["path", "confirmed"]
             }
         }
     },
@@ -562,6 +584,7 @@ TOOL_DISPATCH: dict[str, callable] = {
     "open_browser": open_browser,
     "open_app": open_app,
     "launch_apps": launch_apps,
+    "open_terminal_at_path": open_terminal_at_path,
     "describe_image": describe_image,
 }
 

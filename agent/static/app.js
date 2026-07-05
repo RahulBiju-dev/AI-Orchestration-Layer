@@ -838,8 +838,23 @@ function resetStream() {
   state.stream.lastToolBlock = null;
 }
 
-function finishGeneration(generation = state.generation) {
+function settleStreamActivity(interrupted = false) {
+  // Streaming can end without a thinking_end/tool_end event when fetch is
+  // aborted or the connection fails. Settle the DOM before resetStream drops
+  // the only references to these still-visible elements.
+  state.stream.thinkingBlock?.classList.remove("open", "running");
+  if (state.stream.lastToolBlock) {
+    state.stream.lastToolBlock.classList.remove("running");
+    if (interrupted) {
+      const status = state.stream.lastToolBlock.querySelector(".tool-indicator-status");
+      if (status) status.textContent = "Tool use stopped";
+    }
+  }
+}
+
+function finishGeneration(generation = state.generation, { interrupted = false } = {}) {
   if (generation && state.generation !== generation) return;
+  settleStreamActivity(interrupted);
   state.isGenerating = false;
   state.controller = null;
   state.generation = null;
@@ -861,7 +876,7 @@ function resetComposer({ clear = true } = {}) {
 function stopGeneration({ refresh = true } = {}) {
   state.controller?.abort();
   toast("Generation stopped.");
-  finishGeneration();
+  finishGeneration(state.generation, { interrupted: true });
   if (refresh) refreshSessions().catch(() => {});
 }
 

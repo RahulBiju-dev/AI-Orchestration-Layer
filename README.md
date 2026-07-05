@@ -188,6 +188,7 @@ The agent autonomously decides when to call tools based on the user's query:
 | 🧭 **Reasoning Chain Debugger** | Audit explicit claim/evidence graphs for unsupported leaps, missing references, cycles, and confidence problems |
 | ⚙️ **Automated Routine Executor** | Define natural-language workflow macros, preview their actions, and execute approved local commands/apps/URLs |
 | 🚀 **App Launcher** | Launch up to ten installed desktop apps by display name, with confirmation and command-injection safeguards |
+| 💻 **Terminal Launcher** | Open a supported terminal at an existing directory, with explicit confirmation and no command execution |
 | 📅 **Google Calendar** | List calendars and upcoming events, search a time range, and create or edit events; deletion requires explicit confirmation |
 | ✅ **Google Tasks** | List task lists and tasks, create tasks with notes or due dates, and update status or details; deletion requires explicit confirmation |
 

@@ -19,6 +19,7 @@ LEGACY_STORE_PATH = PROJECT_ROOT / ".selene" / "routines.json"
 MAX_ACTIONS = 50
 AUTOMATIC_ACTION_TYPES = {"open_app", "delay", "tool"}
 AUTOMATIC_TOOL_NAMES = {"open_app", "launch_apps"}
+CONFIRMATION_TOOL_NAMES = {*AUTOMATIC_TOOL_NAMES, "open_terminal_at_path"}
 
 
 def _load() -> dict[str, dict]:
@@ -149,7 +150,10 @@ def _run_registered_tool(tool_name: str, arguments: dict, action_type: str = "to
         raise ValueError(f"Unknown registered tool: {tool_name}")
 
     call_arguments = dict(arguments)
-    if tool_name in AUTOMATIC_TOOL_NAMES:
+    # Reuse the routine-level approval for tools whose only side effect is the
+    # already-previewed launch. Terminal launching is deliberately excluded
+    # from AUTOMATIC_TOOL_NAMES, so it can never bypass per-run confirmation.
+    if tool_name in CONFIRMATION_TOOL_NAMES:
         call_arguments["confirmed"] = True
     raw_result = handler(**call_arguments)
     if isinstance(raw_result, str):

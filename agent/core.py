@@ -431,6 +431,10 @@ def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
                     _print_status("🚀", f"Opening apps: [dim]{names}[/]", "yellow")
                     result = handler(**fn_args)
                     _print_status("✓", "App launch requests processed — synthesizing answer…", "green")
+                elif fn_name == "open_terminal_at_path":
+                    _print_status("💻", f"Opening terminal at: [dim]{fn_args.get('path', '')}[/]", "yellow")
+                    result = handler(**fn_args)
+                    _print_status("✓", "Terminal launch request sent — synthesizing answer…", "green")
                 else:
                     _print_status("⚙️", f"Executing {fn_name}…", "yellow")
                     result = handler(**fn_args)
