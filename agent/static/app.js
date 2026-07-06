@@ -906,7 +906,9 @@ async function clearConversation() {
 }
 
 async function newConversation() {
-  if (state.generation) state.generation.detached = true;
+  // There is one composer and one stream controller. Leaving the old stream
+  // detached keeps isGenerating=true and makes the fresh tab act locked.
+  if (state.isGenerating || state.generation) stopGeneration({ refresh: false });
   try {
     const response = await fetch("/api/new-session", { method: "POST" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -931,7 +933,9 @@ async function newConversation() {
 async function deleteSession(name) {
   if (!window.confirm(`Delete “${cleanSessionName(name)}”? This cannot be undone.`)) return;
   const deletingActiveSession = name === state.activeSessionName;
-  if (deletingActiveSession && state.isGenerating) stopGeneration({ refresh: false });
+  if (deletingActiveSession && (state.isGenerating || state.generation)) {
+    stopGeneration({ refresh: false });
+  }
   try {
     const response = await fetch("/api/delete-session", {
       method: "POST",
@@ -943,7 +947,7 @@ async function deleteSession(name) {
     state.savedSessions = data.saved_sessions || state.savedSessions.filter((session) => session !== name);
     const backendStartedNewSession = ["Active Session", "New conversation"].includes(data.active_session_name);
     if (deletingActiveSession || backendStartedNewSession) {
-      if (state.isGenerating) stopGeneration({ refresh: false });
+      if (state.isGenerating || state.generation) stopGeneration({ refresh: false });
       state.history = [];
       state.activeSessionName = "New conversation";
       el.title.textContent = "New conversation";
@@ -1011,7 +1015,7 @@ async function saveSession() {
 }
 
 async function loadSession(name) {
-  if (state.generation) state.generation.detached = true;
+  if (state.isGenerating || state.generation) stopGeneration({ refresh: false });
   try {
     const response = await fetch("/api/load-session", {
       method: "POST",
