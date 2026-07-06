@@ -796,6 +796,7 @@ _RE_SUB = re.compile(r"_(\{.*?\}|.)")
 _RE_COLLAPSE_WS = re.compile(r"\s+")
 _RE_MARKDOWN_CODE = re.compile(r"(```[\s\S]*?```|`[^`\n]*`)")
 _RE_LATEX_COMMAND = re.compile(r"\\[A-Za-z]+")
+_RE_TASK_ITEM = re.compile(r"(?m)^(\s*[-*+]\s+)\[([ xX])\]\s+")
 
 
 def _render_bare_latex_symbols(text: str) -> str:
@@ -832,6 +833,10 @@ def _render_terminal_markdown(text: str) -> str:
         segment = _RE_BLOCK_LATEX.sub(replace_block, segment)
         segment = _RE_INLINE_LATEX.sub(replace_inline, segment)
         segment = _render_bare_latex_symbols(segment)
+        segment = _RE_TASK_ITEM.sub(
+            lambda match: f"{match.group(1)}{'☑' if match.group(2).lower() == 'x' else '☐'} ",
+            segment,
+        )
         return segment.replace(r"\$", "$")
 
     # Code examples must remain literal, including their backslashes. Capturing

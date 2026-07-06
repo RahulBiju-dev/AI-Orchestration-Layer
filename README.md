@@ -160,7 +160,7 @@ The default interface — launch with `python main.py` and the agent opens in yo
   - Toggles for conversation history and model thinking
   - Automatically saved conversations with agent-generated 2–3-word sidebar titles
   - Save / restore named sessions without leaving the browser
-- **Markdown & code highlighting** — responses are rendered with `marked.js` and syntax-highlighted with `highlight.js`.
+- **Markdown rendering** — responses support headings, emphasis, links, blockquotes, lists, task lists, fenced code with copy buttons, and responsive GFM-style tables.
 - **LaTeX symbol rendering** — common commands such as `\oplus`, `\alpha`, `\subseteq`, and `\Rightarrow` render as Unicode outside code spans and fenced code.
 - **Responsive layout** — sidebar collapses on narrow viewports; works on desktop and tablet.
 
