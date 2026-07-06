@@ -436,18 +436,19 @@ def delete_vault_item(
     attempted_filters: list[dict] = []
 
     for candidate in dict.fromkeys(possible_sources):
-        filters = [{"source": candidate}, {"source_path": candidate}]
-        for where in filters:
-            attempted_filters.append(where)
-            try:
-                existing = collection_obj.get(where=where, include=["metadatas"])
-                ids = existing.get("ids", [])
-                if not ids:
-                    continue
+        attempted_filters.append({"source": candidate})
+        attempted_filters.append({"source_path": candidate})
+
+    if attempted_filters:
+        where_clause = {"$or": attempted_filters} if len(attempted_filters) > 1 else attempted_filters[0]
+        try:
+            existing = collection_obj.get(where=where_clause, include=["metadatas"])
+            ids = existing.get("ids", [])
+            if ids:
                 collection_obj.delete(ids=ids)
                 deleted_ids.update(ids)
-            except Exception:
-                continue
+        except Exception:
+            pass
 
     return _json({
         "collection": collection_name,
