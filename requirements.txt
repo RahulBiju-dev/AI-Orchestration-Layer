@@ -1,9 +1,21 @@
+# Vector database for the searchable vault
 chromadb>=0.3.25
+# DBus support for Linux desktop integrations (like Spotify)
 dbus-python
+# DuckDuckGo search library for web querying
 ddgs
+# Official Ollama Python client for LLM interaction
 ollama>=0.4.0
+# Utilities for converting PDFs to images and parsing text
 pdf2image
 pypdf>=5.1.0
 python-docx>=1.2.0
+# Standard HTTP requests library
 requests>=2.28.0
+# Google Calendar/Tasks OAuth and encrypted credential storage
+cryptography>=42.0.0
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.2.0
+keyring>=24.0.0
+# Terminal UI styling and Markdown rendering
 rich>=13.0.0

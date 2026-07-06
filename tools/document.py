@@ -49,8 +49,13 @@ def _parse_page_spec(pages: str | None, page_count: int) -> list[int]:
     if not pages:
         return []
 
+    if len(pages) > 1000:
+        raise ValueError("Page specification exceeds the 1000-character limit")
+    parts = pages.split(",")
+    if len(parts) > 200:
+        raise ValueError("Page specification contains too many ranges")
     selected: set[int] = set()
-    for part in pages.split(","):
+    for part in parts:
         part = part.strip()
         if not part:
             continue
@@ -63,9 +68,10 @@ def _parse_page_spec(pages: str | None, page_count: int) -> list[int]:
                 raise ValueError(f"Invalid page range: {part}") from exc
             if start > end:
                 start, end = end, start
-            for page in range(start, end + 1):
-                if 1 <= page <= page_count:
-                    selected.add(page - 1)
+            bounded_start = max(1, start)
+            bounded_end = min(page_count, end)
+            if bounded_start <= bounded_end:
+                selected.update(range(bounded_start - 1, bounded_end))
         else:
             try:
                 page = int(part)
@@ -83,7 +89,19 @@ def _chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE) -> list[str]:
     chunk_size = _positive_int(chunk_size, DEFAULT_CHUNK_SIZE, minimum=1000, maximum=MAX_CHUNK_SIZE)
     if len(text) <= chunk_size:
         return [text]
-    return [text[start:start + chunk_size] for start in range(0, len(text), chunk_size)]
+    chunks = []
+    start = 0
+    while start < len(text):
+        hard_end = min(len(text), start + chunk_size)
+        end = hard_end
+        if hard_end < len(text):
+            window = text[start:hard_end]
+            boundary = max(window.rfind("\n\n"), window.rfind("\n"), window.rfind(". "))
+            if boundary >= chunk_size // 2:
+                end = start + boundary + 1
+        chunks.append(text[start:end])
+        start = end
+    return chunks
 
 
 def _snippet(text: str, query: str, max_chars: int = 900) -> str:
@@ -156,6 +174,12 @@ def _extract_pdf_segments(file_path: str, pages: str | None = None, preview_char
     preview_limited = False
     with open(file_path, "rb") as f:
         reader = pypdf.PdfReader(f)
+        if reader.is_encrypted:
+            try:
+                if not reader.decrypt(""):
+                    raise ValueError("password required")
+            except Exception as exc:
+                raise ValueError("PDF is encrypted and cannot be read without a password") from exc
         page_count = len(reader.pages)
         selected_pages = _parse_page_spec(pages, page_count) if pages else range(page_count)
         extracted_chars = 0
@@ -184,6 +208,18 @@ def _extract_pdf_segments(file_path: str, pages: str | None = None, preview_char
 
 
 def _iter_docx_blocks(doc) -> Iterable[str]:
+    if hasattr(doc, "iter_inner_content"):
+        for block in doc.iter_inner_content():
+            if hasattr(block, "rows"):
+                for row in block.rows:
+                    cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                    if cells:
+                        yield " | ".join(cells)
+            else:
+                text = block.text.strip()
+                if text:
+                    yield text
+        return
     for paragraph in doc.paragraphs:
         text = paragraph.text.strip()
         if text:
@@ -222,16 +258,40 @@ def _extract_docx_segments(file_path: str, preview_chars: int | None = None) -> 
 
 
 def extract_document_text(file_path: str, pages: str | None = None) -> tuple[str, dict]:
-    """Return full extracted document text plus metadata for indexing callers."""
+    """
+    Return full extracted document text plus metadata for indexing callers.
+    
+    This function acts as a unified entry point for reading both PDF and DOCX files.
+    It extracts the text segments and joins them into a single continuous string
+    suitable for search indexing, while also returning metadata like page counts.
+    
+    Args:
+        file_path (str): The absolute or relative path to the document file.
+        pages (str | None): An optional page range string (e.g., "1-5") for PDFs.
+            
+    Returns:
+        tuple[str, dict]: A tuple where the first element is the extracted text 
+            string and the second is a dictionary of document metadata.
+            
+    Raises:
+        ValueError: If the document type is unsupported.
+    """
+    # Determine the file extension to route to the correct extractor
     ext = os.path.splitext(file_path)[1].lower()
+    
     if ext == ".pdf":
+        # Extract segments from PDF with optional page range
         segments, info = _extract_pdf_segments(file_path, pages=pages)
     elif ext == ".docx":
+        # Extract blocks from DOCX (page ranges are not supported)
         segments, info = _extract_docx_segments(file_path)
     else:
         raise ValueError(f"Unsupported document type: {ext}")
+        
+    # Join the extracted segments into a single readable string
     text = _join_segments(segments)
     info["char_count"] = len(text)
+    
     return text, info
 
 
@@ -243,15 +303,28 @@ def read_document(
     chunk_size: int | str = DEFAULT_CHUNK_SIZE,
     max_chars: int | str = DEFAULT_MAX_CHARS,
 ) -> str:
-    """Extract text from a PDF or Word document with large-file navigation.
+    """
+    Extract text from a PDF or Word document with large-file navigation capabilities.
+
+    This tool enables reading content from binary document formats (.pdf, .docx).
+    To handle large files, it provides features like page filtering, semantic chunking,
+    and query-based snippet search.
 
     Args:
-        file_path: Path to a .pdf or .docx file.
-        pages: Optional 1-based PDF pages/ranges, such as "1-3,8".
-        query: Optional search query; returns snippets instead of a whole document dump.
-        chunk: Optional 0-based chunk number for large extracted text.
-        chunk_size: Approximate characters per chunk.
-        max_chars: Maximum characters returned in preview/text fields.
+        file_path (str): Absolute or relative path to a .pdf or .docx file.
+        pages (str | None): Optional 1-based PDF pages/ranges, such as "1-3,8".
+            Only applies to PDFs.
+        query (str | None): Optional search query; if provided, returns matched
+            text snippets instead of a whole document dump.
+        chunk (int | str | None): Optional 0-based chunk number to retrieve
+            when navigating large extracted text sequentially.
+        chunk_size (int | str): Approximate characters per chunk (default is 12000).
+        max_chars (int | str): Maximum characters returned in preview/text fields.
+            Used to prevent overflowing the LLM context window.
+            
+    Returns:
+        str: A JSON-encoded string containing the extracted text, search matches,
+             or metadata about the document. Contains an 'error' key if reading fails.
     """
     if not os.path.exists(file_path):
         return _json({"error": f"File not found: {file_path}"})
@@ -267,6 +340,10 @@ def read_document(
 
     max_chars_int = _positive_int(max_chars, DEFAULT_MAX_CHARS, minimum=2000, maximum=MAX_CHUNK_SIZE)
     chunk_size_int = _positive_int(chunk_size, DEFAULT_CHUNK_SIZE, minimum=1000, maximum=MAX_CHUNK_SIZE)
+    if query is not None:
+        query = str(query).strip()
+        if len(query) > 4000:
+            return _json({"error": "query exceeds the 4000-character limit"})
     chunk_index = None
     if chunk is not None:
         chunk_index = _positive_int(chunk, 0, minimum=0)

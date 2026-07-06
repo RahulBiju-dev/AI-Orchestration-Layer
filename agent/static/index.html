@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Selene</title>
+  <meta name="description" content="Selene is a local AI chatbot with thinking and tool-call visibility.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="icon" href="/favicon.png" type="image/png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="sky" aria-hidden="true">
+    <span class="moon"></span>
+    <span class="star star-a"></span>
+    <span class="star star-b"></span>
+    <span class="star star-c"></span>
+  </div>
+
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Selene workspace">
+      <header class="brand">
+        <img class="brand-mark" src="/avatar.png" alt="Selene avatar">
+        <div>
+          <h1>Selene</h1>
+        </div>
+      </header>
+
+      <button id="new-chat-btn" class="primary-btn" type="button">New Chat</button>
+
+      <section class="side-section">
+        <div class="section-title">Sessions</div>
+        <div id="session-list" class="session-list" role="list"></div>
+      </section>
+
+      <button id="settings-btn" class="settings-trigger" type="button" aria-haspopup="dialog" aria-controls="settings-panel">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15 4.63a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9 1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></svg>
+        <span>Settings</span>
+      </button>
+    </aside>
+
+    <main class="chat-shell">
+      <header class="chat-topbar">
+        <div>
+          <h2 id="chat-title">New conversation</h2>
+        </div>
+      </header>
+
+      <section id="messages" class="messages" aria-live="polite" aria-label="Conversation"></section>
+
+      <form id="composer-form" class="composer" autocomplete="off">
+        <div class="composer-inner">
+          <textarea id="chat-input" rows="1" placeholder="Message Selene..." aria-label="Message Selene"></textarea>
+          <div id="slash-menu" class="slash-menu" role="listbox" aria-label="Slash commands"></div>
+          <div class="composer-footer">
+            <div class="context-meter" title="Estimated context window usage">
+              <span id="context-label">0 / 8192</span>
+              <span class="meter-track"><span id="context-fill"></span></span>
+            </div>
+            <button id="send-btn" class="send-btn" type="submit" disabled>Send</button>
+          </div>
+        </div>
+      </form>
+    </main>
+  </div>
+
+  <div id="settings-backdrop" class="settings-backdrop" hidden></div>
+  <aside id="settings-panel" class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-hidden="true">
+    <header class="settings-header">
+      <div><p class="eyebrow">Customize Selene</p><h2 id="settings-title">Settings</h2></div>
+      <button id="settings-close" class="icon-btn" type="button" aria-label="Close settings">&times;</button>
+    </header>
+    <div class="settings-body">
+      <section class="settings-group">
+        <h3>Conversation</h3>
+        <label class="panel-field">
+          <span>System prompt</span>
+          <small>Instructions included with every request.</small>
+          <textarea id="setting-system" rows="7" placeholder="You are Selene, a helpful assistant..."></textarea>
+        </label>
+        <label class="switch-row"><span><strong>Keep history</strong><small>Include past turns in new requests.</small></span><input id="setting-history" type="checkbox" checked></label>
+        <label class="switch-row"><span><strong>Show thinking</strong><small>Let supported models expose reasoning.</small></span><input id="setting-think" type="checkbox" checked></label>
+      </section>
+      <section class="settings-group">
+        <h3>Model</h3>
+        <label class="field-row"><span>Temperature <output id="temperature-value">0.70</output></span><small>Higher values produce more varied answers.</small><input id="setting-temperature" type="range" min="0" max="2" step="0.05" value="0.7"></label>
+        <label class="field-row"><span>Context window</span><small>Maximum tokens available to prompts and responses.</small><select id="setting-context"><option value="4096">4k</option><option value="8192" selected>8k</option><option value="16384">16k</option><option value="32768">32k</option><option value="65536">64k</option><option value="131072">128k</option></select></label>
+      </section>
+    </div>
+  </aside>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

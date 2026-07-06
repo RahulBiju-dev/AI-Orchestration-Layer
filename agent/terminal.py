@@ -8,63 +8,180 @@ from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass
 from rich.console import Console
 
 # Shared console (write to stderr so Live and spinner use the same stream)
 _console = Console(stderr=True)
 
 
+@dataclass(frozen=True)
+class TerminalTheme:
+    """Small central palette for the CLI chrome."""
+
+    accent: str = "cyan"
+    accent_2: str = "bright_magenta"
+    success: str = "green"
+    warning: str = "yellow"
+    danger: str = "red"
+    muted: str = "dim"
+    border: str = "cyan"
+
+
+THEME = TerminalTheme()
+
+
+_ANSI_ESCAPE_RE = re.compile(
+    r"""
+    \x1b
+    (?:
+        \[[0-?]*[ -/]*[@-~]      # CSI sequences: arrows, mouse wheel, bracketed paste
+      | \][^\x07]*(?:\x07|\x1b\\) # OSC sequences
+      | [@-Z\\-_]                 # 2-byte escapes
+    )
+    """,
+    re.VERBOSE,
+)
+_CONTROL_INPUT_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def flush_terminal_input() -> None:
+    """Drop queued terminal bytes before showing the next prompt.
+
+    Scrolling in an alternate screen, arrow keys, bracketed paste markers, or
+    impatient key presses can leave escape bytes in the terminal input queue.
+    Flushing before each prompt prevents those bytes from becoming user text.
+    """
+    if not sys.stdin.isatty():
+        return
+    try:
+        import termios
+
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        # Windows and some pseudo terminals do not expose tcflush. Sanitization
+        # still protects the prompt after the line is read.
+        return
+
+
+def sanitize_terminal_input(text: str) -> str:
+    """Remove terminal-control garbage while preserving intentional text."""
+    if not text:
+        return ""
+
+    text = _ANSI_ESCAPE_RE.sub("", text)
+
+    chars: list[str] = []
+    for char in text:
+        if char in ("\b", "\x7f"):
+            if chars:
+                chars.pop()
+            continue
+        chars.append(char)
+
+    cleaned = "".join(chars).replace("\r", "\n")
+    cleaned = _CONTROL_INPUT_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def read_user_input() -> str:
+    """Read one prompt line using the shared console and terminal hygiene."""
+    flush_terminal_input()
+    raw = _console.input("[bold cyan]selene[/] [dim]$[/] ")
+    return sanitize_terminal_input(raw)
+
+
+def assistant_stream_panel(text: str):
+    """Build the live assistant renderable."""
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+
+    body = Markdown(_render_terminal_markdown(text or " "))
+    return Panel(
+        body,
+        border_style=THEME.border,
+        padding=(1, 2),
+        title="[bold cyan]assistant[/]",
+        title_align="left",
+    )
+
+
+def print_assistant_message(text: str) -> None:
+    """Print the final assistant response in the persistent scrollback."""
+    if not text:
+        return
+    _console.print(assistant_stream_panel(text))
+    _console.print()
+
+
+def print_thinking_header() -> None:
+    from rich.rule import Rule
+
+    _console.print(Rule("[dim magenta]thinking[/]", style="dim magenta"))
+
+
+def print_thinking_footer(label: str | None = None) -> None:
+    from rich.rule import Rule
+
+    text = f"[dim magenta]{label}[/]" if label else ""
+    _console.print(Rule(text, style="dim magenta"))
+    _console.print()
+
+
 def _print_status(icon: str, message: str, color: str = "cyan") -> None:
-    """Print a formatted status line to stderr so it doesn't mix with piped output."""
+    """Print a formatted status line to stderr so it doesn't mix with piped output.
+    
+    Args:
+        icon (str): The emoji or icon to display at the beginning of the line.
+        message (str): The status message to print.
+        color (str, optional): The rich color to use for the output. Defaults to "cyan".
+    """
     _console.print(f"[{color} bold]{icon}  {message}[/]")
 
 
 def print_welcome_header() -> None:
-    """Prints a stylish welcome header with an ASCII art logo."""
-    from rich.panel import Panel
-    from rich.columns import Columns
+    """Print the terminal app header."""
     from rich.text import Text
-    
-    # ASCII Art logo
-    logo_art_raw = r"""
-                              /
-                   __       //
-                   -\= \=\ //
-                 --=_\=---//=--
-               -_==/  \/ //\/--
-                ==/   /O   O\==--
-   _ _ _ _     /_/    \  ]  /--
-  /\ ( (- \    /       ] ] ]==-
- (\ _\_\_\-\__/     \  (,_,)--
-(\_/                 \     \-
-\/      /       (   ( \  ] /)
-/      (         \   \_ \./ )
-(       \         \      )  \
-(       /\_ _ _ _ /---/ /\_  \
- \     / \     / ____/ /   \  \
-  (   /   )   / /  /__ )   (  )
-  (  )   / __/ '---`       / /
-  \  /   \ \             _/ /
-  ] ]     )_\_         /__\/
-  /_\     ]___\
- (___)
-""".strip("\n")
-    logo_art = Text(logo_art_raw, style="cyan")
-    
-    title_text = Text("\n\n\n\n\n\nAI CLI Agent\n", style="bold white", justify="center")
-    title_text.append("Type ", style="dim")
-    title_text.append("/help", style="bold green")
-    title_text.append(" to see available commands.", style="dim")
-    
-    columns = Columns([logo_art, title_text], expand=True, align="center")
-    _console.print(Panel(columns, border_style="cyan", padding=(1, 2)))
+
+    logo_lines = [
+        r"*          .                  .",
+        r"      _..._",
+        r"   .::::   `.",
+        r"  :::::      :       ____  _____ _     _____ _   _ _____",
+        r"  `::::.   .'       / ___|| ____| |   | ____| \ | | ____|",
+        r"     `''''`         \___ \|  _| | |   |  _| |  \| |  _|",
+        r".                    ___) | |___| |___| |___| |\  | |___",
+        r"     *              |____/|_____|_____|_____|_| \_|_____|",
+        "",
+        r"                 N I G H T   M O D E   A G E N T",
+    ]
+    width = min(_console.size.width, 100)
+    block_width = max(len(line) for line in logo_lines)
+    left_margin = max((width - block_width) // 2, 0)
+    _console.print()
+    for index, line in enumerate(logo_lines):
+        style = "dim cyan" if index == len(logo_lines) - 1 else "cyan"
+        padded_line = f"{' ' * left_margin}{line}"
+        _console.print(
+            Text(padded_line, style=style),
+            markup=False,
+            highlight=False,
+            no_wrap=True,
+            overflow="crop",
+        )
+    _console.print()
 
 
 class _Spinner:
-    """Animated spinner wrapper that uses rich.status.Status."""
+    """Animated spinner wrapper that uses rich.status.Status.
+    
+    This class provides a simple API to start, update, and stop a terminal spinner.
+    It handles its own state and threading compatibility variables.
+    """
 
     def __init__(self, message: str = "Thinking", color: str = "magenta") -> None:
         self._message = message
+        
         self._color = color
         self._status = _console.status(f"[{self._color} bold]{self._message}…[/]", spinner="dots", spinner_style=f"{self._color} bold")
         
@@ -74,15 +191,26 @@ class _Spinner:
         self._thread = type('MockThread', (), {'is_alive': lambda: False, 'join': lambda: None})()
 
     def start(self) -> "_Spinner":
+        """Start the animated spinner in the terminal.
+        
+        Returns:
+            _Spinner: The current spinner instance for method chaining.
+        """
         self._stop_event.clear()
         self._status.start()
         return self
 
     def update(self, message: str) -> None:
+        """Update the spinner's message dynamically while it is running.
+        
+        Args:
+            message (str): The new message to display.
+        """
         self._message = message
         self._status.update(f"[{self._color} bold]{self._message}…[/]")
 
     def stop(self) -> None:
+        """Stop the animated spinner and mark the stop event as set."""
         self._stop_event.set()
         self._status.stop()
 
@@ -410,6 +538,14 @@ _SUB_MAP = {
 
 
 def _to_superscript(text: str) -> str:
+    """Convert normal text characters to their Unicode superscript equivalents.
+    
+    Args:
+        text (str): The string to convert.
+        
+    Returns:
+        str: The converted superscript string.
+    """
     out = []
     for ch in text:
         out.append(_SUP_MAP.get(ch, ch))
@@ -417,6 +553,14 @@ def _to_superscript(text: str) -> str:
 
 
 def _to_subscript(text: str) -> str:
+    """Convert normal text characters to their Unicode subscript equivalents.
+    
+    Args:
+        text (str): The string to convert.
+        
+    Returns:
+        str: The converted subscript string.
+    """
     out = []
     for ch in text:
         out.append(_SUB_MAP.get(ch, ch))
@@ -424,6 +568,17 @@ def _to_subscript(text: str) -> str:
 
 
 def _extract_braced(text: str, start: int) -> tuple[str, int] | None:
+    """Extract a substring enclosed in matching curly braces.
+    
+    Args:
+        text (str): The full text containing the braces.
+        start (int): The index where the opening brace '{' is located.
+        
+    Returns:
+        tuple[str, int] | None: A tuple containing the extracted inner string and 
+                                the index immediately following the closing brace.
+                                Returns None if parsing fails.
+    """
     if start >= len(text) or text[start] != "{":
         return None
 
@@ -440,6 +595,18 @@ def _extract_braced(text: str, start: int) -> tuple[str, int] | None:
 
 
 def _render_latex_math(expr: str) -> str:
+    """Convert a LaTeX math expression into terminal-friendly Unicode text.
+    
+    This function handles common LaTeX structures such as fractions, square roots,
+    symbols, superscripts, and subscripts, rendering them cleanly without needing
+    a full LaTeX engine.
+    
+    Args:
+        expr (str): The raw LaTeX expression.
+        
+    Returns:
+        str: The Unicode-rendered representation of the expression.
+    """
     expr = expr.strip()
     if not expr:
         return ""
@@ -559,6 +726,17 @@ _RE_COLLAPSE_WS = re.compile(r"\s+")
 
 
 def _render_terminal_markdown(text: str) -> str:
+    """Pre-process markdown text to render LaTeX blocks before passing to rich.Markdown.
+    
+    Finds inline ($...$) and block ($$...$$) LaTeX expressions and replaces them
+    with their Unicode equivalents.
+    
+    Args:
+        text (str): The raw markdown string containing potential LaTeX.
+        
+    Returns:
+        str: The processed markdown string with LaTeX rendered to Unicode.
+    """
     def replace_block(match: re.Match[str]) -> str:
         rendered = _render_latex_math(match.group(1))
         return f"\n{rendered}\n"

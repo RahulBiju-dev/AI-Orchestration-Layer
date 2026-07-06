@@ -15,6 +15,7 @@ import time
 import shutil
 import re
 import sys
+import urllib.parse
 
 
 # ── Spotify launch helpers ────────────────────────────────────────────
@@ -105,12 +106,12 @@ def _launch_spotify() -> bool:
                 start_new_session=True,
             )
 
-        # Wait for Spotify to start and register
-        for _ in range(15):
-            time.sleep(1)
+        # Poll briefly instead of imposing a fixed startup sleep.
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
             if _is_spotify_running():
-                # Give it a moment to initialize
-                time.sleep(2)
+                time.sleep(1)
                 return True
         return False
     except Exception:
@@ -149,15 +150,13 @@ def _get_spotify_properties():
     import dbus
 
     bus = dbus.SessionBus()
-    try:
-        proxy = bus.get_object(
-            "org.mpris.MediaPlayer2.spotify",
-            "/org/mpris/MediaPlayer2",
-        )
-        props = dbus.Interface(proxy, "org.freedesktop.DBus.Properties")
-        return props
-    except dbus.exceptions.DBusException:
-        return None
+    for service in ("org.mpris.MediaPlayer2.spotify", "org.mpris.MediaPlayer2.spotify_player"):
+        try:
+            proxy = bus.get_object(service, "/org/mpris/MediaPlayer2")
+            return dbus.Interface(proxy, "org.freedesktop.DBus.Properties")
+        except dbus.exceptions.DBusException:
+            continue
+    return None
 
 
 # ── URI helpers ───────────────────────────────────────────────────────
@@ -216,16 +215,29 @@ def _search_spotify_uri(query: str) -> str | None:
 # ── Public tool function ──────────────────────────────────────────────
 
 def spotify_play(query: str) -> str:
-    """Open Spotify and play a specific song.
+    """
+    Open Spotify and play a specific song, album, or playlist.
+
+    This function attempts to launch the Spotify application if it isn't running,
+    resolves the provided query to a Spotify URI (either natively or via search),
+    and initiates playback using OS-specific mechanisms (e.g., cmd on Windows,
+    osascript on macOS, or D-Bus MPRIS2 on Linux).
 
     Args:
-        query: A Spotify URI, Spotify URL, or a search query
-               (e.g. "Bohemian Rhapsody Queen").
+        query (str): A Spotify URI, Spotify URL, or a text search query
+               (e.g., "Bohemian Rhapsody Queen").
 
     Returns:
-        A JSON string indicating success or failure.
+        str: A JSON-encoded string indicating the success or failure of the
+             playback attempt. On success, it may include currently playing
+             metadata depending on the OS capabilities.
     """
     try:
+        query = str(query or "").strip()
+        if not query:
+            return json.dumps({"error": "A Spotify URI, URL, or search query is required."})
+        if len(query) > 500:
+            return json.dumps({"error": "Spotify query exceeds the 500-character limit."})
         # Step 1: Ensure Spotify is running
         if not _launch_spotify():
             return json.dumps({
@@ -239,19 +251,23 @@ def spotify_play(query: str) -> str:
             uri = _search_spotify_uri(query)
             if not uri:
                 # Fallback: open Spotify's own search
-                uri = f"spotify:search:{query.replace(' ', '%20')}"
+                uri = f"spotify:search:{urllib.parse.quote(query, safe='')}"
 
         # Step 3: Play via OS-specific mechanism
         if sys.platform == "win32":
-            subprocess.run(["cmd", "/c", "start", uri], capture_output=True)
+            completed = subprocess.run(["cmd", "/c", "start", "", uri], capture_output=True, timeout=10)
+            if completed.returncode != 0:
+                return json.dumps({"error": "Spotify rejected the playback request on Windows."})
             return json.dumps({
                 "success": True,
                 "message": f"Opened Spotify with URI: {uri}",
                 "uri": uri,
             })
         elif sys.platform == "darwin":
-            script = f'tell application "Spotify" to play track "{uri}"'
-            subprocess.run(["osascript", "-e", script], capture_output=True)
+            script = 'on run argv\ntell application "Spotify" to play track (item 1 of argv)\nend run'
+            completed = subprocess.run(["osascript", "-e", script, "--", uri], capture_output=True, timeout=10)
+            if completed.returncode != 0:
+                return json.dumps({"error": "Spotify rejected the playback request on macOS."})
             return json.dumps({
                 "success": True,
                 "message": f"Opened Spotify with URI: {uri}",

@@ -15,8 +15,13 @@ from agent.terminal import (
     _console,
     _print_status,
     _Spinner,
-    _render_terminal_markdown,
+    assistant_stream_panel,
+    flush_terminal_input,
+    print_assistant_message,
+    print_thinking_footer,
+    print_thinking_header,
     print_welcome_header,
+    read_user_input,
 )
 
 import signal
@@ -31,7 +36,6 @@ except ImportError:
     pass
 
 import ollama
-from rich.markdown import Markdown
 from rich.live import Live
 
 from tools.registry import TOOL_DISPATCH, TOOL_SCHEMAS
@@ -50,33 +54,58 @@ _ALL_PARAMS = _FLOAT_PARAMS | _INT_PARAMS
 # from agent.terminal to keep terminal logic modular.
 
 # ── History management ────────────────────────────────────────────────
-# Rough token budget for conversation history.
 # Keeps prompt size bounded so tok/s stays consistent across long sessions.
-_HISTORY_TOKEN_BUDGET = 6000  # ~6k tokens ≈ leaves room for response in 8192 ctx
-
 
 def _estimate_tokens(text: str) -> int:
-    """Fast heuristic: ~1 token per 4 characters (close enough for trimming)."""
+    """Estimate the number of tokens in a string using a fast heuristic.
+    
+    This is used to bound the history length without running a full tokenizer,
+    saving compute time on every turn.
+    
+    Args:
+        text (str): The text to estimate tokens for.
+        
+    Returns:
+        int: The estimated token count (~1 token per 4 characters).
+    """
     return len(text) // 4 + 1
 
 
 _interrupted = False
 
 def _sigquit_handler(signum, frame):
+    """Handle SIGQUIT signal to interrupt the current LLM generation stream.
+    
+    Sets the global _interrupted flag to True, which is checked during
+    token streaming to gracefully abort generation without crashing the agent.
+    
+    Args:
+        signum: The signal number.
+        frame: The current stack frame.
+    """
     global _interrupted
+    # Mark as interrupted so the streaming loop can break
     _interrupted = True
 
 
-def _trim_history(messages: list[dict], budget: int = _HISTORY_TOKEN_BUDGET) -> list[dict]:
-    """Trim conversation history to fit within a token budget.
+def _trim_history(messages: list[dict], num_ctx: int = 8192) -> list[dict]:
+    """Trim conversation history to fit within a dynamic token budget.
 
     Preserves the system prompt (if any) and the most recent messages.
     Tool messages are kept with their associated assistant message.
+    
+    Args:
+        messages (list[dict]): The full conversation history list.
+        num_ctx (int, optional): The context window size. Defaults to 8192.
+        
+    Returns:
+        list[dict]: A trimmed list of messages fitting the 95% budget.
     """
+    budget = int(num_ctx * 0.95)
     if not messages:
         return messages
 
-    # Separate system prompt from conversation
+    # Separate system prompt from conversation to ensure it is always preserved
     system_msgs = []
     conv_msgs = []
     for msg in messages:
@@ -90,10 +119,10 @@ def _trim_history(messages: list[dict], budget: int = _HISTORY_TOKEN_BUDGET) -> 
     remaining_budget = budget - system_cost
 
     if remaining_budget <= 0:
-        # System prompt alone exceeds budget; keep it + last user message
+        # System prompt alone exceeds budget; keep it + last user message as a fallback
         return system_msgs + conv_msgs[-1:]
 
-    # Walk from newest to oldest, accumulating messages
+    # Walk from newest to oldest, accumulating messages until the budget is hit
     kept: list[dict] = []
     used = 0
     for msg in reversed(conv_msgs):
@@ -108,6 +137,81 @@ def _trim_history(messages: list[dict], budget: int = _HISTORY_TOKEN_BUDGET) -> 
     kept.reverse()
     return system_msgs + kept
 
+
+def _compact_history_bg(history: list[dict], session: dict, start_idx: int, end_idx: int) -> None:
+    """Run background summarization and replace older messages."""
+    import ollama
+    messages_to_compact = history[start_idx:end_idx]
+    
+    # We want to format the previous conversation for the LLM to summarize
+    text_to_summarize = ""
+    for msg in messages_to_compact:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        text_to_summarize += f"[{role.upper()}]: {content}\n\n"
+        
+    system_prompt = session.get("system", "")
+    if not system_prompt and history and history[0].get("role") == "system":
+        system_prompt = history[0].get("content", "")
+        
+    summarize_prompt = (
+        "Please provide a concise, factual summary of the following conversation history. "
+        "Retain all key context, decisions, and factual information so it can be used "
+        "in place of the full history without losing context.\n\n"
+        f"Conversation:\n{text_to_summarize}"
+    )
+    
+    compact_messages = []
+    if system_prompt:
+        compact_messages.append({"role": "system", "content": system_prompt})
+    compact_messages.append({"role": "user", "content": summarize_prompt})
+    
+    try:
+        response = ollama.chat(
+            model=MODEL_NAME,
+            messages=compact_messages,
+            options=session.get("options", {})
+        )
+        summary = response.message.content or ""
+        if summary:
+            from tools.context_memory_optimizer import context_memory_optimizer
+            optimized = json.loads(context_memory_optimizer(
+                [{"role": "assistant", "content": summary}],
+                target_tokens=max(512, int(session.get("options", {}).get("num_ctx", 8192) * 0.25)),
+                preserve_recent=1,
+            ))
+            history[start_idx:end_idx] = optimized.get("messages") or [
+                {"role": "assistant", "content": f"[System Note: Older conversation compacted]\n{summary}"}
+            ]
+    except Exception as e:
+        # Ignore errors in background compaction to prevent terminal spam
+        pass
+    finally:
+        session["_is_compacting"] = False
+
+
+def _check_and_compact_history(history: list[dict], session: dict) -> None:
+    """Check token usage and trigger background compaction if > 90%."""
+    if session.get("_is_compacting"):
+        return
+        
+    num_ctx = session.get("options", {}).get("num_ctx", 8192)
+    compact_threshold = int(num_ctx * 0.90)
+    
+    total_tokens = sum(_estimate_tokens(m.get("content", "") + m.get("thinking", "")) for m in history)
+    
+    if total_tokens > compact_threshold:
+        # Determine the slice to compact. Keep system prompt (idx 0) and at least the 4 most recent messages (e.g. 2 turns).
+        if len(history) >= 6:
+            start_idx = 1 if history[0].get("role") == "system" else 0
+            end_idx = len(history) - 4
+            if start_idx < end_idx:
+                session["_is_compacting"] = True
+                import threading
+                t = threading.Thread(target=_compact_history_bg, args=(history, session, start_idx, end_idx))
+                t.daemon = True
+                t.start()
+
 def _stream_thinking_response(
     model: str,
     messages: list[dict],
@@ -117,10 +221,23 @@ def _stream_thinking_response(
     think: bool = True,
     fmt: str | None = None,
 ) -> dict:
-    """Stream a response, showing thinking progress and the final answer.
+    """Stream a response from the Ollama model, displaying thinking progress and final answer.
+    
+    This function handles the complex logic of parsing an incoming stream of tokens,
+    distinguishing between "thinking" tokens and "content" tokens, rendering them in real-time
+    with markdown support, and appropriately handling interruptions.
+    
+    Args:
+        model (str): The name of the model to use.
+        messages (list[dict]): The chat history to send to the model.
+        tools (list[dict] | None, optional): Available tools schema. Defaults to None.
+        options (dict | None, optional): Model options (temperature, etc.). Defaults to None.
+        verbose (bool, optional): Whether to print token generation stats. Defaults to False.
+        think (bool, optional): Whether to enable the model's thinking process. Defaults to True.
+        fmt (str | None, optional): Expected output format (e.g. 'json'). Defaults to None.
 
-    Returns the full assistant message dict (with thinking + content)
-    for appending to history.
+    Returns:
+        dict: The full assistant message containing content, thinking (if any), and tool calls.
     """
     spinner = _Spinner("Thinking").start()
     t_start = time.monotonic()
@@ -160,9 +277,7 @@ def _stream_thinking_response(
                 spinner.stop()
                 if in_thinking:
                     in_thinking = False
-                    _console.print(
-                f"\n[magenta][dim]└─ [Interrupted] ────────────────────────[/]\n",
-                    )
+                    print_thinking_footer("interrupted")
                 _console.print(f"\n[yellow]⚠ Generation interrupted by user (Ctrl+\\).[/]\n")
                 break
             
@@ -187,10 +302,7 @@ def _stream_thinking_response(
                 if not in_thinking:
                     in_thinking = True
                     spinner.stop()
-                    # Print thinking header
-                    _console.print(
-                f"\n[magenta][dim]┌─ thinking ─────────────────────────────[/]",
-                    )
+                    print_thinking_header()
                     thinking_displayed = True
 
                 thinking_buf += thinking_chunk
@@ -205,9 +317,7 @@ def _stream_thinking_response(
                 if in_thinking:
                     # Transition from thinking to answering
                     in_thinking = False
-                    _console.print(
-                f"\n[magenta][dim]└────────────────────────────────────────[/]\n",
-                    )
+                    print_thinking_footer()
                     spinner.stop()
                 elif spinner._thread and not spinner._stop_event.is_set():
                     spinner.stop()
@@ -219,10 +329,11 @@ def _stream_thinking_response(
                 # Initialize Live display on the first content chunk
                 if live is None:
                     live = Live(
-                        Markdown(_render_terminal_markdown(content_buf)),
+                        assistant_stream_panel(content_buf),
                         console=_console,
                         auto_refresh=False,
-                        screen=True,
+                        screen=False,
+                        transient=True,
                         vertical_overflow="visible",
                     )
                     live.start()
@@ -231,28 +342,26 @@ def _stream_thinking_response(
                 now = time.monotonic()
                 if now - _last_render >= _RENDER_INTERVAL:
                     # Update Markdown rendering in real-time
-                    live.update(Markdown(_render_terminal_markdown(content_buf)), refresh=True)
+                    live.update(assistant_stream_panel(content_buf), refresh=True)
                     _last_render = now
 
     finally:
         signal.signal(signal.SIGQUIT, old_handler)
         if live:
             live.stop()
+        flush_terminal_input()
 
     # End of stream
     spinner.stop()
 
     if in_thinking:
         # Stream ended while still in thinking (no content followed)
-        _console.print(
-                f"\n[magenta][dim]└────────────────────────────────────────[/]\n",
-        )
+        print_thinking_footer()
 
     if content_buf:
-        # Print the final complete markdown to the terminal so it remains in the scrollback buffer.
-        # Using screen=True during streaming prevents the scrolling terminal duplication bug entirely.
-        _console.print(Markdown(_render_terminal_markdown(content_buf)))
-        _console.print()  # final newline after streamed answer
+        # Print the final complete markdown to persistent scrollback after the
+        # transient live panel is removed.
+        print_assistant_message(content_buf)
 
     # Verbose stats
     if verbose:
@@ -273,7 +382,18 @@ def _stream_thinking_response(
 
 
 def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
-    """Execute each tool call and return the corresponding tool-role messages."""
+    """Execute each tool call from the model and format the results.
+    
+    Iterates over the tool_calls list, dynamically loading the corresponding handler
+    from TOOL_DISPATCH, executing it with the provided arguments, and wrapping the
+    result in a standard tool-role message to feed back to the model.
+    
+    Args:
+        tool_calls (list[dict]): A list of tool call dictionary objects.
+        
+    Returns:
+        list[dict]: A list of message objects containing the execution results.
+    """
     tool_messages: list[dict] = []
 
     for call in tool_calls:
@@ -302,6 +422,19 @@ def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
                     _print_status("🎵", f"Opening Spotify: [dim]{fn_args.get('query', '')}[/]", "yellow")
                     result = handler(**fn_args)
                     _print_status("✓", "Spotify action complete — synthesizing answer…", "green")
+                elif fn_name == "open_app":
+                    _print_status("🚀", f"Opening app: [dim]{fn_args.get('app_name', '')}[/]", "yellow")
+                    result = handler(**fn_args)
+                    _print_status("✓", "App launch request sent — synthesizing answer…", "green")
+                elif fn_name == "launch_apps":
+                    names = ", ".join(str(value) for value in fn_args.get("app_names", []))
+                    _print_status("🚀", f"Opening apps: [dim]{names}[/]", "yellow")
+                    result = handler(**fn_args)
+                    _print_status("✓", "App launch requests processed — synthesizing answer…", "green")
+                elif fn_name == "open_terminal_at_path":
+                    _print_status("💻", f"Opening terminal at: [dim]{fn_args.get('path', '')}[/]", "yellow")
+                    result = handler(**fn_args)
+                    _print_status("✓", "Terminal launch request sent — synthesizing answer…", "green")
                 else:
                     _print_status("⚙️", f"Executing {fn_name}…", "yellow")
                     result = handler(**fn_args)
@@ -310,7 +443,7 @@ def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
                 _print_status("❌", f"Error executing {fn_name}: {e}", "red")
                 result = json.dumps({"error": f"Tool execution failed: {str(e)}"})
 
-        tool_messages.append({"role": "tool", "content": result})
+        tool_messages.append({"role": "tool", "tool_name": fn_name, "content": result})
 
     return tool_messages
 
@@ -363,7 +496,16 @@ _VAULT_HELP = f"""
 
 
 def _handle_set(args: str, session: dict, history: list[dict]) -> None:
-    """Handle /set sub-commands."""
+    """Handle /set sub-commands.
+    
+    Parses user input to modify session state like toggling flags (verbose, history)
+    or updating underlying model options (temperature, top_p).
+    
+    Args:
+        args (str): The raw arguments passed after the '/set ' command.
+        session (dict): The current session dictionary containing state.
+        history (list[dict]): The conversation history list.
+    """
     parts = args.strip().split(None, 1)
     if not parts:
         _console.print(f"[red]Usage: /set <subcommand> [args][/]  [dim](type /help for details)[/]\n")
@@ -478,7 +620,16 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
 
 
 def _handle_show(args: str, session: dict, history: list[dict]) -> None:
-    """Handle /show sub-commands."""
+    """Handle /show sub-commands.
+    
+    Allows the user to print the current session state, such as active parameters,
+    the system prompt, or hardware/model info.
+    
+    Args:
+        args (str): The string following the '/show ' command.
+        session (dict): The active session dictionary.
+        history (list[dict]): The conversation history list.
+    """
     sub = args.strip().lower() or "parameters"
 
     if sub == "parameters":
@@ -535,7 +686,11 @@ def _handle_show(args: str, session: dict, history: list[dict]) -> None:
 
 
 def _list_saved_sessions() -> list[str]:
-    """Return a sorted list of session file paths (newest first)."""
+    """Return a sorted list of session file paths (newest first).
+    
+    Returns:
+        list[str]: A list of absolute file paths to saved sessions.
+    """
     if not os.path.isdir(_SESSIONS_DIR):
         return []
     files = glob.glob(os.path.join(_SESSIONS_DIR, "*.json"))
@@ -544,7 +699,13 @@ def _list_saved_sessions() -> list[str]:
 
 
 def _handle_save(args: str, session: dict, history: list[dict]) -> None:
-    """Handle /save [name] — persist current session to a JSON file."""
+    """Handle /save [name] — persist current session to a JSON file.
+    
+    Args:
+        args (str): Optional name to use for the saved file.
+        session (dict): The active session data to save.
+        history (list[dict]): The conversation history to save.
+    """
     os.makedirs(_SESSIONS_DIR, exist_ok=True)
 
     name = args.strip()
@@ -584,7 +745,15 @@ def _handle_save(args: str, session: dict, history: list[dict]) -> None:
 
 
 def _handle_load(args: str, session: dict, history: list[dict]) -> None:
-    """Handle /load [name|index] — load a previously saved session."""
+    """Handle /load [name|index] — load a previously saved session.
+    
+    Replaces the current session state and history with the loaded data.
+    
+    Args:
+        args (str): The index or partial name of the session to load.
+        session (dict): The active session data dict to update.
+        history (list[dict]): The conversation history list to update.
+    """
     saved = _list_saved_sessions()
     arg = args.strip()
 
@@ -662,7 +831,19 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
 
 
 def _extract_option(tokens: list[str], names: tuple[str, ...], default: str | None = None) -> str | None:
-    """Remove and return a string option from a shlex token list."""
+    """Remove and return a string option from a shlex token list.
+    
+    Scans for exact matches (e.g. `--collection value`) or inline matches
+    (e.g. `--collection=value`). Mutates the tokens list.
+    
+    Args:
+        tokens (list[str]): The list of parsed argument strings.
+        names (tuple[str, ...]): The names/aliases of the option to find.
+        default (str | None): The value to return if not found.
+        
+    Returns:
+        str | None: The extracted value, or the default.
+    """
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -682,7 +863,15 @@ def _extract_option(tokens: list[str], names: tuple[str, ...], default: str | No
 
 
 def _extract_flag(tokens: list[str], names: tuple[str, ...]) -> bool:
-    """Remove and return whether any boolean flag exists in a shlex token list."""
+    """Remove and return whether any boolean flag exists in a shlex token list.
+    
+    Args:
+        tokens (list[str]): The list of parsed argument strings.
+        names (tuple[str, ...]): Flag names to check for.
+        
+    Returns:
+        bool: True if flag was present and removed, False otherwise.
+    """
     for index, token in enumerate(tokens):
         if token in names:
             del tokens[index]
@@ -691,6 +880,15 @@ def _extract_flag(tokens: list[str], names: tuple[str, ...]) -> bool:
 
 
 def _call_tool_json(tool_name: str, **kwargs) -> dict:
+    """Helper method to invoke a tool locally and ensure the output is a dict.
+    
+    Args:
+        tool_name (str): Tool function name to execute.
+        **kwargs: Arguments to pass to the tool.
+        
+    Returns:
+        dict: The tool result parsed as JSON, or an error dict.
+    """
     handler = TOOL_DISPATCH.get(tool_name)
     if handler is None:
         return {"error": f"Tool not found: {tool_name}"}
@@ -709,6 +907,15 @@ def _call_tool_json(tool_name: str, **kwargs) -> dict:
 
 
 def _format_match_snippet(text: str | None, max_chars: int = 260) -> str:
+    """Format search match text into a single-line abbreviated snippet.
+    
+    Args:
+        text (str | None): Raw text to format.
+        max_chars (int): Max allowed character length.
+        
+    Returns:
+        str: A neat, collapsed snippet.
+    """
     snippet = re.sub(r"\s+", " ", (text or "")).strip()
     if len(snippet) > max_chars:
         snippet = snippet[:max_chars - 3].rstrip() + "..."
@@ -716,7 +923,14 @@ def _format_match_snippet(text: str | None, max_chars: int = 260) -> str:
 
 
 def _handle_vault(args: str) -> None:
-    """Handle /vault sub-commands."""
+    """Handle /vault sub-commands.
+    
+    Interacts directly with the vault tools for querying, indexing, and deleting
+    local document context.
+    
+    Args:
+        args (str): The raw string arguments passed to the vault command.
+    """
     try:
         parts = shlex.split(args)
     except ValueError as exc:
@@ -921,7 +1135,16 @@ def _handle_vault(args: str) -> None:
 
 
 def _handle_command(cmd: str, session: dict, history: list[dict]) -> bool | None:
-    """Handle a slash command. Returns True if handled, None to quit."""
+    """Handle a slash command by delegating to specific sub-handlers. 
+    
+    Args:
+        cmd (str): The full command string input by the user.
+        session (dict): The current application state and configuration.
+        history (list[dict]): The conversation history.
+        
+    Returns:
+        bool | None: True if handled and should continue, None to quit.
+    """
     parts = cmd.strip().split(None, 1)
     base = parts[0].lower()
     rest = parts[1] if len(parts) > 1 else ""
@@ -968,7 +1191,12 @@ def _handle_command(cmd: str, session: dict, history: list[dict]) -> bool | None
 # ── Main loop ─────────────────────────────────────────────────────────
 
 def run() -> None:
-    """Run the interactive agent loop."""
+    """Run the interactive agent loop.
+    
+    This acts as the primary entry point for terminal interaction.
+    Initializes state, parses user input, handles commands, constructs history,
+    and runs the streaming generator loop.
+    """
     import subprocess
     default_system_prompt = ""
     try:
@@ -994,8 +1222,9 @@ def run() -> None:
     while True:
         # ── User input ────────────────────────────────────────────────
         try:
-            user_input = _console.input("[green bold]>>> [/]").strip()
+            user_input = read_user_input()
         except EOFError:
+            # Exit loop if EOF (Ctrl+D) is encountered
             break
 
         if not user_input:
@@ -1057,7 +1286,8 @@ def run() -> None:
         if session["history"]:
             history.append({"role": "user", "content": user_input})
             # Trim history to keep prompt size bounded for consistent tok/s
-            messages_to_send = _trim_history(history)
+            num_ctx = session["options"].get("num_ctx", 8192)
+            messages_to_send = _trim_history(history, num_ctx)
         else:
             messages_to_send = []
             if history and history[0].get("role") == "system":
@@ -1088,10 +1318,27 @@ def run() -> None:
             if session["history"]:
                 history.extend(tool_results)
                 # Trim history to keep follow-up requests within token budget
-                messages_to_send = _trim_history(history)
+                num_ctx = session["options"].get("num_ctx", 8192)
+                reminder = {
+                    "role": "user",
+                    "content": (
+                        "Continue the current turn using the tool result above. Answer this "
+                        "original request directly; do not ask the user to repeat it:\n"
+                        f"{user_input}"
+                    ),
+                }
+                messages_to_send = _trim_history([*history, reminder], num_ctx)
             else:
                 messages_to_send.append(assistant_msg)
                 messages_to_send.extend(tool_results)
+                messages_to_send.append({
+                    "role": "user",
+                    "content": (
+                        "Continue the current turn using the tool result above. Answer this "
+                        "original request directly; do not ask the user to repeat it:\n"
+                        f"{user_input}"
+                    ),
+                })
 
             # Follow-up call after tool results — also streamed
             assistant_msg = _stream_thinking_response(
@@ -1105,3 +1352,7 @@ def run() -> None:
             )
             if session["history"]:
                 history.append(assistant_msg)
+                
+        # ── Trigger automatic history compaction in background ──────
+        if session["history"]:
+            _check_and_compact_history(history, session)

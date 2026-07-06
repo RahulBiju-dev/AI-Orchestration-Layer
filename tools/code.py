@@ -1,5 +1,17 @@
+"""
+tools/code.py - Source code reading and viewing tool.
+
+This module provides functionality to read and display source code files
+with line numbers, handling truncation for very large files. It also allows
+scanning directories for files matching specific extensions.
+"""
+
 import json
 import os
+
+MAX_OUTPUT_CHARS = 25000
+MAX_SCAN_FILES = 1000
+SKIP_DIRECTORIES = {".git", ".chroma", ".venv", "venv", "node_modules", "dist", "build", "__pycache__"}
 
 # Comprehensive supported source code file extensions covering all common languages
 SUPPORTED_EXTENSIONS = {
@@ -87,48 +99,71 @@ SUPPORTED_EXTENSIONS = {
 
 
 def _read_single_file(file_path: str, lines: str | None = None) -> dict:
-    """Helper function to read a single file and return structured data."""
+    """
+    Read a single source code file and return structured data including its contents.
+    
+    This helper function reads the file line by line, applies any requested line
+    ranges, and prepends line numbers to the output. It also enforces a size limit
+    on the returned output string to avoid overwhelming output.
+    
+    Args:
+        file_path (str): The path to the file to read.
+        lines (str | None): An optional line range string (e.g., "10-20" or "42").
+            If None, the entire file is processed.
+            
+    Returns:
+        dict: A dictionary containing the file metadata and its contents (or error).
+            Keys on success: "file", "extension", "total_lines", "displayed_lines", "code".
+            Keys on failure: "error".
+    """
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            file_lines = f.readlines()
-
-        # Parse line range if provided
-        start_line = 1
-        end_line = len(file_lines)
-        
+        start_line, requested_end = 1, None
         if lines:
             try:
-                if "-" in lines:
-                    start_line, end_line = map(int, lines.split("-"))
-                    start_line = max(1, start_line)
-                    end_line = min(len(file_lines), end_line)
+                raw = str(lines).strip()
+                if "-" in raw:
+                    start_line, requested_end = (int(value.strip()) for value in raw.split("-", 1))
+                    if start_line > requested_end:
+                        start_line, requested_end = requested_end, start_line
                 else:
-                    start_line = int(lines)
-                    end_line = start_line
-            except ValueError:
+                    start_line = requested_end = int(raw)
+                if start_line < 1 or (requested_end is not None and requested_end < 1):
+                    raise ValueError
+            except (TypeError, ValueError):
                 return {"error": f"Invalid line range format: {lines}. Use '10-20' or '10'."}
 
-        # Build output with line numbers
         output_lines = []
-        for i in range(start_line - 1, end_line):
-            if i < len(file_lines):
-                line_num = i + 1
-                line_content = file_lines[i].rstrip("\n")
-                output_lines.append(f"{line_num:4d} | {line_content}")
+        output_chars = 0
+        truncated = False
+        total_lines = 0
+        last_displayed = start_line - 1
+        with open(file_path, "r", encoding="utf-8") as stream:
+            for line_number, line_content in enumerate(stream, start=1):
+                total_lines = line_number
+                if line_number < start_line or (requested_end is not None and line_number > requested_end):
+                    continue
+                rendered = f"{line_number:4d} | {line_content.rstrip(chr(10) + chr(13))}"
+                if output_chars + len(rendered) + 1 <= MAX_OUTPUT_CHARS:
+                    output_lines.append(rendered)
+                    output_chars += len(rendered) + 1
+                    last_displayed = line_number
+                else:
+                    truncated = True
 
+        if start_line > total_lines and total_lines > 0:
+            return {"error": f"Line range starts after end of file. This file has {total_lines} line(s)."}
         code_output = "\n".join(output_lines)
-
-        # Add truncation notice if file is too large
-        if len(code_output) > 25000:
-            code_output = code_output[:25000] + f"\n\n...[File truncated due to size limit. Showing first 25000 characters.]"
+        if truncated:
+            code_output += f"\n\n...[Output truncated at {MAX_OUTPUT_CHARS} characters.]"
 
         file_ext = os.path.splitext(file_path)[1].lower()
         return {
             "file": file_path,
             "extension": file_ext if file_ext else os.path.basename(file_path),
-            "total_lines": len(file_lines),
-            "displayed_lines": f"{start_line}-{end_line}",
-            "code": code_output
+            "total_lines": total_lines,
+            "displayed_lines": f"{start_line}-{last_displayed}" if output_lines else "none",
+            "code": code_output,
+            "truncated": truncated,
         }
 
     except UnicodeDecodeError:
@@ -138,7 +173,8 @@ def _read_single_file(file_path: str, lines: str | None = None) -> dict:
 
 
 def view_code(file_path: str, lines: str | None = None, extension: str | None = None) -> str:
-    """View and read source code files with line numbers, or scan folders for files.
+    """
+    View and read source code files with line numbers, or scan folders for files.
 
     Args:
         file_path: Path to a source code file or folder.
@@ -158,23 +194,32 @@ def view_code(file_path: str, lines: str | None = None, extension: str | None = 
                 "error": f"{file_path} is a directory. Please provide an extension parameter (e.g., '.py', '.js') to scan for files."
             })
 
-        # Normalize extension
-        if not extension.startswith("."):
-            extension = f".{extension}"
+        requested_type = str(extension).strip()
+        special_name = requested_type if requested_type in {"Dockerfile", "Makefile"} else None
+        if not special_name:
+            extension = requested_type if requested_type.startswith(".") else f".{requested_type}"
+            extension = extension.lower()
 
         # Scan folder recursively for files with given extension
         matching_files = []
-        for root, dirs, files in os.walk(file_path):
+        scan_truncated = False
+        for root, dirs, files in os.walk(file_path, followlinks=False):
+            dirs[:] = sorted(name for name in dirs if name not in SKIP_DIRECTORIES and not os.path.islink(os.path.join(root, name)))
             for file in files:
-                if file.endswith(extension) or (extension == "Dockerfile" and file == "Dockerfile") or (extension == "Makefile" and file == "Makefile"):
+                if (special_name and file == special_name) or (not special_name and file.lower().endswith(extension)):
                     matching_files.append(os.path.join(root, file))
+                    if len(matching_files) >= MAX_SCAN_FILES:
+                        scan_truncated = True
+                        break
+            if scan_truncated:
+                break
 
         matching_files.sort()
 
         if not matching_files:
             return json.dumps({
                 "folder": file_path,
-                "extension": extension,
+                "extension": special_name or extension,
                 "files_found": 0,
                 "message": f"No files with extension '{extension}' found in {file_path}"
             })
@@ -207,16 +252,18 @@ def view_code(file_path: str, lines: str | None = None, extension: str | None = 
 
             return json.dumps({
                 "folder": file_path,
-                "extension": extension,
+                "extension": special_name or extension,
                 "files_found": len(matching_files),
+                "scan_truncated": scan_truncated,
                 "files": files_data
             })
         else:
             # Just list the files
             return json.dumps({
                 "folder": file_path,
-                "extension": extension,
+                "extension": special_name or extension,
                 "files_found": len(matching_files),
+                "scan_truncated": scan_truncated,
                 "total_size_kb": round(total_size / 1024, 2),
                 "file_list": file_info,
                 "message": "Too many or too large files to read all at once. To view a specific file, use view_code with the full file path."
@@ -229,7 +276,7 @@ def view_code(file_path: str, lines: str | None = None, extension: str | None = 
     basename = os.path.basename(file_path)
     if basename not in SUPPORTED_EXTENSIONS and file_ext not in SUPPORTED_EXTENSIONS:
         return json.dumps({
-            "error": f"Unsupported file type: {file_ext if file_ext else basename}. Supported types: {', '.join(sorted(list(SUPPORTED_EXTENSIONS)[:20]))}... (and {len(SUPPORTED_EXTENSIONS) - 20} more)"
+            "error": f"Unsupported file type: {file_ext if file_ext else basename}. Supported types: {', '.join(sorted(SUPPORTED_EXTENSIONS)[:20])}... (and {len(SUPPORTED_EXTENSIONS) - 20} more)"
         })
 
     result = _read_single_file(file_path, lines)

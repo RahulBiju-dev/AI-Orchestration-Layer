@@ -1,6 +1,8 @@
 # AI CLI Agent
 
-A modular, tool-augmented local AI agent built with Python and [Ollama](https://ollama.com/). It runs entirely in your terminal — no cloud APIs, no telemetry, no subscriptions. The agent wraps a customised [Gemma 4](https://ai.google.dev/gemma) model with an autonomous tool-calling loop, real-time streaming output with Markdown/LaTeX rendering, and a persistent RAG (Retrieval-Augmented Generation) vault for long-term document memory.
+A modular, tool-augmented local AI agent built with Python and [Ollama](https://ollama.com/). Inference, conversation storage, and document memory stay local; optional integrations such as Google Calendar and Google Tasks contact their provider only after user-authorized OAuth. The agent wraps a customised [Gemma 4](https://ai.google.dev/gemma) model with an autonomous tool-calling loop, real-time streaming output, and a persistent RAG (Retrieval-Augmented Generation) vault for long-term document memory.
+
+By default the agent launches a **modern browser-based Web UI** with live streaming, collapsible thinking panels, and an interactive sidebar. The classic terminal interface is still available via `--cli`.
 
 ---
 
@@ -13,10 +15,17 @@ A modular, tool-augmented local AI agent built with Python and [Ollama](https://
   - [RAG Vault](#rag-vault--retrieval-augmented-generation)
   - [Context Window Management](#context-window-management)
 - [Features](#features)
+  - [Web UI](#web-ui)
+  - [Terminal Interface](#terminal-interface)
+  - [Tool Suite](#tool-suite)
+  - [Codebase Indexer](#codebase-indexer)
+  - [Google Calendar and Tasks](#google-calendar-and-tasks)
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Usage](#usage)
+  - [Web UI (Default)](#web-ui-default)
+  - [Terminal CLI](#terminal-cli)
   - [Slash Commands](#slash-commands)
   - [Vault Commands](#vault-commands)
   - [Runtime Configuration](#runtime-configuration)
@@ -102,7 +111,7 @@ Documents ──→ Chunk ──→ Embed ──→ ChromaDB
 
 2. **Embedding:** Each chunk is converted into a dense vector (a list of floating-point numbers) using an embedding model (`embeddinggemma` by default, running locally via Ollama). This vector captures the *semantic meaning* of the text — chunks about similar topics will have vectors that are close together in the embedding space, regardless of exact wording.
 
-3. **Storage:** Vectors and their source metadata (file path, chunk index, character offsets) are stored in [ChromaDB](https://www.trychroma.com/), a persistent vector database that lives in the project's `.chroma/` directory.
+3. **Storage:** Vectors and their source metadata (file path, chunk index, character offsets) are stored in [ChromaDB](https://www.trychroma.com/). Runtime data lives under `~/.selene-agent/` by default (`.chroma/` for vectors and `vaults/` for files); set `SELENE_DATA_DIR` to relocate both.
 
 4. **Retrieval:** When the agent (or user via `/vault search`) queries the vault, the query text is embedded with the same model, and ChromaDB performs an **approximate nearest neighbour (ANN) search** to find the top-K most semantically similar chunks.
 
@@ -121,7 +130,7 @@ The **context window** (`num_ctx`) is the maximum number of tokens the model can
 The agent manages this automatically:
 
 - **Default `num_ctx` is 8192** — sized to fit the model + KV cache entirely in GPU VRAM on consumer GPUs (4-8GB).
-- **History trimming** keeps the conversation context within a ~6000 token budget. When the history grows too large, the oldest messages are dropped while preserving the system prompt and the most recent exchanges.
+- **History trimming and compaction** keep the prompt within the active token budget. Near 90% usage, older turns are summarized and passed through the context optimizer while system instructions and recent exchanges remain intact; hard trimming remains the final bound.
 - Both values can be overridden at runtime via `/set parameter num_ctx <value>`.
 
 ---
@@ -131,7 +140,28 @@ The agent manages this automatically:
 ### Core
 - **Fully local:** All inference runs through Ollama on your machine. No cloud dependencies for core functionality.
 - **Custom model:** Uses a `Modelfile` to wrap Gemma 4 (8B, Q4_K_M quantisation) with a tailored system prompt and optimised sampling parameters.
-- **Thinking visibility:** Streams the model's internal chain-of-thought reasoning before the final answer. Toggle with `/set think` / `/set nothink`.
+- **Thinking visibility:** Streams the model's internal chain-of-thought reasoning before the final answer.
+- **Dual interface:** Launches the Web UI by default; pass `--cli` for the classic terminal experience.
+
+### Web UI
+
+The default interface — launch with `python main.py` and the agent opens in your browser automatically.
+
+- **Cyberpunk-Obsidian aesthetic** — deep charcoal backgrounds, glassmorphism cards, and neon glowing accents in Cyan, Magenta, Teal, and Amber.
+- **Enhanced 3D Elements** — realistic layered shadows (`--shadow-subtle`, `--shadow-heavy`) and tactile hover/active states that simulate physical lift for cards and message bubbles.
+- **Context window usage indicators** — visual tracking of the model's context capacity in real time.
+- **Live SSE streaming** — tokens and thinking blocks are pushed to the browser in real-time via Server-Sent Events; no polling, no page reloads.
+- **Smart generation states** — dynamic site behaviour that intelligently adapts while a response is actively generating.
+- **Collapsible thinking panel** — while the model reasons, a dedicated magenta panel shows the chain-of-thought with animated dots. After completion it collapses into a togglable bar (DeepSeek/Gemini style).
+- **Interactive tool cards** — each tool invocation renders a visual card: `⟳ Running [tool]` → `✓ Executed [tool]`. Click the header to expand raw JSON parameters and output.
+- **Sidebar control panel:**
+  - Real-time sliders for `Temperature`, `Top-P`, and `Top-K`
+  - System-prompt override with a one-click reset to default
+  - Toggles for conversation history and model thinking
+  - Automatically saved conversations with agent-generated 2–3-word sidebar titles
+  - Save / restore named sessions without leaving the browser
+- **Markdown & code highlighting** — responses are rendered with `marked.js` and syntax-highlighted with `highlight.js`.
+- **Responsive layout** — sidebar collapses on narrow viewports; works on desktop and tablet.
 
 ### Tool Suite
 The agent autonomously decides when to call tools based on the user's query:
@@ -141,8 +171,9 @@ The agent autonomously decides when to call tools based on the user's query:
 | 🔍 **Web Search** | Real-time DuckDuckGo search with adaptive depth (easy/medium/hard) for current events, docs, and post-cutoff information |
 | 🌐 **Browser** | Open URLs or search queries in the system's default browser |
 | 💻 **Code Viewer** | Read source files with line numbers; scan directories by extension |
+| 🧬 **Codebase Indexer** | Persistently index an entire repository, auto-refresh it after 24 hours, and retrieve grounded code context for architecture questions, fault finding, and optimisation |
 | 📄 **Document Reader** | Extract text from PDFs (`pypdf`) and Word docs (`python-docx`) with page/chunk/query navigation |
-| 📂 **File Manager** | Read text files with line range and search controls; create new files (auto-vaulted to `vaults/`) |
+| 📂 **File Manager** | Stream line ranges, navigate/search bounded text files, and create non-overwriting files auto-vaulted under `~/.selene-agent/vaults/` |
 | 🎵 **Spotify** | Search and play songs natively on Windows, macOS, and Linux |
 | 👁️ **Vision Describer** | Describes images, diagrams, and slides using the local `moondream` vision model |
 | 🗄️ **Vault Index** | Chunk and embed local files into ChromaDB for semantic search; auto-registers aliases |
@@ -150,6 +181,114 @@ The agent autonomously decides when to call tools based on the user's query:
 | 🗑️ **Vault Delete** | Remove indexed entries by source path or delete entire collections |
 | 🏷️ **Vault Aliases** | List registered human-friendly names that map to vault collections |
 | 📓 **Obsidian Notes** | Create structured Obsidian-optimised notes with YAML frontmatter, WikiLinks, and version control |
+| 🕸️ **Knowledge Graph Builder** | Map typed relationships and discover evidence-traceable causal paths, conflicts, central concepts, and feedback cycles |
+| 📈 **Simulation Runner** | Execute recurrence, Euler, scenario, and Monte Carlo models with deterministic seeds and distribution summaries |
+| 🔌 **API Orchestrator** | Manage API auth refresh, bounded retries, deprecation signals, response limits, and endpoint failover |
+| 🧠 **Context Memory Optimizer** | Compact conversations while preserving instructions, recent turns, decisions, constraints, facts, and links |
+| 🧭 **Reasoning Chain Debugger** | Audit explicit claim/evidence graphs for unsupported leaps, missing references, cycles, and confidence problems |
+| ⚙️ **Automated Routine Executor** | Define natural-language workflow macros, preview their actions, and execute approved local commands/apps/URLs |
+| 🚀 **App Launcher** | Launch up to ten installed desktop apps by display name, with confirmation and command-injection safeguards |
+| 🕒 **Current Date & Time** | Return the current local date/time or convert it to a requested IANA timezone |
+| 💻 **Terminal Launcher** | Open a supported terminal at an existing directory, with explicit confirmation and no command execution |
+| 📅 **Google Calendar** | List calendars and upcoming events, search a time range, and create or edit events; deletion requires explicit confirmation |
+| ✅ **Google Tasks** | List task lists and tasks, create tasks with notes or due dates, and update status or details; deletion requires explicit confirmation |
+
+Legacy tools have also been hardened for current workloads: web results retain source URLs, code scans skip dependency/cache trees and cap traversal, binary documents route through the document reader, PDF vision runs one page at a time, embedding vectors are shape/number validated, and failed re-indexing preserves the previous good vault records. Set `include_vision=false` on `index_vault` for substantially faster text-only PDF indexing.
+
+### Codebase Indexer
+
+`codebase_indexer` gives the agent persistent, repository-wide context for architecture questions, implementation tracing, fault finding, security review, and optimisation. Point the agent at a local repository and ask naturally, for example: *“In `/projects/shop`, trace checkout from the HTTP endpoint to the database and identify likely failure points.”*
+
+The tool has three actions:
+
+| Action | Behaviour |
+|--------|-----------|
+| `query` | Refreshes when necessary, then retrieves the most relevant code and repository-map chunks for the model to analyse. This is the default. |
+| `index` | Explicitly indexes or refreshes a repository. Set `force_reindex=true` to bypass the cooldown when querying. |
+| `status` | Reports the collection name, last successful index time, age, and next refresh time without indexing. |
+
+Each absolute repository path receives its own stable ChromaDB collection. On the first reference, the tool recursively indexes supported source, configuration, and documentation files, records symbols and line ranges, and builds a chunked repository map. Later references reuse that collection. The first reference after the index becomes 24 hours old automatically refreshes it; this is a rolling 24-hour cooldown rather than a calendar-day reset.
+
+Refreshes update changed files and remove chunks for deleted files. If embedding a particular file fails, its previous valid chunks are retained. Simultaneous first-use queries share a refresh lock so they do not duplicate the full embedding job.
+
+Common dependency, cache, VCS, and build directories—such as `.git`, `node_modules`, `.venv`, `dist`, `build`, and `target`—are excluded. A single file is capped at 2 MiB, with repository caps of 5,000 files and 50 MiB of source text. These bounds keep accidental generated trees from overwhelming local Ollama and ChromaDB.
+
+Indexes use the same local embedding model and Chroma storage as the document vault. Refresh metadata is stored in `~/.selene-agent/codebase_indexes.json`; vectors remain under `~/.selene-agent/.chroma/`. `SELENE_DATA_DIR` relocates both.
+
+### Google Calendar and Tasks
+
+The `google_workspace` tool exposes Google Calendar and Google Tasks as two user-facing capabilities through one encrypted OAuth connection.
+
+| Capability | Supported operations |
+|------------|----------------------|
+| **Google Calendar** | Check connection status, list calendars, list/search events by time range, list upcoming birthdays with annual dates normalized into the requested window, create events, edit events, and delete confirmed events |
+| **Google Tasks** | List task lists, list tasks with optional completed items, create tasks, edit titles/notes/due dates/status, and delete confirmed tasks |
+
+Event times accept RFC 3339 date-times or `YYYY-MM-DD` for all-day events. Task due dates accept either form; Google Tasks retains the date portion. Calendar IDs default to `primary`, while task-list IDs default to `@default`. Selene sends attendee updates when an event with guests is created, changed, or deleted.
+
+On first use, Selene opens Google's Desktop OAuth flow in the browser. The OAuth client configuration, access token, and refresh token are stored as AES-GCM ciphertext in `~/.selene-agent/google_oauth.enc` (or `$SELENE_DATA_DIR/google_oauth.enc`). The encryption key is kept in the OS keyring where available, with a mode-`0600` local fallback for headless systems. Refreshed tokens are immediately re-encrypted; credential values are redacted from tool errors.
+
+Setup:
+
+1. Enable the **Google Calendar API** and **Google Tasks API** in a Google Cloud project.
+2. Configure the OAuth consent screen, create a **Desktop app** OAuth client, and download its JSON outside this repository.
+3. Install dependencies with `pip install -r requirements.txt`.
+4. Tell Selene: `Connect my Google account using /absolute/path/to/client_secret.json`.
+5. After Selene confirms the encrypted credential was saved, delete the downloaded source JSON.
+
+Example requests:
+
+- `What is on my primary calendar tomorrow?`
+- `Create a project review on Monday from 2 PM to 3 PM in Asia/Kolkata.`
+- `Show my incomplete Google Tasks.`
+- `Add “submit expense report” to my default task list, due Friday.`
+
+### Advanced Tool Safety Model
+
+The advanced tools are deliberately bounded:
+
+- Graph inferences include the exact supporting edge path; the builder does not invent edges from labels.
+- Simulation equations use a restricted arithmetic parser—never Python `eval`—and workloads are capped. Forecasts remain conditional on the supplied assumptions.
+- API credentials are referenced by environment-variable name rather than passed as literal secrets. Retries, timeouts, response sizes, and failover endpoints are capped.
+- Memory optimisation is extractive and reports before/after token estimates. Automatic background compaction uses the same optimizer after generating its factual summary.
+- The reasoning debugger audits supplied claims, dependencies, assumptions, and evidence IDs. It does not expose private model chain-of-thought; it produces an accountable evidence graph and Mermaid diagram.
+- Routines live in `~/.selene-agent/routines.json` (or `$SELENE_DATA_DIR/routines.json`) so they persist across conversations, application restarts, and upgrades. Existing routines from `.selene/routines.json` are imported automatically. Routine actions can invoke registered agent tools; app actions are dispatched through `app_launcher.py`, including batched `launch_apps` calls. Use `action=show` (or `dry_run=true`) for the required preview of command, URL, and general tool runs, then use `action=run` with `confirmed=true` after user approval. App/delay-only routines can receive persistent approval when defined, allowing an exact saved trigger to run them later without another prompt. Commands use argument arrays with `shell=False` and remain in the project workspace.
+- Google Calendar and Tasks use a first-run Desktop OAuth browser flow. The downloaded client configuration and refresh token are then stored together as AES-GCM ciphertext at `~/.selene-agent/google_oauth.enc` (or under `$SELENE_DATA_DIR`). Selene keeps the encryption key in the OS keyring where available; headless systems fall back to a mode-`0600` key beside the ciphertext. The downloaded source JSON is never copied into the repository and can be deleted after authorization.
+- App actions accept only installed application display names. Shells, terminals, paths, URLs, command flags, and arbitrary PATH binaries are rejected; all launches are detached and shell-free.
+
+Example simulation model:
+
+```json
+{
+  "variables": {"inventory": 100, "demand": 12},
+  "equations": {
+    "inventory": "max(0, inventory - demand)",
+    "demand": "max(0, demand + normal(0, 1.5))"
+  },
+  "steps": 30,
+  "trials": 200,
+  "seed": 42
+}
+```
+
+Example routine definition:
+
+```json
+{
+  "action": "define",
+  "name": "morning workspace",
+  "routine": {
+    "description": "Open Antigravity and VS Code for the morning workspace.",
+    "allow_automatic": true,
+    "triggers": ["start my morning"],
+    "actions": [
+      {"type": "open_app", "app_name": "Antigravity"},
+      {"type": "open_app", "app_name": "VS Code"}
+    ]
+  },
+  "confirmed": true
+}
+```
 
 ### Terminal Interface
 - **Rich Markdown streaming** via `rich.Live` with automatic scroll management
@@ -163,48 +302,67 @@ The agent autonomously decides when to call tools based on the user's query:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        main.py                              │
-│                   (entry point, model init)                 │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────┐
-│                    agent/core.py                             │
-│  ┌───────────┐  ┌──────────────┐  ┌────────────────────────┐ │
-│  │ Chat Loop │ →│ Tool Dispatch│ →│ Streaming + Thinking   │ │
-│  │ /commands │  │ (iterative)  │  │ History Trimming       │ │
-│  └───────────┘  └──────┬───────┘  └────────────────────────┘ │
-│                        │                                     │
-│  ┌─────────────────────┴──────────────────────────────────┐  │
-│  │                  Session Manager                       │  │
-│  │  /save, /load, /set, /show — JSON persistence          │  │
-│  └────────────────────────────────────────────────────────┘  │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-          ┌────────────────┼────────────────┐
-          ▼                ▼                ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐
-│agent/terminal│  │tools/registry│  │    Ollama Server     │
-│  Spinner     │  │  TOOL_SCHEMAS│  │ (localhost:11434)    │
-│  LaTeX math  │  │  TOOL_DISP.  │  │  selene model        │
-│  Markdown    │  │              │  │  embeddinggemma      │
-└──────────────┘  └──────┬───────┘  │  moondream           │
-                         │          └──────────────────────┘
-     ┌───────┬───────┬───┴───┬────────┬──────────┬──────────┐
-     ▼       ▼       ▼       ▼        ▼          ▼          ▼
- search   browser   file   document  spotify   vision    vault
-   .py      .py     .py      .py      .py    describer (index/search/
-                                        .py    embeddings)
-                                  obsi_vault      │
-                                  _writer.py      ▼
-                                            ┌──────────┐
-                                            │ ChromaDB │
-                                            │ (.chroma)│
-                                            └──────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                          main.py                                │
+│          (entry point — model init, CLI/Web routing)            │
+└────────────────────┬──────────────────────┬─────────────────────┘
+                     │  --cli flag          │  default
+                     ▼                      ▼
+        ┌────────────────────┐   ┌─────────────────────────────┐
+        │   agent/core.py    │   │       agent/web.py           │
+        │  (Terminal CLI)    │   │  (Threaded HTTP + SSE)       │
+        │  Chat Loop         │   │  /api/chat   → SSE stream    │
+        │  /commands         │   │  /api/session/*  → JSON      │
+        │  Streaming         │   │  /static/*   → HTML/CSS/JS   │
+        │  Session Mgmt      │   └──────────────┬──────────────┘
+        └────────┬───────────┘                  │
+                 │                              │
+                 └──────────────┬───────────────┘
+                                ▼
+               ┌────────────────────────────────┐
+               │         tools/registry          │
+               │  TOOL_SCHEMAS   TOOL_DISPATCH   │
+               └────────────────┬───────────────┘
+                                │
+     ┌──────┬──────┬────────┬───┴──┬─────────┬───────────┐
+     ▼      ▼      ▼        ▼      ▼         ▼           ▼
+  search  browser  file  document spotify   vision     vault
+  .py     .py      .py   .py      .py    describer  (index/search/
+                                          .py        embeddings)
+                                    obsi_vault          │
+                                    _writer.py           ▼
+                                                  ┌──────────┐
+                                                  │ ChromaDB │
+                                                  │ (.chroma)│
+                                                  └──────────┘
+
+  advanced tools: knowledge graph · simulation · API orchestration
+                  context memory · reasoning audit · routine macros
+                  Google Calendar · Google Tasks
+
+ Browser (Web UI)
+ ┌──────────────────────────────────────────────┐
+ │  index.html  +  style.css  +  app.js          │
+ │  ┌──────────┐  ┌─────────────────────────┐   │
+ │  │ Sidebar  │  │  Chat Panel              │   │
+ │  │ Sliders  │  │  SSE token stream        │   │
+ │  │ Toggles  │  │  Thinking block          │   │
+ │  │ Sessions │  │  Tool cards              │   │
+ │  └──────────┘  └─────────────────────────┘   │
+ └──────────────────────────────────────────────┘
 ```
 
-### Data Flow
+### Data Flow — Web UI
+
+1. Browser opens automatically at `http://localhost:5005` (or next free port)
+2. User message is `POST`ed to `/api/chat`
+3. `web.py` builds the Ollama request with the current session's parameters, history, and tool schemas
+4. If the model returns tool calls, `web.py` executes them via `TOOL_DISPATCH` and yields SSE `tool_*` events to the browser
+5. Thinking tokens arrive as `thinking` SSE events; content tokens as `token` events
+6. `app.js` renders tokens in real time, assembles the thinking panel, and builds tool cards
+7. On completion a `done` SSE event is fired and the response is added to history
+
+### Data Flow — Terminal CLI
 
 1. **User input** enters the chat loop in `agent/core.py`
 2. Slash commands (`/help`, `/save`, `/vault`, etc.) are intercepted and handled locally — they never touch the LLM
@@ -262,12 +420,73 @@ This custom model is cached by Ollama and reused on subsequent runs.
 
 ---
 
+## Building the Desktop App (Electron)
+
+Selene can be built into a standalone desktop application using Electron and PyInstaller. This bundles the Python backend and web UI into a single executable that you can distribute.
+
+> **Note**: The Ollama engine and models (like Gemma 4) are **not** bundled in the app to keep the file size reasonable. Users must have Ollama installed and running on their system.
+
+### Step-by-Step Build Instructions
+
+1. **Install Node.js & Python dependencies**:
+   Ensure you have Node.js installed. Then, install the required packages:
+   ```bash
+   bun install
+   pip install pyinstaller
+   ```
+
+2. **Build the Python Backend**:
+   First, compile the Python code into a standalone executable using the provided PyInstaller spec:
+   ```bash
+   bun run build:backend
+   ```
+   This creates the backend executable inside the `dist/` folder.
+
+3. **Test in Development Mode (Optional)**:
+   You can run the Electron app locally to ensure the backend spawns correctly:
+   ```bash
+   bun start
+   ```
+
+4. **Build the Electron App**:
+   Package the application for your operating system:
+   ```bash
+   bun run build
+   ```
+   The Linux build is written to `dist-electron/Selene-1.0.0.AppImage`, replacing any
+   existing artifact at that path. Other platform binaries are also output to the
+   `dist-electron/` folder.
+
 ## Usage
 
-Start the agent:
+### Web UI (Default)
 
 ```bash
 python main.py
+```
+
+The server binds to port `5005` (or the next free port) and automatically opens your default browser. You'll land on the chat interface immediately — no configuration required.
+
+> **Port:** If `5005` is occupied the agent finds a free port and launches the browser pointing to that port.
+
+**Sidebar controls** (click `⚙` to open):
+
+| Control | Description |
+|---------|-------------|
+| Temperature slider | Adjust response creativity (0.0 – 1.0) |
+| Top-P / Top-K sliders | Fine-tune nucleus and top-k sampling |
+| System prompt | Override or reset the model's instructions |
+| History toggle | Enable / disable conversation memory |
+| Thinking toggle | Show / hide the model's reasoning panel |
+| Save session | Persist the current conversation with a custom name |
+| Load session | Restore any previously saved session |
+
+### Terminal CLI
+
+Pass `--cli` to skip the Web UI and use the classic terminal interface:
+
+```bash
+python main.py --cli
 ```
 
 You'll see the chat prompt:
@@ -337,9 +556,9 @@ The vault provides persistent semantic search over your local documents:
 | `physics_notes.md` | `physics_notes` |
 | Folder `/docs/` | `docs` |
 
-**Auto-vaulting on file creation:** Every file created with the `create_file` tool is automatically saved into the `vaults/` directory (using only the file's basename, regardless of the path specified), indexed into its own ChromaDB collection, and registered with a human-friendly alias. This means you can immediately search any file the agent creates for you without manually indexing it.
+**Auto-vaulting on file creation:** Every file created with `create_file` is saved into `~/.selene-agent/vaults/` by default (using only the basename), indexed into its own ChromaDB collection, and registered with a friendly alias. Existing files are never overwritten. If indexing is temporarily unavailable, file creation still succeeds and reports `indexed: false`.
 
-**Vault Aliases:** Vaults are automatically given friendly aliases derived from the filename. When searching, you can use the original name (e.g., `"physics_notes"`) instead of remembering the sanitized ChromaDB collection name. Aliases are stored in `vaults/.vault_aliases.json` and support exact and substring matching.
+**Vault Aliases:** Vaults are automatically given friendly aliases derived from the filename. When searching, you can use the original name (e.g., `"physics_notes"`) instead of remembering the sanitized ChromaDB collection name. Aliases are atomically stored in `~/.selene-agent/vaults/.vault_aliases.json`; substring resolution is used only when it identifies one unique collection.
 
 **Multimodal Support:** For PDFs, the agent uses `moondream` via Ollama to generate visual descriptions of diagrams and slides. This is integrated directly into the vault indexing pipeline. Ensure you have run `ollama pull moondream` and installed `poppler-utils`.
 
@@ -407,14 +626,19 @@ export OLLAMA_KEEP_ALIVE=30m
 
 ```
 AI-CLI-Agent/
-├── main.py                    # Entry point — model init and launch
+├── main.py                    # Entry point — model init, --cli flag, web launch
 ├── Modelfile                  # Ollama model definition (system prompt, parameters)
 ├── requirements.txt           # Python dependencies
 │
 ├── agent/
 │   ├── __init__.py
-│   ├── core.py                # Chat loop, tool dispatch, streaming, session mgmt
-│   └── terminal.py            # ANSI helpers, spinner, LaTeX renderer, Markdown
+│   ├── core.py                # Terminal chat loop, tool dispatch, streaming, session mgmt
+│   ├── terminal.py            # ANSI helpers, spinner, LaTeX renderer, Markdown
+│   ├── web.py                 # Threaded HTTP server, SSE generator, session/API routes
+│   └── static/
+│       ├── index.html         # Web UI layout — sidebar, chat panel, modals
+│       ├── style.css          # Design system — dark mode, glassmorphism, animations
+│       └── app.js             # Browser controller — SSE stream, tool cards, Markdown render
 │
 ├── tools/
 │   ├── __init__.py
@@ -422,6 +646,7 @@ AI-CLI-Agent/
 │   ├── search.py              # DuckDuckGo web search
 │   ├── browser.py             # System browser control
 │   ├── code.py                # Source code viewer with line numbers
+│   ├── codebase_indexer.py    # Persistent repository indexing and semantic code retrieval
 │   ├── document.py            # PDF/DOCX extraction with chunking
 │   ├── file.py                # Text file read/write with search; auto-vaults created files
 │   ├── spotify.py             # Spotify cross-platform desktop control
@@ -429,19 +654,30 @@ AI-CLI-Agent/
 │   ├── obsi_vault_writer.py   # Obsidian-optimised structured note creation
 │   ├── vault_indexer.py       # Document chunking, ChromaDB indexing, alias registry
 │   ├── vault_search.py        # Vector similarity search with alias resolution
-│   └── vault_embeddings.py    # Ollama embedding API helpers
+│   ├── vault_embeddings.py    # Ollama embedding API helpers
+│   ├── knowledge_graph_builder.py # Typed semantic graph inference
+│   ├── run_simulation.py      # Safe dynamic and Monte Carlo models
+│   ├── api_orchestrator.py    # Resilient authenticated HTTP lifecycle
+│   ├── context_memory_optimizer.py # Long-context compaction
+│   ├── reasoning_chain_debugger.py # Explicit evidence-graph audit
+│   ├── automated_routine_executor.py # Persistent preview-first macros
+│   └── google_workspace.py     # Encrypted Google Calendar/Tasks OAuth integration
 │
 ├── .agents/                   # Agent configuration
 ├── sessions/                  # Saved session JSON files
-├── vaults/                    # Default vault document storage (also Obsidian vault)
-├── .chroma/                   # ChromaDB persistent vector database
 └── .gitignore
 ```
 
+Runtime data is kept outside the checkout in `~/.selene-agent/` by default. This includes conversations, `routines.json`, `google_oauth.enc`, `vaults/`, `.chroma/`, and `codebase_indexes.json`. Override the parent directory with `SELENE_DATA_DIR=/your/path`.
+
 ### Key Design Decisions
 
+- **Web UI is the default** — `python main.py` starts the browser interface; the terminal CLI is opt-in via `--cli`. This keeps the richer interface front-and-centre without breaking existing workflows.
+- **SSE over WebSockets** — Server-Sent Events are used for token streaming because they need only a standard HTTP connection, require no upgrade handshake, and reconnect automatically on drop.
+- **`ThreadingMixIn` HTTP server** — `web.py` uses Python's `socketserver.ThreadingMixIn` so each request (including long-lived SSE connections) runs in its own daemon thread, preventing a slow generation from blocking the session API.
+- **Shared `GLOBAL_STATE`** — a single in-process dict holds history and session parameters, making state trivially accessible across request handlers without an external store.
 - **Tool schemas are compressed** to minimise prompt token overhead — they're sent with every LLM call, so shorter descriptions directly improve prefill speed.
-- **Streaming is throttled** at ~12 FPS to avoid CPU-bound Markdown re-rendering from bottlenecking the token pipeline.
+- **Streaming is throttled** at ~12 FPS in the terminal to avoid CPU-bound Markdown re-rendering from bottlenecking the token pipeline. The Web UI receives every token immediately via SSE.
 - **All regex patterns are pre-compiled** at module load time in `terminal.py`, not on each rendering pass.
 - **History is trimmed** using a token budget heuristic (1 token ≈ 4 characters) to keep prompt size bounded without requiring a tokeniser dependency.
 - **Vault embeddings** use the local `embeddinggemma` model via Ollama's HTTP API, falling back to the Python client if the HTTP endpoint changes.

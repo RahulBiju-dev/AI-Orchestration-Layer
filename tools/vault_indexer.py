@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
+import threading
 from typing import Optional
 
 import chromadb
@@ -23,8 +25,10 @@ SUPPORTED_INDEX_EXTENSIONS = {
 DEFAULT_CHUNK_SIZE = 1800
 DEFAULT_CHUNK_OVERLAP = 250
 DEFAULT_BATCH_SIZE = 16
-CHROMA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".chroma")
-VAULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vaults")
+DATA_DIR = os.path.abspath(os.path.expanduser(os.environ.get("SELENE_DATA_DIR", "~/.selene-agent")))
+CHROMA_DIR = os.path.join(DATA_DIR, ".chroma")
+VAULTS_DIR = os.path.join(DATA_DIR, "vaults")
+_ALIAS_LOCK = threading.RLock()
 
 
 def _json(data: dict) -> str:
@@ -141,60 +145,55 @@ def _strip_frontmatter(text: str) -> str:
 
 
 def extract_pdf_with_vision(path: str) -> tuple[str, dict]:
-    """Extract regular text and visual descriptions page-by-page from a PDF in a memory-safe batching loop."""
+    """Extract PDF text and page images without retaining image batches in RAM."""
     try:
         import pypdf
         from pdf2image import convert_from_path
-        import tempfile
         from tools.vision_describer import describe_image
-        
+
         text_stream = []
+        warnings = []
         with open(path, "rb") as f:
             reader = pypdf.PdfReader(f)
             total_pages = len(reader.pages)
-            
-        chunk_size = 10
-        for i in range(0, total_pages, chunk_size):
-            first_page = i + 1
-            last_page = min(i + chunk_size, total_pages)
-            
-            # Extract regular text using pypdf
-            with open(path, "rb") as f:
-                reader = pypdf.PdfReader(f)
-                for page_num in range(first_page - 1, last_page):
-                    try:
-                        page_text = reader.pages[page_num].extract_text()
-                        if page_text:
-                            text_stream.append(f"--- Page {page_num + 1} Text ---\n{page_text.strip()}\n")
-                    except Exception:
-                        pass
-                        
-            # Extract multimodal vision text
-            try:
-                images = convert_from_path(path, first_page=first_page, last_page=last_page)
-                for img_idx, img in enumerate(images):
-                    page_num = first_page + img_idx
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_img:
-                        temp_img_path = temp_img.name
-                        img.save(temp_img_path, "PNG")
-                    try:
-                        desc = describe_image(temp_img_path)
-                        text_stream.append(f"--- Page {page_num} Visual Description ---\n{desc}\n")
-                    finally:
-                        os.remove(temp_img_path)
-            except Exception as e:
-                text_stream.append(f"Error processing visual descriptions for pages {first_page}-{last_page}: {e}")
-                
+            for page_num, page in enumerate(reader.pages, start=1):
+                try:
+                    page_text = page.extract_text() or ""
+                    if page_text.strip():
+                        text_stream.append(f"--- Page {page_num} Text ---\n{page_text.strip()}\n")
+                except Exception as exc:
+                    warnings.append(f"Page {page_num} text extraction failed: {exc}")
+
+        # Render one page at a time to cap peak memory. paths_only lets Poppler
+        # write directly to a temporary directory instead of creating PIL images.
+        with tempfile.TemporaryDirectory(prefix="selene-pdf-") as image_dir:
+            for page_num in range(1, total_pages + 1):
+                try:
+                    image_paths = convert_from_path(
+                        path, first_page=page_num, last_page=page_num, dpi=140,
+                        fmt="png", output_folder=image_dir, paths_only=True,
+                        thread_count=1,
+                    )
+                    if not image_paths:
+                        continue
+                    description = describe_image(str(image_paths[0]))
+                    if description and not description.startswith("Error"):
+                        text_stream.append(f"--- Page {page_num} Visual Description ---\n{description}\n")
+                    elif description:
+                        warnings.append(f"Page {page_num} vision skipped: {description}")
+                except Exception as exc:
+                    warnings.append(f"Page {page_num} visual extraction failed: {exc}")
+
         text = "\n".join(text_stream)
-        return text, {"document_type": "pdf", "char_count": len(text)}
-    except Exception as e:
-        return f"Error reading PDF: {e}", {"document_type": "pdf", "char_count": 0}
+        return text, {"document_type": "pdf", "page_count": total_pages, "char_count": len(text), "warnings": warnings[:20], "warning_count": len(warnings)}
+    except Exception as exc:
+        raise RuntimeError(f"Error reading PDF: {exc}") from exc
 
 
-def _read_text_for_index(path: str) -> tuple[str, dict]:
+def _read_text_for_index(path: str, include_vision: bool = True) -> tuple[str, dict]:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
-        return extract_pdf_with_vision(path)
+        return extract_pdf_with_vision(path) if include_vision else extract_document_text(path)
             
     if ext in {".pdf", ".docx"}:
         return extract_document_text(path)
@@ -214,23 +213,6 @@ def _iter_indexable_files(vault_path: str):
                 yield os.path.join(root, fname)
 
 
-def _flush_batch(collection, ids: list[str], docs: list[str], metadatas: list[dict], model: str) -> int:
-    if not docs:
-        return 0
-    embeddings = embed_texts(docs, model=model)
-    collection.upsert(ids=ids, documents=docs, embeddings=embeddings, metadatas=metadatas)
-    return len(docs)
-
-
-def _delete_existing_source(collection, source: str) -> None:
-    try:
-        collection.delete(where={"source": source})
-    except Exception:
-        # Older Chroma versions may raise when no rows match. Stale chunks are
-        # less harmful than failing the entire indexing operation.
-        pass
-
-
 def index_vault(
     vault_path: Optional[str] = None,
     collection_name: str = "vault",
@@ -240,10 +222,31 @@ def index_vault(
     batch_size: int = DEFAULT_BATCH_SIZE,
     file_path: Optional[str] = None,
     collection: Optional[str] = None,
+    include_vision: bool = True,
 ):
-    """Index either a vault folder or a single file.
+    """
+    Index either a vault folder or a single file into a ChromaDB collection.
 
-    Returns a JSON string with status and next-step guidance for tool consumers.
+    This function reads text from the target documents, splits it into overlapping
+    semantic chunks, generates vector embeddings using Ollama, and stores them in
+    ChromaDB for later similarity search retrieval.
+
+    Args:
+        vault_path (str | None): Directory containing multiple files to index.
+            If None and file_path is provided, defaults to the file's directory.
+        collection_name (str): The name of the ChromaDB collection to use.
+        chunk_size (int): The approximate character limit for each text chunk.
+        chunk_overlap (int): The number of characters to overlap between chunks.
+        model (str): The embedding model name to pass to Ollama.
+        batch_size (int): Number of chunks to process in a single batch.
+        file_path (str | None): A single explicit file path to index.
+        collection (str | None): An alias for collection_name.
+        include_vision (bool): For PDFs, include local moondream page descriptions.
+            Disable for substantially faster text-only indexing.
+
+    Returns:
+        str: A JSON-encoded string containing status metrics (e.g., number of indexed
+             files and chunks) and guidance for using the index.
     """
     if collection:
         collection_name = collection
@@ -273,12 +276,12 @@ def index_vault(
     chunk_size = _positive_int(chunk_size, DEFAULT_CHUNK_SIZE, minimum=500, maximum=20000)
     chunk_overlap = _positive_int(chunk_overlap, DEFAULT_CHUNK_OVERLAP, minimum=0, maximum=max(0, chunk_size // 2))
 
-    client = get_chroma_client()
-    collection_obj = client.get_or_create_collection(name=collection_name)
+    try:
+        client = get_chroma_client()
+        collection_obj = client.get_or_create_collection(name=collection_name)
+    except Exception as exc:
+        return _json({"error": f"Could not open ChromaDB: {exc}", "persist_directory": CHROMA_DIR})
 
-    ids: list[str] = []
-    docs: list[str] = []
-    metadatas: list[dict] = []
     indexed_chunks = 0
     indexed_files = 0
     skipped_files: list[dict] = []
@@ -287,13 +290,16 @@ def index_vault(
         if not os.path.exists(path):
             skipped_files.append({"file": path, "error": "file not found"})
             continue
+        if not os.path.isfile(path):
+            skipped_files.append({"file": path, "error": "not a regular file"})
+            continue
         ext = os.path.splitext(path)[1].lower()
         if ext not in SUPPORTED_INDEX_EXTENSIONS:
             skipped_files.append({"file": path, "error": f"unsupported extension: {ext}"})
             continue
 
         try:
-            text, info = _read_text_for_index(path)
+            text, info = _read_text_for_index(path, include_vision=bool(include_vision))
         except UnicodeDecodeError:
             skipped_files.append({"file": path, "error": "not UTF-8 text; use PDF/DOCX or plain text"})
             continue
@@ -307,14 +313,14 @@ def index_vault(
             continue
 
         rel = os.path.relpath(path, vault_path) if os.path.isdir(vault_path) else os.path.basename(path)
-        _delete_existing_source(collection_obj, rel)
-        indexed_files += 1
-
+        file_ids: list[str] = []
+        file_docs: list[str] = []
+        file_metadatas: list[dict] = []
         for chunk in chunks:
             chunk_index = chunk["index"]
-            ids.append(f"{rel}::chunk::{chunk_index}")
-            docs.append(chunk["text"])
-            metadatas.append({
+            file_ids.append(f"{rel}::chunk::{chunk_index}")
+            file_docs.append(chunk["text"])
+            file_metadatas.append({
                 "source": rel,
                 "source_path": path,
                 "filename": os.path.basename(path),
@@ -325,12 +331,40 @@ def index_vault(
                 "document_type": info.get("document_type", ext.lstrip(".")),
             })
 
-            if len(docs) >= batch_size:
-                indexed_chunks += _flush_batch(collection_obj, ids, docs, metadatas, model=model)
-                ids, docs, metadatas = [], [], []
+        # Complete all potentially failing embedding work before modifying the
+        # existing source, so a model outage cannot erase a valid old index.
+        prepared_batches = []
+        try:
+            for start in range(0, len(file_docs), batch_size):
+                batch_docs = file_docs[start:start + batch_size]
+                prepared_batches.append((
+                    file_ids[start:start + batch_size],
+                    batch_docs,
+                    file_metadatas[start:start + batch_size],
+                    embed_texts(batch_docs, model=model),
+                ))
+        except Exception as exc:
+            skipped_files.append({"file": path, "error": f"embedding failed; previous index preserved: {exc}"})
+            continue
 
-    if docs:
-        indexed_chunks += _flush_batch(collection_obj, ids, docs, metadatas, model=model)
+        try:
+            existing = collection_obj.get(where={"source": rel}, include=["metadatas"])
+            previous_ids = set(existing.get("ids", []))
+        except Exception:
+            previous_ids = set()
+
+        try:
+            for batch_ids, batch_docs, batch_metadata, batch_embeddings in prepared_batches:
+                collection_obj.upsert(ids=batch_ids, documents=batch_docs, embeddings=batch_embeddings, metadatas=batch_metadata)
+            stale_ids = previous_ids - set(file_ids)
+            if stale_ids:
+                collection_obj.delete(ids=sorted(stale_ids))
+        except Exception as exc:
+            skipped_files.append({"file": path, "error": f"index write failed: {exc}"})
+            continue
+
+        indexed_files += 1
+        indexed_chunks += len(file_docs)
 
     # Auto-register an alias when a single file was indexed
     if file_path and indexed_files == 1:
@@ -350,6 +384,7 @@ def index_vault(
         "skipped_count": len(skipped_files),
         "chunk_size": chunk_size,
         "chunk_overlap": chunk_overlap,
+        "include_vision": bool(include_vision),
         "alias": os.path.splitext(os.path.basename(file_path))[0] if file_path and indexed_files == 1 else None,
         "guidance": "Use vault_search with a focused query to retrieve relevant chunks from large indexed files.",
     })
@@ -366,7 +401,10 @@ def delete_vault_item(
         collection_name = collection
 
     collection_name = sanitize_collection_name(collection_name)
-    client = get_chroma_client()
+    try:
+        client = get_chroma_client()
+    except Exception as exc:
+        return _json({"error": f"Could not open ChromaDB: {exc}", "persist_directory": CHROMA_DIR})
 
     if delete_collection:
         try:
@@ -423,8 +461,8 @@ def delete_vault_item(
 
 def list_vaults() -> str:
     """List existing ChromaDB vault collections with basic index counts."""
-    client = get_chroma_client()
     try:
+        client = get_chroma_client()
         collections = client.list_collections()
     except Exception as exc:
         return _json({"error": str(exc), "persist_directory": CHROMA_DIR})
@@ -465,32 +503,46 @@ _ALIAS_FILE = os.path.join(VAULTS_DIR, ".vault_aliases.json")
 
 def _load_aliases() -> dict:
     """Load the alias registry from disk."""
-    if os.path.isfile(_ALIAS_FILE):
-        try:
-            with open(_ALIAS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
+    with _ALIAS_LOCK:
+        if os.path.isfile(_ALIAS_FILE):
+            try:
+                with open(_ALIAS_FILE, "r", encoding="utf-8") as f:
+                    value = json.load(f)
+                return value if isinstance(value, dict) else {}
+            except (json.JSONDecodeError, OSError):
+                pass
     return {}
 
 
 def _save_aliases(aliases: dict) -> None:
     """Persist the alias registry to disk."""
-    os.makedirs(VAULTS_DIR, exist_ok=True)
-    with open(_ALIAS_FILE, "w", encoding="utf-8") as f:
-        json.dump(aliases, f, indent=2, ensure_ascii=False)
+    with _ALIAS_LOCK:
+        os.makedirs(VAULTS_DIR, exist_ok=True)
+        handle, temporary = tempfile.mkstemp(prefix="aliases-", suffix=".json", dir=VAULTS_DIR)
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                json.dump(aliases, stream, indent=2, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, _ALIAS_FILE)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 def register_vault_alias(alias: str, collection_name: str, file_path: str | None = None) -> None:
     """Register a human-friendly alias for a vault collection."""
-    aliases = _load_aliases()
-    key = alias.strip().lower()
-    aliases[key] = {
-        "alias": alias.strip(),
-        "collection": collection_name,
-        "file_path": file_path,
-    }
-    _save_aliases(aliases)
+    clean_alias = str(alias or "").strip()
+    if not clean_alias:
+        raise ValueError("alias is required")
+    with _ALIAS_LOCK:
+        aliases = _load_aliases()
+        aliases[clean_alias.casefold()] = {
+            "alias": clean_alias,
+            "collection": sanitize_collection_name(collection_name),
+            "file_path": os.path.abspath(file_path) if file_path else None,
+        }
+        _save_aliases(aliases)
 
 
 def resolve_vault_alias(name: str) -> str:
@@ -504,16 +556,17 @@ def resolve_vault_alias(name: str) -> str:
     if not name:
         return "vault"
     aliases = _load_aliases()
-    key = name.strip().lower()
+    key = name.strip().casefold()
 
     # Exact match
     if key in aliases:
         return aliases[key]["collection"]
 
     # Substring match
-    for alias_key, entry in aliases.items():
-        if key in alias_key or alias_key in key:
-            return entry["collection"]
+    matches = {entry.get("collection") for alias_key, entry in aliases.items() if key in alias_key or alias_key in key}
+    matches.discard(None)
+    if len(matches) == 1:
+        return next(iter(matches))
 
     # Fall through — treat as a raw collection name
     return sanitize_collection_name(name)
@@ -551,7 +604,10 @@ def rename_vault(old_name: str, new_name: str) -> str:
         return _json({"error": "Old and new names resolve to the same collection name.",
                        "old": old_collection, "new": new_collection})
 
-    client = get_chroma_client()
+    try:
+        client = get_chroma_client()
+    except Exception as exc:
+        return _json({"error": f"Could not open ChromaDB: {exc}", "persist_directory": CHROMA_DIR})
 
     # Verify old collection exists
     try:
@@ -560,25 +616,36 @@ def rename_vault(old_name: str, new_name: str) -> str:
         return _json({"error": f"Collection '{old_collection}' not found.",
                        "persist_directory": CHROMA_DIR})
 
+    try:
+        client.get_collection(name=new_collection)
+        return _json({"error": f"Destination collection '{new_collection}' already exists."})
+    except Exception:
+        pass
+
     count = old_coll.count()
-    if count == 0:
-        # Empty collection — just delete and create the new one
-        client.delete_collection(name=old_collection)
-        client.get_or_create_collection(name=new_collection)
-    else:
-        # Fetch all data from the old collection
-        data = old_coll.get(include=["documents", "metadatas", "embeddings"])
-        ids = data.get("ids", [])
-        docs = data.get("documents", [])
-        metadatas = data.get("metadatas", [])
-        embeddings = data.get("embeddings", [])
+    new_coll = client.create_collection(name=new_collection)
+    try:
+        batch_size = 500
+        for offset in range(0, count, batch_size):
+            data = old_coll.get(limit=batch_size, offset=offset, include=["documents", "metadatas", "embeddings"])
+            ids = data.get("ids", [])
+            if ids:
+                new_coll.upsert(
+                    ids=ids,
+                    documents=data.get("documents", []),
+                    metadatas=data.get("metadatas", []),
+                    embeddings=data.get("embeddings", []),
+                )
+        if new_coll.count() != count:
+            raise RuntimeError(f"Copied {new_coll.count()} of {count} chunks")
+    except Exception as exc:
+        try:
+            client.delete_collection(name=new_collection)
+        except Exception:
+            pass
+        return _json({"error": f"Rename copy failed; original collection was preserved: {exc}"})
 
-        # Create the new collection and upsert everything
-        new_coll = client.get_or_create_collection(name=new_collection)
-        new_coll.upsert(ids=ids, documents=docs, metadatas=metadatas, embeddings=embeddings)
-
-        # Delete the old collection
-        client.delete_collection(name=old_collection)
+    client.delete_collection(name=old_collection)
 
     # Update aliases that referenced the old collection
     aliases = _load_aliases()
@@ -613,6 +680,7 @@ if __name__ == "__main__":
     parser.add_argument("--chunk-overlap", type=int, default=DEFAULT_CHUNK_OVERLAP)
     parser.add_argument("--model", default=DEFAULT_EMBED_MODEL)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--no-vision", action="store_true")
     args = parser.parse_args()
 
     print(index_vault(
@@ -623,4 +691,5 @@ if __name__ == "__main__":
         chunk_overlap=args.chunk_overlap,
         model=args.model,
         batch_size=args.batch_size,
+        include_vision=not args.no_vision,
     ))
