@@ -21,6 +21,7 @@ MAX_TRIGGERS = 25
 AUTOMATIC_ACTION_TYPES = {"open_app", "delay", "tool"}
 AUTOMATIC_TOOL_NAMES = {"open_app", "launch_apps"}
 CONFIRMATION_TOOL_NAMES = {*AUTOMATIC_TOOL_NAMES, "open_terminal_at_path"}
+ALLOWED_ROUTINE_COMMANDS = {"python", "pytest", "git", "ls", "cat", "echo", "grep", "node", "npm"}
 
 
 def _load() -> dict[str, dict]:
@@ -119,8 +120,13 @@ def _validate(routine: dict) -> list[str]:
     for index, item in enumerate(actions):
         if not isinstance(item, dict) or item.get("type") not in {"command", "open_app", "open_url", "delay", "tool"}:
             errors.append(f"actions[{index}] has an unsupported type")
-        elif item.get("type") == "command" and not isinstance(item.get("argv"), list):
-            errors.append(f"actions[{index}].argv must be an argument array; shell strings are not accepted")
+        elif item.get("type") == "command":
+            if not isinstance(item.get("argv"), list) or not item.get("argv"):
+                errors.append(f"actions[{index}].argv must be a non-empty argument array; shell strings are not accepted")
+            else:
+                executable = str(item["argv"][0])
+                if executable not in ALLOWED_ROUTINE_COMMANDS:
+                    errors.append(f"actions[{index}].argv[0] must be an allowed command ({', '.join(sorted(ALLOWED_ROUTINE_COMMANDS))}); found '{executable}'")
         elif item.get("type") == "open_app" and not isinstance(item.get("app_name"), str):
             errors.append(f"actions[{index}].app_name must be an installed application display name")
         elif item.get("type") == "tool":
@@ -240,6 +246,8 @@ def _run_action(item: dict) -> dict:
     argv = [str(value) for value in item["argv"]]
     if not argv:
         raise ValueError("argv cannot be empty")
+    if argv[0] not in ALLOWED_ROUTINE_COMMANDS:
+        raise ValueError(f"Command '{argv[0]}' is not permitted")
     requested_cwd = (PROJECT_ROOT / str(item.get("cwd", "."))).resolve()
     if requested_cwd != PROJECT_ROOT and PROJECT_ROOT not in requested_cwd.parents:
         raise ValueError("Command cwd must stay inside the project workspace")
