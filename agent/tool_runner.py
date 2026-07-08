@@ -51,6 +51,7 @@ class ToolCallSpec:
     name: str
     arguments: dict
     raw: dict
+    argument_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,30 +68,51 @@ class ToolCallResult:
         }
 
 
+def _json_error(message: str) -> str:
+    return json.dumps({"error": message}, ensure_ascii=False, separators=(",", ":"))
+
+
+def normalize_tool_arguments(arguments: object) -> tuple[dict, str | None]:
+    """Return parsed tool arguments and an optional validation error."""
+    if arguments is None:
+        return {}, None
+    if isinstance(arguments, dict):
+        return arguments, None
+    if isinstance(arguments, str):
+        raw = arguments.strip()
+        if not raw:
+            return {}, None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return {}, f"Tool arguments are not valid JSON: {exc.msg}"
+        if isinstance(parsed, dict):
+            return parsed, None
+        return {}, "Tool arguments must decode to a JSON object"
+    return {}, "Tool arguments must be a JSON object"
+
+
 def normalize_tool_calls(tool_calls: Iterable[dict]) -> list[ToolCallSpec]:
     specs: list[ToolCallSpec] = []
     for index, call in enumerate(tool_calls):
         function = call.get("function") if isinstance(call, dict) else None
         function = function if isinstance(function, dict) else {}
-        arguments = function.get("arguments") or {}
-        if not isinstance(arguments, dict):
-            arguments = {}
+        arguments, argument_error = normalize_tool_arguments(function.get("arguments"))
         specs.append(
             ToolCallSpec(
                 index=index,
                 name=str(function.get("name") or ""),
                 arguments=arguments,
                 raw=call,
+                argument_error=argument_error,
             )
         )
     return specs
 
 
-def _json_error(message: str) -> str:
-    return json.dumps({"error": message}, ensure_ascii=False, separators=(",", ":"))
-
-
 def execute_tool_call(spec: ToolCallSpec) -> ToolCallResult:
+    if spec.argument_error:
+        return ToolCallResult(spec, _json_error(spec.argument_error))
     handler = TOOL_DISPATCH.get(spec.name)
     if handler is None:
         return ToolCallResult(spec, _json_error(f"Unknown tool '{spec.name}'"))

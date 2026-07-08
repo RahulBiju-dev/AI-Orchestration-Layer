@@ -39,7 +39,7 @@ except ImportError:
 import ollama
 from rich.live import Live
 
-from agent.tool_runner import ToolCallResult, ToolCallSpec, execute_tool_calls
+from agent.tool_runner import ToolCallResult, ToolCallSpec, execute_tool_calls, normalize_tool_arguments
 from tools.registry import TOOL_DISPATCH, TOOL_SCHEMAS
 
 # ── Configuration ─────────────────────────────────────────────────────
@@ -59,6 +59,7 @@ MIN_RESPONSE_RESERVE_TOKENS = 256
 MIN_EMERGENCY_RESPONSE_TOKENS = 96
 CONTEXT_SAFETY_MARGIN_RATIO = 0.08
 CONTEXT_TOOL_LOOP_RESERVE = 512
+MAX_TOOL_CALL_ROUNDS = 8
 SYSTEM_PERSISTENCE_REMINDER = (
     "Runtime system reminder: Follow the active system prompt exactly. "
     "Use tools over memory for verifiable state, preserve the vault > web > internal knowledge hierarchy, "
@@ -613,7 +614,14 @@ def _stream_thinking_response(
     if guarded_options:
         kwargs["options"] = guarded_options
 
-    stream = ollama.chat(**kwargs)
+    try:
+        stream = ollama.chat(**kwargs)
+    except Exception as exc:
+        spinner.stop()
+        message = f"Ollama chat failed before streaming: {exc}"
+        _console.print(f"\n[red]⚠ {message}[/]\n")
+        return {"role": "assistant", "content": message}
+
 
     live = None
     _last_render = 0.0  # throttle Live.update() calls
@@ -826,7 +834,9 @@ def _tool_call_turn_key(call: dict) -> str | None:
     name = str(function.get("name") or "").strip()
     if not name:
         return None
-    arguments = function.get("arguments") or {}
+    arguments, argument_error = normalize_tool_arguments(function.get("arguments"))
+    if argument_error:
+        arguments = {"_argument_error": argument_error}
     try:
         encoded_args = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
     except TypeError:
@@ -1734,7 +1744,18 @@ def run() -> None:
 
         # ── Tool-call loop (iterative, in case of chained calls) ──────
         executed_tool_calls: dict[str, dict] = {}
+        tool_rounds = 0
         while assistant_msg.get("tool_calls"):
+            if tool_rounds >= MAX_TOOL_CALL_ROUNDS:
+                message = (
+                    f"Stopped after {MAX_TOOL_CALL_ROUNDS} tool-call rounds to avoid an unreliable loop. "
+                    "Please narrow the request or ask me to continue from the latest result."
+                )
+                _console.print(f"\n[yellow]⚠ {message}[/]\n")
+                if session["history"]:
+                    history.append({"role": "assistant", "content": message})
+                break
+            tool_rounds += 1
             tool_results = _process_tool_calls_with_turn_guard(assistant_msg["tool_calls"], executed_tool_calls)
 
             if session["history"]:

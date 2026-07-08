@@ -25,6 +25,7 @@ from agent.core import (
     CONTEXT_TOOL_LOOP_RESERVE,
     ContextWindowError,
     MODEL_NAME,
+    MAX_TOOL_CALL_ROUNDS,
     TOOL_CONTINUATION_PROMPT,
     _check_and_compact_history,
     compact_tool_schemas,
@@ -799,6 +800,7 @@ def generate_chat_events(
         
     # 4. Stream response loop (supports tool execution and model chain-calling)
     executed_tool_calls: dict[str, dict] = {}
+    tool_rounds = 0
     while True:
         runtime_tools = compact_tool_schemas(TOOL_SCHEMAS)
         try:
@@ -926,6 +928,25 @@ def generate_chat_events(
                 "saved_sessions": list_saved_sessions(),
             }
             break
+
+        if tool_rounds >= MAX_TOOL_CALL_ROUNDS:
+            message = (
+                f"Stopped after {MAX_TOOL_CALL_ROUNDS} tool-call rounds to avoid an unreliable loop. "
+                "Please narrow the request or ask me to continue from the latest result."
+            )
+            yield {"type": "status", "message": message, "color": "yellow"}
+            yield {"type": "content_chunk", "text": message}
+            if session_data.get("history", True):
+                history_data.append({"role": "assistant", "content": message})
+            save_session_snapshot(origin_name, session_data, history_data)
+            yield {
+                "type": "done",
+                "history": history_data,
+                "active_session_name": origin_name,
+                "saved_sessions": list_saved_sessions(),
+            }
+            break
+        tool_rounds += 1
             
         # Execute tool calls
         yield {"type": "tool_calls_start", "calls": tool_calls}
