@@ -111,13 +111,26 @@ def embed_texts(texts: Sequence[str], model: str = DEFAULT_EMBED_MODEL, timeout:
             last_error = exc
 
     # Ollama versions before /api/embed accepted one prompt per request at
-    # /api/embeddings. Keep this compatibility path explicit and sequential.
+    # /api/embeddings. Keep this compatibility path explicit, but concurrent
+    # to significantly improve latency on bulk embedding tasks.
     try:
+        from concurrent.futures import ThreadPoolExecutor
+
         legacy_embeddings = []
-        for text in inputs:
+
+        def _fetch_legacy_embedding(text: str) -> list[list[float]]:
             resp = _SESSION.post(OLLAMA_LEGACY_EMBED_URL, json={"model": model, "prompt": text}, timeout=timeout)
             resp.raise_for_status()
-            legacy_embeddings.extend(normalize_embeddings(resp.json()))
+            return normalize_embeddings(resp.json())
+
+        # Use up to 10 threads to avoid overwhelming a local LLM server
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            # map ensures results are returned in the exact order of `inputs`
+            results = executor.map(_fetch_legacy_embedding, inputs)
+
+            for emb_list in results:
+                legacy_embeddings.extend(emb_list)
+
         return _validate_embedding_count(legacy_embeddings, len(inputs))
     except Exception as exc:
         last_error = exc
