@@ -71,7 +71,10 @@ When the model decides a tool is needed, it emits a structured JSON object inste
 {
   "function": {
     "name": "web_search",
-    "arguments": {"query": "Python 3.14 release date"}
+    "arguments": {
+      "query": "Python 3.14 release date",
+      "include_content": true
+    }
   }
 }
 ```
@@ -169,7 +172,8 @@ The agent autonomously decides when to call tools based on the user's query:
 
 | Tool | Description |
 |------|-------------|
-| 🔍 **Web Search** | Real-time DuckDuckGo search with adaptive depth (easy/medium/hard) for current events, docs, and post-cutoff information |
+| 🔍 **Web Search** | Real-time DuckDuckGo search with adaptive depth (easy/medium/hard), plus optional top-result content extraction for current events, docs, and post-cutoff information |
+| 🕸️ **Web Scraper** | Fetch and extract readable text, headings, metadata, and optional links from public HTTP(S) pages with byte/character limits and local-network safeguards |
 | 🌐 **Browser** | Open URLs or search queries in the system's default browser |
 | 💻 **Code Viewer** | Read source files with line numbers; scan directories by extension |
 | 🧬 **Codebase Indexer** | Persistently index an entire repository, auto-refresh it after 24 hours, and retrieve grounded code context for architecture questions, fault finding, and optimisation |
@@ -349,9 +353,9 @@ Example routine definition:
                                 │
      ┌──────┬──────┬────────┬───┴──┬─────────┬───────────┐
      ▼      ▼      ▼        ▼      ▼         ▼           ▼
-  search  browser  file  document spotify   vision     vault
-  .py     .py      .py   .py      .py    describer  (index/search/
-                                          .py        embeddings)
+  search  web      browser  file  document spotify   vision     vault
+  .py     scraper  .py      .py   .py      .py    describer  (index/search/
+          .py                                      .py        embeddings)
                                     obsi_vault          │
                                     _writer.py           ▼
                                                   ┌──────────┐
@@ -666,7 +670,8 @@ AI-CLI-Agent/
 ├── tools/
 │   ├── __init__.py
 │   ├── registry.py            # Tool JSON schemas + dispatch table
-│   ├── search.py              # DuckDuckGo web search
+│   ├── search.py              # DuckDuckGo web search with optional top-result scraping
+│   ├── web_scraper.py         # Bounded public web page text extraction
 │   ├── browser.py             # System browser control
 │   ├── code.py                # Source code viewer with line numbers
 │   ├── codebase_indexer.py    # Persistent repository indexing and semantic code retrieval

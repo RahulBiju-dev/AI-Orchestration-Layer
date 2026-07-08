@@ -410,6 +410,10 @@ def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
                     _print_status("🔍", f"Searching the web: [dim]{fn_args.get('query', '')}[/]", "yellow")
                     result = handler(**fn_args)
                     _print_status("✓", "Search complete — synthesizing answer…", "green")
+                elif fn_name == "web_scrape":
+                    _print_status("🌐", f"Reading web page: [dim]{fn_args.get('url', '')}[/]", "yellow")
+                    result = handler(**fn_args)
+                    _print_status("✓", "Page read — synthesizing answer…", "green")
                 elif fn_name == "read_document":
                     _print_status("📄", f"Reading document: [dim]{fn_args.get('file_path', '')}[/]", "yellow")
                     result = handler(**fn_args)

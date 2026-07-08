@@ -8,6 +8,7 @@ passed directly to the LLM so it knows what tools are available and how to call 
 """
 
 from tools.search import web_search
+from tools.web_scraper import web_scrape
 from tools.document import read_document
 from tools.file import read_file, create_file
 from tools.code import view_code
@@ -116,8 +117,51 @@ TOOL_SCHEMAS: list[dict] = [
                             "research or niche/complex queries."
                         ),
                     },
+                    "include_content": {
+                        "type": "boolean",
+                        "description": (
+                            "When true, fetch readable text from the top search results. "
+                            "Use this when snippets are insufficient and detailed source content is needed."
+                        ),
+                    },
+                    "max_pages": {
+                        "type": "integer",
+                        "description": "Optional number of top results to scrape when include_content=true (1-5). Defaults by difficulty.",
+                    },
+                    "max_chars_per_page": {
+                        "type": "integer",
+                        "description": "Maximum extracted text characters per scraped page when include_content=true (1000-20000, default 6000).",
+                    },
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_scrape",
+            "description": (
+                "Fetch a public HTTP(S) page and extract readable text, metadata, headings, "
+                "and optional links. Use after web_search when a specific source needs detailed reading."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Public http/https URL to read. Bare domains are treated as https:// domains.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum extracted text characters to return (1000-50000, default 20000).",
+                    },
+                    "include_links": {
+                        "type": "boolean",
+                        "description": "Include up to 40 extracted page links with anchor text.",
+                    },
+                },
+                "required": ["url"],
             },
         },
     },
@@ -666,6 +710,7 @@ TOOL_DISPATCH: dict[str, callable] = {
     "get_current_datetime": get_current_datetime,
     "spreadsheet": spreadsheet,
     "web_search": web_search,
+    "web_scrape": web_scrape,
     "read_document": read_document,
     "read_file": read_file,
     "create_file": create_file,
