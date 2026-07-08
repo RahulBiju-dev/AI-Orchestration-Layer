@@ -64,6 +64,13 @@ SYSTEM_PERSISTENCE_REMINDER = (
     "Use tools over memory for verifiable state, preserve the vault > web > internal knowledge hierarchy, "
     "do not invent facts or tool results, and answer the latest user request directly."
 )
+TOOL_CONTINUATION_PROMPT = (
+    "Continue the current user request using the tool result messages already present in this conversation. "
+    "Do not repeat an identical tool call to rediscover the same information. "
+    "If the available tool results are sufficient, answer the original request directly; "
+    "otherwise call only the next distinct tool that is still required.\n\n"
+    "Original user request:\n{user_input}"
+)
 
 
 class ContextWindowError(RuntimeError):
@@ -269,6 +276,46 @@ def _split_system_and_conversation(messages: list[dict]) -> tuple[list[dict], li
     return system_messages, conversation_messages
 
 
+def _is_tool_continuation_prompt(message: dict) -> bool:
+    return (
+        message.get("role") == "user"
+        and str(message.get("content") or "").startswith(
+            "Continue the current user request using the tool result messages"
+        )
+    )
+
+
+def _tool_continuation_tail_start(messages: list[dict]) -> int | None:
+    """Find the assistant/tool/user tail that must stay atomic after tools."""
+    if not messages or not _is_tool_continuation_prompt(messages[-1]):
+        return None
+    for index in range(len(messages) - 2, -1, -1):
+        message = messages[index]
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            return index
+        if message.get("role") == "user":
+            break
+    index = len(messages) - 2
+    while index >= 0 and messages[index].get("role") == "tool":
+        index -= 1
+    return index + 1
+
+
+def _compact_tool_continuation_tail(messages: list[dict]) -> list[dict]:
+    """Keep tool-followup essentials while dropping prior thinking text."""
+    compacted: list[dict] = []
+    for message in messages:
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            compacted.append({
+                "role": "assistant",
+                "content": message.get("content", ""),
+                "tool_calls": message.get("tool_calls", []),
+            })
+        else:
+            compacted.append(message)
+    return compacted
+
+
 _interrupted = False
 
 def _sigquit_handler(signum, frame):
@@ -324,18 +371,34 @@ def _trim_history(
         # System prompt alone exceeds budget; keep it + last user message as a fallback
         return system_msgs + conv_msgs[-1:]
 
-    # Walk from newest to oldest, accumulating messages until the budget is hit
+    tail_start = _tool_continuation_tail_start(conv_msgs)
+    if tail_start is not None:
+        preserved_tail = _compact_tool_continuation_tail(conv_msgs[tail_start:])
+        older_msgs = conv_msgs[:tail_start]
+    else:
+        preserved_tail = []
+        older_msgs = conv_msgs
+
+    tail_cost = _estimate_messages_tokens(preserved_tail)
+    if tail_cost >= remaining_budget:
+        # Keep the complete continuation tail even if older history must go.
+        # guarded_options_for_call will refuse cleanly if this still cannot fit.
+        return system_msgs + preserved_tail
+
+    # Walk from newest to oldest, accumulating messages until the budget is hit.
+    # In a tool-followup turn, never keep the continuation prompt while dropping
+    # the assistant tool-call or tool result it references.
     kept: list[dict] = []
-    used = 0
-    for msg in reversed(conv_msgs):
+    used = tail_cost
+    for msg in reversed(older_msgs):
         cost = _estimate_message_tokens(msg)
-        if used + cost > remaining_budget and kept:
+        if used + cost > remaining_budget and (kept or preserved_tail):
             break
         kept.append(msg)
         used += cost
 
     kept.reverse()
-    return system_msgs + kept
+    return system_msgs + kept + preserved_tail
 
 
 def _insert_system_persistence_reminder(messages: list[dict]) -> list[dict]:
@@ -343,6 +406,8 @@ def _insert_system_persistence_reminder(messages: list[dict]) -> list[dict]:
     system_msgs, conv_msgs = _split_system_and_conversation(messages)
     if not system_msgs or not conv_msgs:
         return messages
+    if _is_tool_continuation_prompt(conv_msgs[-1]):
+        return [*system_msgs, *conv_msgs]
 
     reminder = {"role": "system", "content": SYSTEM_PERSISTENCE_REMINDER}
     insert_at = len(conv_msgs)
@@ -755,52 +820,40 @@ def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
     return [result.as_tool_message() for result in results]
 
 
-def _routine_run_key(call: dict) -> str | None:
-    """Return a stable per-turn key for routine run calls."""
+def _tool_call_turn_key(call: dict) -> str | None:
+    """Return a stable key for suppressing identical calls in one turn."""
     function = call.get("function") or {}
-    if function.get("name") != "automated_routine_executor":
+    name = str(function.get("name") or "").strip()
+    if not name:
         return None
     arguments = function.get("arguments") or {}
-    if arguments.get("action") != "run":
-        return None
-    name = str(arguments.get("name") or "").strip().casefold()
-    trigger = str(arguments.get("trigger") or "").strip().casefold()
-    if name:
-        return f"name:{name}"
-    if trigger:
-        return f"trigger:{trigger}"
-    return "routine-run"
+    try:
+        encoded_args = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
+    except TypeError:
+        encoded_args = str(arguments)
+    return f"{name}:{encoded_args}"
 
 
-def _duplicate_routine_result(call: dict) -> dict:
-    function = call.get("function") or {}
-    arguments = function.get("arguments") or {}
-    name = str(arguments.get("name") or arguments.get("trigger") or "routine")
-    content = json.dumps({
-        "ok": True,
-        "already_executed": True,
-        "name": name,
-        "guidance": (
-            "This routine was already executed during the current user turn. "
-            "Do not call automated_routine_executor for it again; continue with the final answer."
-        ),
-    }, ensure_ascii=False)
-    return {"role": "tool", "tool_name": "automated_routine_executor", "content": content}
-
-
-def _process_tool_calls_with_turn_guard(tool_calls: list[dict], executed_routines: set[str]) -> list[dict]:
-    """Execute tool calls while preventing duplicate routine runs in one turn."""
+def _process_tool_calls_with_turn_guard(tool_calls: list[dict], executed_tool_calls: dict[str, dict]) -> list[dict]:
+    """Execute tool calls while preventing duplicate calls in one turn."""
     pending_calls: list[dict] = []
     pending_positions: list[int] = []
+    pending_keys: dict[int, str] = {}
+    pending_key_to_index: dict[str, int] = {}
+    duplicate_source_by_index: dict[int, int] = {}
     results_by_index: dict[int, dict] = {}
 
     for index, call in enumerate(tool_calls):
-        routine_key = _routine_run_key(call)
-        if routine_key and routine_key in executed_routines:
-            results_by_index[index] = _duplicate_routine_result(call)
+        turn_key = _tool_call_turn_key(call)
+        if turn_key and turn_key in executed_tool_calls:
+            results_by_index[index] = dict(executed_tool_calls[turn_key])
             continue
-        if routine_key:
-            executed_routines.add(routine_key)
+        if turn_key and turn_key in pending_key_to_index:
+            duplicate_source_by_index[index] = pending_key_to_index[turn_key]
+            continue
+        if turn_key:
+            pending_keys[index] = turn_key
+            pending_key_to_index[turn_key] = index
         pending_positions.append(index)
         pending_calls.append(call)
 
@@ -808,6 +861,11 @@ def _process_tool_calls_with_turn_guard(tool_calls: list[dict], executed_routine
         pending_results = _process_tool_calls(pending_calls)
         for index, result in zip(pending_positions, pending_results):
             results_by_index[index] = result
+            if index in pending_keys:
+                executed_tool_calls[pending_keys[index]] = dict(result)
+
+    for index, source_index in duplicate_source_by_index.items():
+        results_by_index[index] = dict(results_by_index[source_index])
 
     return [results_by_index[index] for index in sorted(results_by_index)]
 
@@ -1626,7 +1684,12 @@ def run() -> None:
                             else:
                                 import json as _json
                                 tool_content = _json.dumps(res)
-                            tool_msg = {"role": "tool", "content": tool_content}
+                            tool_msg = {
+                                "role": "tool",
+                                "tool_name": "index_vault",
+                                "name": "index_vault",
+                                "content": tool_content,
+                            }
                             if session["history"]:
                                 history.append(tool_msg)
                             else:
@@ -1670,20 +1733,16 @@ def run() -> None:
             history.append(assistant_msg)
 
         # ── Tool-call loop (iterative, in case of chained calls) ──────
-        executed_routine_runs: set[str] = set()
+        executed_tool_calls: dict[str, dict] = {}
         while assistant_msg.get("tool_calls"):
-            tool_results = _process_tool_calls_with_turn_guard(assistant_msg["tool_calls"], executed_routine_runs)
+            tool_results = _process_tool_calls_with_turn_guard(assistant_msg["tool_calls"], executed_tool_calls)
 
             if session["history"]:
                 history.extend(tool_results)
                 # Trim history to keep follow-up requests within token budget
                 reminder = {
                     "role": "user",
-                    "content": (
-                        "Continue the current turn using the tool result above. Answer this "
-                        "original request directly; do not ask the user to repeat it:\n"
-                        f"{user_input}"
-                    ),
+                    "content": TOOL_CONTINUATION_PROMPT.format(user_input=user_input),
                 }
                 messages_to_send = prepare_messages_for_model(
                     [*history, reminder],
@@ -1696,11 +1755,7 @@ def run() -> None:
                 messages_to_send.extend(tool_results)
                 messages_to_send.append({
                     "role": "user",
-                    "content": (
-                        "Continue the current turn using the tool result above. Answer this "
-                        "original request directly; do not ask the user to repeat it:\n"
-                        f"{user_input}"
-                    ),
+                    "content": TOOL_CONTINUATION_PROMPT.format(user_input=user_input),
                 })
                 messages_to_send = prepare_messages_for_model(
                     messages_to_send,

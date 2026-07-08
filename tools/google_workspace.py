@@ -435,8 +435,19 @@ def _task_action(tasks: Any, action: str, params: dict[str, Any]) -> dict[str, A
             showCompleted=params.get("show_completed", True),
             showHidden=False,
         ).execute()
+        items = response.get("items", [])
+        query = str(params.get("query") or "").strip().casefold()
+        if query:
+            terms = [term for term in re.findall(r"[\w#:+.-]+", query) if term]
+
+            def matches_query(item: dict[str, Any]) -> bool:
+                haystack = f"{item.get('title', '')} {item.get('notes', '')}".casefold()
+                return query in haystack or all(term in haystack for term in terms)
+
+            items = [item for item in items if matches_query(item)]
         return {
-            "tasks": [_task_summary(item) for item in response.get("items", [])],
+            "tasks": [_task_summary(item) for item in items],
+            "query": params.get("query") or None,
             "next_page_token": response.get("nextPageToken"),
         }
     if action == "create_task":

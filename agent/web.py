@@ -25,13 +25,13 @@ from agent.core import (
     CONTEXT_TOOL_LOOP_RESERVE,
     ContextWindowError,
     MODEL_NAME,
+    TOOL_CONTINUATION_PROMPT,
     _check_and_compact_history,
     compact_tool_schemas,
     guarded_options_for_call,
     load_default_system_prompt,
     prepare_messages_for_model,
-    _duplicate_routine_result,
-    _routine_run_key,
+    _tool_call_turn_key,
 )
 from agent.tool_runner import (
     MAX_PARALLEL_TOOL_WORKERS,
@@ -768,7 +768,12 @@ def generate_chat_events(
                         tool_content = res
                     else:
                         tool_content = json.dumps(res)
-                    tool_msg = {"role": "tool", "content": tool_content}
+                    tool_msg = {
+                        "role": "tool",
+                        "tool_name": "index_vault",
+                        "name": "index_vault",
+                        "content": tool_content,
+                    }
                     if session_data.get("history", True):
                         history_data.append(tool_msg)
                     else:
@@ -793,7 +798,7 @@ def generate_chat_events(
         messages_to_send = prepare_messages_for_model(messages_to_send, session_data, tools=TOOL_SCHEMAS)
         
     # 4. Stream response loop (supports tool execution and model chain-calling)
-    executed_routine_runs: set[str] = set()
+    executed_tool_calls: dict[str, dict] = {}
     while True:
         runtime_tools = compact_tool_schemas(TOOL_SCHEMAS)
         try:
@@ -928,20 +933,27 @@ def generate_chat_events(
         tool_results_by_index = {}
         calls_to_execute = []
         original_index_by_call_id = {}
+        pending_key_by_index = {}
+        pending_index_by_key = {}
+        duplicate_source_by_index = {}
         for index, call in enumerate(tool_calls):
-            routine_key = _routine_run_key(call)
-            if routine_key and routine_key in executed_routine_runs:
-                skipped = _duplicate_routine_result(call)
-                tool_results_by_index[index] = skipped
+            turn_key = _tool_call_turn_key(call)
+            if turn_key and turn_key in executed_tool_calls:
+                cached = dict(executed_tool_calls[turn_key])
+                tool_results_by_index[index] = cached
                 yield {
                     "type": "tool_end",
                     "id": index,
-                    "name": skipped["tool_name"],
-                    "result": skipped["content"],
+                    "name": cached.get("tool_name") or cached.get("name") or "tool",
+                    "result": cached.get("content", ""),
                 }
                 continue
-            if routine_key:
-                executed_routine_runs.add(routine_key)
+            if turn_key and turn_key in pending_index_by_key:
+                duplicate_source_by_index[index] = pending_index_by_key[turn_key]
+                continue
+            if turn_key:
+                pending_key_by_index[index] = turn_key
+                pending_index_by_key[turn_key] = index
             original_index_by_call_id[id(call)] = index
             calls_to_execute.append(call)
 
@@ -952,7 +964,10 @@ def generate_chat_events(
                     yield {"type": "tool_start", "id": original_index, "name": spec.name, "arguments": spec.arguments}
                     result = execute_tool_call(spec)
                     yield {"type": "tool_end", "id": original_index, "name": spec.name, "result": result.content}
-                    tool_results_by_index[original_index] = result.as_tool_message()
+                    tool_message = result.as_tool_message()
+                    tool_results_by_index[original_index] = tool_message
+                    if original_index in pending_key_by_index:
+                        executed_tool_calls[pending_key_by_index[original_index]] = dict(tool_message)
                 continue
 
             yield {
@@ -971,7 +986,20 @@ def generate_chat_events(
                     result = future.result()
                     original_index = original_index_by_call_id[id(result.spec.raw)]
                     yield {"type": "tool_end", "id": original_index, "name": result.spec.name, "result": result.content}
-                    tool_results_by_index[original_index] = result.as_tool_message()
+                    tool_message = result.as_tool_message()
+                    tool_results_by_index[original_index] = tool_message
+                    if original_index in pending_key_by_index:
+                        executed_tool_calls[pending_key_by_index[original_index]] = dict(tool_message)
+
+        for index, source_index in sorted(duplicate_source_by_index.items()):
+            cached = dict(tool_results_by_index[source_index])
+            tool_results_by_index[index] = cached
+            yield {
+                "type": "tool_end",
+                "id": index,
+                "name": cached.get("tool_name") or cached.get("name") or "tool",
+                "result": cached.get("content", ""),
+            }
 
         tool_results = [tool_results_by_index[index] for index in sorted(tool_results_by_index)]
             
@@ -979,11 +1007,7 @@ def generate_chat_events(
             history_data.extend(tool_results)
             reminder = {
                 "role": "user",
-                "content": (
-                    "Continue the current turn using the tool result above. Answer this "
-                    "original request directly; do not ask the user to repeat it:\n"
-                    f"{user_input}"
-                ),
+                "content": TOOL_CONTINUATION_PROMPT.format(user_input=user_input),
             }
             messages_to_send = prepare_messages_for_model(
                 [*history_data, reminder],
@@ -996,11 +1020,7 @@ def generate_chat_events(
             messages_to_send.extend(tool_results)
             messages_to_send.append({
                 "role": "user",
-                "content": (
-                    "Continue the current turn using the tool result above. Answer this "
-                    "original request directly; do not ask the user to repeat it:\n"
-                    f"{user_input}"
-                ),
+                "content": TOOL_CONTINUATION_PROMPT.format(user_input=user_input),
             })
             messages_to_send = prepare_messages_for_model(
                 messages_to_send,

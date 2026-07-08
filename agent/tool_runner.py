@@ -59,7 +59,12 @@ class ToolCallResult:
     content: str
 
     def as_tool_message(self) -> dict:
-        return {"role": "tool", "tool_name": self.spec.name, "content": self.content}
+        return {
+            "role": "tool",
+            "tool_name": self.spec.name,
+            "name": self.spec.name,
+            "content": self.content,
+        }
 
 
 def normalize_tool_calls(tool_calls: Iterable[dict]) -> list[ToolCallSpec]:
