@@ -59,7 +59,7 @@ const state = {
     thinkingBlock: null,
     thinkingContent: null,
     thinkingText: "",
-    lastToolBlock: null
+    activeToolBlocks: new Map()
   },
   slash: {
     open: false,
@@ -763,20 +763,32 @@ function handleStreamEvent(event, generation) {
         state.stream.assistantStack.appendChild(state.stream.thinkingBlock);
       }
       state.stream.thinkingBlock.classList.add("running");
-      state.stream.lastToolBlock = toolIndicator(event.name || "tool", true);
-      state.stream.thinkingBlock.querySelector(".block-body")?.appendChild(state.stream.lastToolBlock);
+      {
+        const toolId = String(event.id ?? `${event.name || "tool"}-${state.stream.activeToolBlocks.size}`);
+        const block = toolIndicator(event.name || "tool", true);
+        state.stream.activeToolBlocks.set(toolId, block);
+        state.stream.thinkingBlock.querySelector(".block-body")?.appendChild(block);
+      }
       scrollThinkingToBottom(state.stream.thinkingBlock);
       scrollToBottom();
       break;
     case "tool_end":
       if (!visible) break;
-      if (state.stream.lastToolBlock) {
-        state.stream.lastToolBlock.classList.remove("running");
-        const status = state.stream.lastToolBlock.querySelector(".tool-indicator-status");
+      {
+        const toolId = String(event.id ?? "");
+        const fallbackEntry = state.stream.activeToolBlocks.entries().next().value;
+        const block = state.stream.activeToolBlocks.get(toolId) || fallbackEntry?.[1];
+        if (!block) break;
+        block.classList.remove("running");
+        const status = block.querySelector(".tool-indicator-status");
         if (status) status.textContent = `Used ${humanizeToolName(event.name || "tool")}`;
+        if (state.stream.activeToolBlocks.has(toolId)) {
+          state.stream.activeToolBlocks.delete(toolId);
+        } else if (fallbackEntry) {
+          state.stream.activeToolBlocks.delete(fallbackEntry[0]);
+        }
       }
-      state.stream.thinkingBlock?.classList.remove("running");
-      state.stream.lastToolBlock = null;
+      if (!state.stream.activeToolBlocks.size) state.stream.thinkingBlock?.classList.remove("running");
       break;
     case "content_chunk":
       if (!visible) break;
@@ -789,7 +801,7 @@ function handleStreamEvent(event, generation) {
         state.stream.thinkingBlock = null;
         state.stream.thinkingContent = null;
         state.stream.thinkingText = "";
-        state.stream.lastToolBlock = null;
+        state.stream.activeToolBlocks.clear();
       }
       state.stream.assistantText += event.text || event.content || "";
       state.stream.assistantBubble.innerHTML = renderMarkdown(state.stream.assistantText);
@@ -839,7 +851,7 @@ function resetStream() {
   state.stream.thinkingBlock = null;
   state.stream.thinkingContent = null;
   state.stream.thinkingText = "";
-  state.stream.lastToolBlock = null;
+  state.stream.activeToolBlocks.clear();
 }
 
 function settleStreamActivity(interrupted = false) {
@@ -847,10 +859,10 @@ function settleStreamActivity(interrupted = false) {
   // aborted or the connection fails. Settle the DOM before resetStream drops
   // the only references to these still-visible elements.
   state.stream.thinkingBlock?.classList.remove("open", "running");
-  if (state.stream.lastToolBlock) {
-    state.stream.lastToolBlock.classList.remove("running");
+  for (const block of state.stream.activeToolBlocks.values()) {
+    block.classList.remove("running");
     if (interrupted) {
-      const status = state.stream.lastToolBlock.querySelector(".tool-indicator-status");
+      const status = block.querySelector(".tool-indicator-status");
       if (status) status.textContent = "Tool use stopped";
     }
   }

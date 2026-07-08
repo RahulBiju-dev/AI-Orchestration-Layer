@@ -81,6 +81,8 @@ When the model decides a tool is needed, it emits a structured JSON object inste
 
 The agent intercepts this, dispatches to the corresponding Python function via a **dispatch table** (`TOOL_DISPATCH`), and feeds the return value back to the model as a `tool` role message. The model never executes code directly — it only emits structured requests that the agent mediates.
 
+When the model emits multiple independent read-only tool calls in the same response, Selene runs the safe calls concurrently and feeds the results back in the original order. Side-effecting tools and dependency-sensitive chains, such as current-date preflights before web search or scraping, remain ordered.
+
 **Why this matters:** The model's training data has a knowledge cutoff. Tool calling allows it to bridge that gap with real-time data, local filesystem access, and system integration — all while keeping execution sandboxed in Python handlers.
 
 ### Streaming Inference
@@ -133,7 +135,12 @@ The **context window** (`num_ctx`) is the maximum number of tokens the model can
 The agent manages this automatically:
 
 - **Default `num_ctx` is 8192** — sized to fit the model + KV cache entirely in GPU VRAM on consumer GPUs (4-8GB).
-- **History trimming and compaction** keep the prompt within the active token budget. Near 90% usage, older turns are summarized and passed through the context optimizer while system instructions and recent exchanges remain intact; hard trimming remains the final bound.
+- **System prompt persistence** keeps the active model system prompt in every model request. Selene reads the local `Modelfile` system prompt first, then falls back to Ollama's built-model prompt, then to `~/.selene-agent/system_prompt_cache.txt` (or `$SELENE_DATA_DIR/system_prompt_cache.txt`). This makes prompt edits effective at runtime even before the model is rebuilt, while still keeping a durable fallback.
+- **System reminder anchoring** adds a compact runtime system reminder near the active user turn while preserving the full system prompt at the front. This helps long conversations retain tool/evidence rules even when the beginning of the context is far away.
+- **History trimming and compaction** keep the prompt within the active token budget. Near 75% usage, older turns are summarized and passed through the context optimizer while system instructions and recent exchanges remain intact; hard trimming remains the final bound.
+- **Context preflight guards** reserve output space before every Ollama call, including follow-up calls after tools. The guard counts serialized chat messages, the runtime tool schema list, a safety margin, and the requested `num_predict` output budget; if necessary it lowers `num_predict` for that call instead of letting generation run into the end of the context window mid-response.
+- **Compact runtime tool schemas** are sent to Ollama instead of the verbose documentation schemas. Function names, descriptions, parameters, required fields, and enums are preserved, but prose-heavy parameter descriptions are stripped because the detailed tool explanations already live in the system prompt and README.
+- **Graceful overflow handling** stops before generation if the prompt still cannot safely fit after trimming. In that case Selene returns a controlled warning asking for a narrower request, a fresh chat, or a larger `num_ctx`, rather than producing unstable output.
 - Both values can be overridden at runtime via `/set parameter num_ctx <value>`.
 
 ---
@@ -660,6 +667,7 @@ AI-CLI-Agent/
 ├── agent/
 │   ├── __init__.py
 │   ├── core.py                # Terminal chat loop, tool dispatch, streaming, session mgmt
+│   ├── tool_runner.py         # Shared ordered/parallel tool-call execution
 │   ├── terminal.py            # ANSI helpers, spinner, LaTeX renderer, Markdown
 │   ├── web.py                 # Threaded HTTP server, SSE generator, session/API routes
 │   └── static/
@@ -696,7 +704,7 @@ AI-CLI-Agent/
 └── .gitignore
 ```
 
-Runtime data is kept outside the checkout in `~/.selene-agent/` by default. This includes conversations, `routines.json`, `google_oauth.enc`, `vaults/`, `.chroma/`, and `codebase_indexes.json`. Override the parent directory with `SELENE_DATA_DIR=/your/path`.
+Runtime data is kept outside the checkout in `~/.selene-agent/` by default. This includes conversations, `routines.json`, `system_prompt_cache.txt`, `google_oauth.enc`, `vaults/`, `.chroma/`, and `codebase_indexes.json`. Override the parent directory with `SELENE_DATA_DIR=/your/path`.
 
 ### Key Design Decisions
 
@@ -704,10 +712,10 @@ Runtime data is kept outside the checkout in `~/.selene-agent/` by default. This
 - **SSE over WebSockets** — Server-Sent Events are used for token streaming because they need only a standard HTTP connection, require no upgrade handshake, and reconnect automatically on drop.
 - **`ThreadingMixIn` HTTP server** — `web.py` uses Python's `socketserver.ThreadingMixIn` so each request (including long-lived SSE connections) runs in its own daemon thread, preventing a slow generation from blocking the session API.
 - **Shared `GLOBAL_STATE`** — a single in-process dict holds history and session parameters, making state trivially accessible across request handlers without an external store.
-- **Tool schemas are compressed** to minimise prompt token overhead — they're sent with every LLM call, so shorter descriptions directly improve prefill speed.
+- **Tool schemas are compacted at runtime** to minimise prompt token overhead — detailed descriptions stay in the system prompt/docs, while the schemas sent with each LLM call keep only the callable structure needed for tool calling.
 - **Streaming is throttled** at ~12 FPS in the terminal to avoid CPU-bound Markdown re-rendering from bottlenecking the token pipeline. The Web UI receives every token immediately via SSE.
 - **All regex patterns are pre-compiled** at module load time in `terminal.py`, not on each rendering pass.
-- **History is trimmed** using a token budget heuristic (1 token ≈ 4 characters) to keep prompt size bounded without requiring a tokeniser dependency.
+- **History is trimmed** using a conservative serialized-message token heuristic (roughly 1 token ≈ 4 characters plus role/tool overhead), with response headroom reserved before every Ollama request.
 - **Vault embeddings** use the local `embeddinggemma` model via Ollama's HTTP API, falling back to the Python client if the HTTP endpoint changes.
 
 ---

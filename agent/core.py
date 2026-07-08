@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 from agent.terminal import (
     _console,
     _print_status,
@@ -38,12 +39,35 @@ except ImportError:
 import ollama
 from rich.live import Live
 
+from agent.tool_runner import ToolCallResult, ToolCallSpec, execute_tool_calls
 from tools.registry import TOOL_DISPATCH, TOOL_SCHEMAS
 
 # ── Configuration ─────────────────────────────────────────────────────
 
 MODEL_NAME = "selene"
 _SESSIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sessions")
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DATA_DIR = os.environ.get("SELENE_DATA_DIR", os.path.expanduser("~/.selene-agent"))
+_SYSTEM_PROMPT_CACHE_FILE = os.path.join(_DATA_DIR, "system_prompt_cache.txt")
+_DEFAULT_SYSTEM_PROMPT: str | None = None
+_DEFAULT_SYSTEM_PROMPT_MTIME: float | None = None
+_COMPACT_TOOL_SCHEMAS_CACHE: dict[int, list[dict]] = {}
+
+DEFAULT_NUM_CTX = 8192
+DEFAULT_NUM_PREDICT = 2048
+MIN_RESPONSE_RESERVE_TOKENS = 256
+MIN_EMERGENCY_RESPONSE_TOKENS = 96
+CONTEXT_SAFETY_MARGIN_RATIO = 0.08
+CONTEXT_TOOL_LOOP_RESERVE = 512
+SYSTEM_PERSISTENCE_REMINDER = (
+    "Runtime system reminder: Follow the active system prompt exactly. "
+    "Use tools over memory for verifiable state, preserve the vault > web > internal knowledge hierarchy, "
+    "do not invent facts or tool results, and answer the latest user request directly."
+)
+
+
+class ContextWindowError(RuntimeError):
+    """Raised when a prompt cannot safely fit inside the configured context."""
 
 # Parameters that accept float values via /set parameter
 _FLOAT_PARAMS = {"temperature", "top_p", "top_k", "repeat_penalty", "presence_penalty", "frequency_penalty", "min_p", "tfs_z"}
@@ -71,6 +95,180 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4 + 1
 
 
+def _estimate_message_tokens(message: dict) -> int:
+    """Estimate serialized chat-message tokens, including role/tool overhead."""
+    try:
+        serialized = json.dumps(message, ensure_ascii=False, default=str)
+    except TypeError:
+        serialized = str(message)
+    return _estimate_tokens(serialized) + 4
+
+
+def _estimate_messages_tokens(messages: list[dict]) -> int:
+    return sum(_estimate_message_tokens(message) for message in messages)
+
+
+def _estimate_tool_schema_tokens(tools: list[dict] | None) -> int:
+    if not tools:
+        return 0
+    try:
+        return _estimate_tokens(json.dumps(tools, ensure_ascii=False, default=str))
+    except TypeError:
+        return _estimate_tokens(str(tools))
+
+
+def _compact_json_schema(value):
+    """Remove prose-heavy schema fields while preserving callable structure."""
+    if isinstance(value, list):
+        return [_compact_json_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    compact: dict = {}
+    for key, child in value.items():
+        if key == "description" and isinstance(child, str):
+            continue
+        compact[key] = _compact_json_schema(child)
+    return compact
+
+
+def compact_tool_schemas(tools: list[dict] | None) -> list[dict] | None:
+    """Return lean Ollama tool schemas for lower prompt overhead."""
+    if not tools:
+        return tools
+    cache_key = id(tools)
+    cached = _COMPACT_TOOL_SCHEMAS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    compact_tools: list[dict] = []
+    for tool in tools:
+        function = dict(tool.get("function") or {})
+        parameters = _compact_json_schema(function.get("parameters") or {})
+        description = str(function.get("description") or "").strip()
+        if len(description) > 220:
+            description = description[:217].rstrip() + "..."
+        compact_function = {
+            "name": function.get("name"),
+            "description": description,
+            "parameters": parameters,
+        }
+        compact_tools.append({"type": "function", "function": compact_function})
+
+    _COMPACT_TOOL_SCHEMAS_CACHE[cache_key] = compact_tools
+    return compact_tools
+
+
+def _context_window_size(options: dict | None = None) -> int:
+    try:
+        return max(1024, int((options or {}).get("num_ctx") or DEFAULT_NUM_CTX))
+    except (TypeError, ValueError):
+        return DEFAULT_NUM_CTX
+
+
+def _requested_response_tokens(options: dict | None = None) -> int:
+    try:
+        return max(MIN_RESPONSE_RESERVE_TOKENS, int((options or {}).get("num_predict") or DEFAULT_NUM_PREDICT))
+    except (TypeError, ValueError):
+        return DEFAULT_NUM_PREDICT
+
+
+def _context_safety_margin(num_ctx: int) -> int:
+    return max(256, int(num_ctx * CONTEXT_SAFETY_MARGIN_RATIO))
+
+
+def _extract_system_prompt_from_modelfile() -> str:
+    path = os.path.join(_PROJECT_ROOT, "Modelfile")
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            text = stream.read()
+    except OSError:
+        return ""
+    match = re.search(r'SYSTEM\s+"""(.*?)"""', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def _modelfile_mtime() -> float | None:
+    try:
+        return os.path.getmtime(os.path.join(_PROJECT_ROOT, "Modelfile"))
+    except OSError:
+        return None
+
+
+def _write_system_prompt_cache(prompt: str) -> None:
+    prompt = str(prompt or "").strip()
+    if not prompt:
+        return
+    try:
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        with open(_SYSTEM_PROMPT_CACHE_FILE, "w", encoding="utf-8") as stream:
+            stream.write(prompt)
+    except OSError:
+        pass
+
+
+def _read_system_prompt_cache() -> str:
+    try:
+        with open(_SYSTEM_PROMPT_CACHE_FILE, "r", encoding="utf-8") as stream:
+            return stream.read().strip()
+    except OSError:
+        return ""
+
+
+def load_default_system_prompt(force_refresh: bool = False) -> str:
+    """Load and persist the active model system prompt with durable fallbacks."""
+    global _DEFAULT_SYSTEM_PROMPT, _DEFAULT_SYSTEM_PROMPT_MTIME
+    current_mtime = _modelfile_mtime()
+    if (
+        _DEFAULT_SYSTEM_PROMPT is not None
+        and not force_refresh
+        and current_mtime == _DEFAULT_SYSTEM_PROMPT_MTIME
+    ):
+        return _DEFAULT_SYSTEM_PROMPT
+
+    prompt = _extract_system_prompt_from_modelfile()
+    try:
+        result = subprocess.run(
+            ["ollama", "show", MODEL_NAME, "--system"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if not prompt and result.returncode == 0:
+            prompt = result.stdout.strip()
+    except Exception:
+        pass
+
+    if prompt:
+        _write_system_prompt_cache(prompt)
+    else:
+        prompt = _read_system_prompt_cache()
+        if prompt:
+            _write_system_prompt_cache(prompt)
+
+    _DEFAULT_SYSTEM_PROMPT = prompt
+    _DEFAULT_SYSTEM_PROMPT_MTIME = current_mtime
+    return prompt
+
+
+def _split_system_and_conversation(messages: list[dict]) -> tuple[list[dict], list[dict]]:
+    system_messages: list[dict] = []
+    conversation_messages: list[dict] = []
+    for message in messages:
+        if message.get("role") == "system":
+            content = str(message.get("content", "")).strip()
+            if content:
+                system_messages.append({"role": "system", "content": content})
+        else:
+            conversation_messages.append(message)
+    if system_messages:
+        # One authoritative system message avoids accumulated stale overrides.
+        system_messages = [system_messages[0]]
+    return system_messages, conversation_messages
+
+
 _interrupted = False
 
 def _sigquit_handler(signum, frame):
@@ -88,7 +286,13 @@ def _sigquit_handler(signum, frame):
     _interrupted = True
 
 
-def _trim_history(messages: list[dict], num_ctx: int = 8192) -> list[dict]:
+def _trim_history(
+    messages: list[dict],
+    num_ctx: int = DEFAULT_NUM_CTX,
+    *,
+    reserved_tokens: int = DEFAULT_NUM_PREDICT,
+    tool_schema_tokens: int = 0,
+) -> list[dict]:
     """Trim conversation history to fit within a dynamic token budget.
 
     Preserves the system prompt (if any) and the most recent messages.
@@ -99,23 +303,21 @@ def _trim_history(messages: list[dict], num_ctx: int = 8192) -> list[dict]:
         num_ctx (int, optional): The context window size. Defaults to 8192.
         
     Returns:
-        list[dict]: A trimmed list of messages fitting the 95% budget.
+        list[dict]: A trimmed list of messages with response/tool headroom.
     """
-    budget = int(num_ctx * 0.95)
     if not messages:
         return messages
+    margin = _context_safety_margin(num_ctx)
+    budget = max(
+        512,
+        int(num_ctx) - max(0, int(reserved_tokens)) - max(0, int(tool_schema_tokens)) - margin,
+    )
 
     # Separate system prompt from conversation to ensure it is always preserved
-    system_msgs = []
-    conv_msgs = []
-    for msg in messages:
-        if msg.get("role") == "system":
-            system_msgs.append(msg)
-        else:
-            conv_msgs.append(msg)
+    system_msgs, conv_msgs = _split_system_and_conversation(messages)
 
     # Calculate system prompt cost
-    system_cost = sum(_estimate_tokens(m.get("content", "")) for m in system_msgs)
+    system_cost = _estimate_messages_tokens(system_msgs)
     remaining_budget = budget - system_cost
 
     if remaining_budget <= 0:
@@ -126,9 +328,7 @@ def _trim_history(messages: list[dict], num_ctx: int = 8192) -> list[dict]:
     kept: list[dict] = []
     used = 0
     for msg in reversed(conv_msgs):
-        content = msg.get("content", "")
-        thinking = msg.get("thinking", "")
-        cost = _estimate_tokens(content) + _estimate_tokens(thinking)
+        cost = _estimate_message_tokens(msg)
         if used + cost > remaining_budget and kept:
             break
         kept.append(msg)
@@ -136,6 +336,84 @@ def _trim_history(messages: list[dict], num_ctx: int = 8192) -> list[dict]:
 
     kept.reverse()
     return system_msgs + kept
+
+
+def _insert_system_persistence_reminder(messages: list[dict]) -> list[dict]:
+    """Keep a compact system-policy anchor near the active turn in long prompts."""
+    system_msgs, conv_msgs = _split_system_and_conversation(messages)
+    if not system_msgs or not conv_msgs:
+        return messages
+
+    reminder = {"role": "system", "content": SYSTEM_PERSISTENCE_REMINDER}
+    insert_at = len(conv_msgs)
+    for index in range(len(conv_msgs) - 1, -1, -1):
+        if conv_msgs[index].get("role") == "user":
+            insert_at = index
+            break
+    return [*system_msgs, *conv_msgs[:insert_at], reminder, *conv_msgs[insert_at:]]
+
+
+def prepare_messages_for_model(
+    messages: list[dict],
+    session: dict,
+    tools: list[dict] | None = None,
+    *,
+    extra_reserved_tokens: int = 0,
+) -> list[dict]:
+    """Trim outgoing prompts with system preservation and response headroom."""
+    options = session.get("options", {}) if isinstance(session, dict) else {}
+    num_ctx = _context_window_size(options)
+    requested_response = _requested_response_tokens(options)
+    runtime_tools = compact_tool_schemas(tools)
+    tool_tokens = _estimate_tool_schema_tokens(runtime_tools)
+    reserved = requested_response + max(0, int(extra_reserved_tokens))
+
+    trimmed = _trim_history(
+        messages,
+        num_ctx,
+        reserved_tokens=reserved,
+        tool_schema_tokens=tool_tokens,
+    )
+    prepared = _insert_system_persistence_reminder(trimmed)
+
+    # If the tail reminder pushes the prompt too close to the edge, trim once
+    # more with the reminder overhead included, then reinsert it.
+    projected = _estimate_messages_tokens(prepared) + tool_tokens + reserved + _context_safety_margin(num_ctx)
+    if projected > num_ctx:
+        reminder_tokens = _estimate_message_tokens({"role": "system", "content": SYSTEM_PERSISTENCE_REMINDER})
+        trimmed = _trim_history(
+            messages,
+            num_ctx,
+            reserved_tokens=reserved + reminder_tokens,
+            tool_schema_tokens=tool_tokens,
+        )
+        prepared = _insert_system_persistence_reminder(trimmed)
+    return prepared
+
+
+def guarded_options_for_call(
+    messages: list[dict],
+    options: dict | None = None,
+    tools: list[dict] | None = None,
+) -> dict | None:
+    """Return options with a safe per-call num_predict cap."""
+    base_options = dict(options or {})
+    num_ctx = _context_window_size(base_options)
+    runtime_tools = compact_tool_schemas(tools)
+    prompt_tokens = _estimate_messages_tokens(messages) + _estimate_tool_schema_tokens(runtime_tools)
+    available = num_ctx - prompt_tokens - _context_safety_margin(num_ctx)
+
+    if available < MIN_EMERGENCY_RESPONSE_TOKENS:
+        raise ContextWindowError(
+            "The outgoing prompt is still too large after trimming. "
+            "Increase num_ctx, start a fresh chat, or ask for a narrower answer."
+        )
+
+    requested = _requested_response_tokens(base_options)
+    safe_predict = max(MIN_EMERGENCY_RESPONSE_TOKENS, min(requested, available))
+    if safe_predict < requested:
+        base_options["num_predict"] = safe_predict
+    return base_options or None
 
 
 def _compact_history_bg(history: list[dict], session: dict, start_idx: int, end_idx: int) -> None:
@@ -191,14 +469,14 @@ def _compact_history_bg(history: list[dict], session: dict, start_idx: int, end_
 
 
 def _check_and_compact_history(history: list[dict], session: dict) -> None:
-    """Check token usage and trigger background compaction if > 90%."""
+    """Check token usage and trigger background compaction if > 75%."""
     if session.get("_is_compacting"):
         return
         
-    num_ctx = session.get("options", {}).get("num_ctx", 8192)
-    compact_threshold = int(num_ctx * 0.90)
+    num_ctx = _context_window_size(session.get("options", {}))
+    compact_threshold = int(num_ctx * 0.75)
     
-    total_tokens = sum(_estimate_tokens(m.get("content", "") + m.get("thinking", "")) for m in history)
+    total_tokens = _estimate_messages_tokens(history)
     
     if total_tokens > compact_threshold:
         # Determine the slice to compact. Keep system prompt (idx 0) and at least the 4 most recent messages (e.g. 2 turns).
@@ -241,11 +519,20 @@ def _stream_thinking_response(
     """
     spinner = _Spinner("Thinking").start()
     t_start = time.monotonic()
+    runtime_tools = compact_tool_schemas(tools)
 
     thinking_buf = ""
     content_buf = ""
     in_thinking = False
     thinking_displayed = False
+
+    try:
+        guarded_options = guarded_options_for_call(messages, options, runtime_tools)
+    except ContextWindowError as exc:
+        spinner.stop()
+        message = f"Context window guard stopped this response before generation: {exc}"
+        _console.print(f"\n[yellow]⚠ {message}[/]\n")
+        return {"role": "assistant", "content": message}
 
     kwargs: dict = {
         "model": model,
@@ -256,10 +543,10 @@ def _stream_thinking_response(
     }
     if fmt:
         kwargs["format"] = fmt
-    if tools:
-        kwargs["tools"] = tools
-    if options:
-        kwargs["options"] = options
+    if runtime_tools:
+        kwargs["tools"] = runtime_tools
+    if guarded_options:
+        kwargs["options"] = guarded_options
 
     stream = ollama.chat(**kwargs)
 
@@ -381,6 +668,67 @@ def _stream_thinking_response(
     return assistant_msg
 
 
+def _tool_start_status(spec: ToolCallSpec) -> None:
+    fn_name = spec.name
+    fn_args = spec.arguments
+    if fn_name not in TOOL_DISPATCH:
+        _print_status("⚠", f"Unknown tool: {fn_name}", "red")
+    elif fn_name == "web_search":
+        _print_status("🔍", f"Searching the web: [dim]{fn_args.get('query', '')}[/]", "yellow")
+    elif fn_name == "web_scrape":
+        _print_status("🌐", f"Reading web page: [dim]{fn_args.get('url', '')}[/]", "yellow")
+    elif fn_name == "read_document":
+        _print_status("📄", f"Reading document: [dim]{fn_args.get('file_path', '')}[/]", "yellow")
+    elif fn_name == "read_file":
+        _print_status("📂", f"Reading file: [dim]{fn_args.get('file_path', '')}[/]", "yellow")
+    elif fn_name == "spotify_play":
+        _print_status("🎵", f"Opening Spotify: [dim]{fn_args.get('query', '')}[/]", "yellow")
+    elif fn_name == "open_app":
+        _print_status("🚀", f"Opening app: [dim]{fn_args.get('app_name', '')}[/]", "yellow")
+    elif fn_name == "launch_apps":
+        names = ", ".join(str(value) for value in fn_args.get("app_names", []))
+        _print_status("🚀", f"Opening apps: [dim]{names}[/]", "yellow")
+    elif fn_name == "open_terminal_at_path":
+        _print_status("💻", f"Opening terminal at: [dim]{fn_args.get('path', '')}[/]", "yellow")
+    else:
+        _print_status("⚙️", f"Executing {fn_name}…", "yellow")
+
+
+def _tool_result_has_error(content: str) -> str | None:
+    try:
+        data = json.loads(content)
+    except Exception:
+        return None
+    if isinstance(data, dict) and data.get("error"):
+        return str(data["error"])
+    return None
+
+
+def _tool_end_status(result: ToolCallResult) -> None:
+    error = _tool_result_has_error(result.content)
+    if error:
+        _print_status("❌", f"Error executing {result.spec.name}: {error}", "red")
+        return
+    if result.spec.name == "web_search":
+        _print_status("✓", "Search complete — synthesizing answer…", "green")
+    elif result.spec.name == "web_scrape":
+        _print_status("✓", "Page read — synthesizing answer…", "green")
+    elif result.spec.name == "read_document":
+        _print_status("✓", "Document read — synthesizing answer…", "green")
+    elif result.spec.name == "read_file":
+        _print_status("✓", "File read — synthesizing answer…", "green")
+    elif result.spec.name == "spotify_play":
+        _print_status("✓", "Spotify action complete — synthesizing answer…", "green")
+    elif result.spec.name == "open_app":
+        _print_status("✓", "App launch request sent — synthesizing answer…", "green")
+    elif result.spec.name == "launch_apps":
+        _print_status("✓", "App launch requests processed — synthesizing answer…", "green")
+    elif result.spec.name == "open_terminal_at_path":
+        _print_status("✓", "Terminal launch request sent — synthesizing answer…", "green")
+    else:
+        _print_status("✓", "Tool execution complete — synthesizing answer…", "green")
+
+
 def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
     """Execute each tool call from the model and format the results.
     
@@ -394,62 +742,17 @@ def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
     Returns:
         list[dict]: A list of message objects containing the execution results.
     """
-    tool_messages: list[dict] = []
-
-    for call in tool_calls:
-        fn_name = call["function"]["name"]
-        fn_args = call["function"]["arguments"]
-
-        handler = TOOL_DISPATCH.get(fn_name)
-        if handler is None:
-            _print_status("⚠", f"Unknown tool: {fn_name}", "red")
-            result = json.dumps({"error": f"Unknown tool '{fn_name}'"})
-        else:
-            try:
-                if fn_name == "web_search":
-                    _print_status("🔍", f"Searching the web: [dim]{fn_args.get('query', '')}[/]", "yellow")
-                    result = handler(**fn_args)
-                    _print_status("✓", "Search complete — synthesizing answer…", "green")
-                elif fn_name == "web_scrape":
-                    _print_status("🌐", f"Reading web page: [dim]{fn_args.get('url', '')}[/]", "yellow")
-                    result = handler(**fn_args)
-                    _print_status("✓", "Page read — synthesizing answer…", "green")
-                elif fn_name == "read_document":
-                    _print_status("📄", f"Reading document: [dim]{fn_args.get('file_path', '')}[/]", "yellow")
-                    result = handler(**fn_args)
-                    _print_status("✓", "Document read — synthesizing answer…", "green")
-                elif fn_name == "read_file":
-                    _print_status("📂", f"Reading file: [dim]{fn_args.get('file_path', '')}[/]", "yellow")
-                    result = handler(**fn_args)
-                    _print_status("✓", "File read — synthesizing answer…", "green")
-                elif fn_name == "spotify_play":
-                    _print_status("🎵", f"Opening Spotify: [dim]{fn_args.get('query', '')}[/]", "yellow")
-                    result = handler(**fn_args)
-                    _print_status("✓", "Spotify action complete — synthesizing answer…", "green")
-                elif fn_name == "open_app":
-                    _print_status("🚀", f"Opening app: [dim]{fn_args.get('app_name', '')}[/]", "yellow")
-                    result = handler(**fn_args)
-                    _print_status("✓", "App launch request sent — synthesizing answer…", "green")
-                elif fn_name == "launch_apps":
-                    names = ", ".join(str(value) for value in fn_args.get("app_names", []))
-                    _print_status("🚀", f"Opening apps: [dim]{names}[/]", "yellow")
-                    result = handler(**fn_args)
-                    _print_status("✓", "App launch requests processed — synthesizing answer…", "green")
-                elif fn_name == "open_terminal_at_path":
-                    _print_status("💻", f"Opening terminal at: [dim]{fn_args.get('path', '')}[/]", "yellow")
-                    result = handler(**fn_args)
-                    _print_status("✓", "Terminal launch request sent — synthesizing answer…", "green")
-                else:
-                    _print_status("⚙️", f"Executing {fn_name}…", "yellow")
-                    result = handler(**fn_args)
-                    _print_status("✓", "Tool execution complete — synthesizing answer…", "green")
-            except Exception as e:
-                _print_status("❌", f"Error executing {fn_name}: {e}", "red")
-                result = json.dumps({"error": f"Tool execution failed: {str(e)}"})
-
-        tool_messages.append({"role": "tool", "tool_name": fn_name, "content": result})
-
-    return tool_messages
+    results = execute_tool_calls(
+        tool_calls,
+        on_start=_tool_start_status,
+        on_end=_tool_end_status,
+        on_parallel_batch=lambda batch: _print_status(
+            "⚡",
+            f"Running {len(batch)} independent tools in parallel…",
+            "cyan",
+        ),
+    )
+    return [result.as_tool_message() for result in results]
 
 
 # ── Slash commands ────────────────────────────────────────────────────
@@ -1201,14 +1504,7 @@ def run() -> None:
     Initializes state, parses user input, handles commands, constructs history,
     and runs the streaming generator loop.
     """
-    import subprocess
-    default_system_prompt = ""
-    try:
-        res = subprocess.run(["ollama", "show", MODEL_NAME, "--system"], capture_output=True, text=True)
-        if res.returncode == 0:
-            default_system_prompt = res.stdout.strip()
-    except Exception:
-        pass
+    default_system_prompt = load_default_system_prompt()
 
     history: list[dict] = []
     session: dict = {
@@ -1290,8 +1586,7 @@ def run() -> None:
         if session["history"]:
             history.append({"role": "user", "content": user_input})
             # Trim history to keep prompt size bounded for consistent tok/s
-            num_ctx = session["options"].get("num_ctx", 8192)
-            messages_to_send = _trim_history(history, num_ctx)
+            messages_to_send = prepare_messages_for_model(history, session, tools=TOOL_SCHEMAS)
         else:
             messages_to_send = []
             if history and history[0].get("role") == "system":
@@ -1301,6 +1596,7 @@ def run() -> None:
             if pre_tool_message:
                 messages_to_send.append(pre_tool_message)
             messages_to_send.append({"role": "user", "content": user_input})
+            messages_to_send = prepare_messages_for_model(messages_to_send, session, tools=TOOL_SCHEMAS)
 
         # ── LLM call with streaming + thinking ────────────────────────
         assistant_msg = _stream_thinking_response(
@@ -1322,7 +1618,6 @@ def run() -> None:
             if session["history"]:
                 history.extend(tool_results)
                 # Trim history to keep follow-up requests within token budget
-                num_ctx = session["options"].get("num_ctx", 8192)
                 reminder = {
                     "role": "user",
                     "content": (
@@ -1331,7 +1626,12 @@ def run() -> None:
                         f"{user_input}"
                     ),
                 }
-                messages_to_send = _trim_history([*history, reminder], num_ctx)
+                messages_to_send = prepare_messages_for_model(
+                    [*history, reminder],
+                    session,
+                    tools=TOOL_SCHEMAS,
+                    extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
+                )
             else:
                 messages_to_send.append(assistant_msg)
                 messages_to_send.extend(tool_results)
@@ -1343,6 +1643,12 @@ def run() -> None:
                         f"{user_input}"
                     ),
                 })
+                messages_to_send = prepare_messages_for_model(
+                    messages_to_send,
+                    session,
+                    tools=TOOL_SCHEMAS,
+                    extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
+                )
 
             # Follow-up call after tool results — also streamed
             assistant_msg = _stream_thinking_response(

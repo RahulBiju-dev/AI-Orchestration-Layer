@@ -16,11 +16,27 @@ import socket
 import re
 import webbrowser
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import ollama
 
 # Import agent configurations and helpers from core
-from agent.core import MODEL_NAME, _trim_history, _check_and_compact_history
+from agent.core import (
+    CONTEXT_TOOL_LOOP_RESERVE,
+    ContextWindowError,
+    MODEL_NAME,
+    _check_and_compact_history,
+    compact_tool_schemas,
+    guarded_options_for_call,
+    load_default_system_prompt,
+    prepare_messages_for_model,
+)
+from agent.tool_runner import (
+    MAX_PARALLEL_TOOL_WORKERS,
+    build_execution_batches,
+    execute_tool_call,
+    normalize_tool_calls,
+)
 from tools.registry import TOOL_DISPATCH, TOOL_SCHEMAS
 
 # Setup directories
@@ -724,14 +740,7 @@ def generate_chat_events(
             }
             return
     # 1. Sync system prompt override
-    default_system_prompt = ""
-    try:
-        import subprocess
-        res = subprocess.run(["ollama", "show", MODEL_NAME, "--system"], capture_output=True, text=True)
-        if res.returncode == 0:
-            default_system_prompt = res.stdout.strip()
-    except Exception:
-        pass
+    default_system_prompt = load_default_system_prompt()
         
     active_system = session_data.get("system") or default_system_prompt
     if active_system:
@@ -771,7 +780,7 @@ def generate_chat_events(
         history_data.append({"role": "user", "content": user_input})
         # Persist the prompt immediately so stopping a generation cannot lose it.
         save_session_snapshot(origin_name, session_data, history_data)
-        messages_to_send = _trim_history(history_data)
+        messages_to_send = prepare_messages_for_model(history_data, session_data, tools=TOOL_SCHEMAS)
     else:
         messages_to_send = []
         if history_data and history_data[0].get("role") == "system":
@@ -779,9 +788,33 @@ def generate_chat_events(
         if pre_tool_message:
             messages_to_send.append(pre_tool_message)
         messages_to_send.append({"role": "user", "content": user_input})
+        messages_to_send = prepare_messages_for_model(messages_to_send, session_data, tools=TOOL_SCHEMAS)
         
     # 4. Stream response loop (supports tool execution and model chain-calling)
     while True:
+        runtime_tools = compact_tool_schemas(TOOL_SCHEMAS)
+        try:
+            guarded_options = guarded_options_for_call(
+                messages_to_send,
+                session_data.get("options"),
+                runtime_tools,
+            )
+        except ContextWindowError as exc:
+            message = f"Context window guard stopped this response before generation: {exc}"
+            yield {"type": "status", "message": message, "color": "yellow"}
+            assistant_msg = {"role": "assistant", "content": message}
+            if session_data.get("history", True):
+                history_data.append(assistant_msg)
+                save_session_snapshot(origin_name, session_data, history_data)
+            yield {"type": "content_chunk", "content": message}
+            yield {
+                "type": "done",
+                "history": history_data,
+                "active_session_name": origin_name,
+                "saved_sessions": list_saved_sessions(),
+            }
+            break
+
         kwargs = {
             "model": MODEL_NAME,
             "messages": messages_to_send,
@@ -791,10 +824,10 @@ def generate_chat_events(
         }
         if session_data.get("format"):
             kwargs["format"] = session_data["format"]
-        if TOOL_SCHEMAS:
-            kwargs["tools"] = TOOL_SCHEMAS
-        if session_data.get("options"):
-            kwargs["options"] = session_data["options"]
+        if runtime_tools:
+            kwargs["tools"] = runtime_tools
+        if guarded_options:
+            kwargs["options"] = guarded_options
             
         try:
             stream = ollama.chat(**kwargs)
@@ -889,38 +922,36 @@ def generate_chat_events(
         # Execute tool calls
         yield {"type": "tool_calls_start", "calls": tool_calls}
         
-        tool_results = []
-        for tc in tool_calls:
-            fn = tc["function"]
-            fn_name = fn["name"]
-            fn_args = fn["arguments"]
-            
-            yield {"type": "tool_start", "name": fn_name, "arguments": fn_args}
-            
-            handler = TOOL_DISPATCH.get(fn_name)
-            if not handler:
-                result_str = f"Error: Tool {fn_name} not found in registry."
-            else:
-                try:
-                    res = handler(**fn_args)
-                    if isinstance(res, str):
-                        result_str = res
-                    else:
-                        result_str = json.dumps(res)
-                except Exception as e:
-                    result_str = f"Error: {e}"
-                    
-            yield {"type": "tool_end", "name": fn_name, "result": result_str}
-            
-            tool_results.append({
-                "role": "tool",
-                "tool_name": fn_name,
-                "content": result_str
-            })
+        tool_results_by_index = {}
+        for can_parallel, batch in build_execution_batches(normalize_tool_calls(tool_calls)):
+            if not can_parallel:
+                for spec in batch:
+                    yield {"type": "tool_start", "id": spec.index, "name": spec.name, "arguments": spec.arguments}
+                    result = execute_tool_call(spec)
+                    yield {"type": "tool_end", "id": result.spec.index, "name": spec.name, "result": result.content}
+                    tool_results_by_index[spec.index] = result.as_tool_message()
+                continue
+
+            yield {
+                "type": "tool_parallel_start",
+                "count": len(batch),
+                "names": [spec.name for spec in batch],
+            }
+            for spec in batch:
+                yield {"type": "tool_start", "id": spec.index, "name": spec.name, "arguments": spec.arguments}
+
+            worker_count = min(MAX_PARALLEL_TOOL_WORKERS, len(batch))
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {executor.submit(execute_tool_call, spec): spec for spec in batch}
+                for future in as_completed(futures):
+                    result = future.result()
+                    yield {"type": "tool_end", "id": result.spec.index, "name": result.spec.name, "result": result.content}
+                    tool_results_by_index[result.spec.index] = result.as_tool_message()
+
+        tool_results = [tool_results_by_index[index] for index in sorted(tool_results_by_index)]
             
         if session_data.get("history", True):
             history_data.extend(tool_results)
-            num_ctx = session_data.get("options", {}).get("num_ctx", 8192)
             reminder = {
                 "role": "user",
                 "content": (
@@ -929,7 +960,12 @@ def generate_chat_events(
                     f"{user_input}"
                 ),
             }
-            messages_to_send = _trim_history([*history_data, reminder], num_ctx)
+            messages_to_send = prepare_messages_for_model(
+                [*history_data, reminder],
+                session_data,
+                tools=TOOL_SCHEMAS,
+                extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
+            )
         else:
             messages_to_send.append(assistant_msg)
             messages_to_send.extend(tool_results)
@@ -941,6 +977,15 @@ def generate_chat_events(
                     f"{user_input}"
                 ),
             })
+            messages_to_send = prepare_messages_for_model(
+                messages_to_send,
+                session_data,
+                tools=TOOL_SCHEMAS,
+                extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
+            )
+
+    if session_data.get("history", True):
+        _check_and_compact_history(history_data, session_data)
 
 
 # ── HTTP Handler ──────────────────────────────────────────────────────
