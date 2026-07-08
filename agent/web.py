@@ -1010,7 +1010,11 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         """
         self.send_response(status_code)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+
+        allowed_origin = os.environ.get('ALLOWED_ORIGIN')
+        if allowed_origin:
+            self.send_header('Access-Control-Allow-Origin', allowed_origin)
+
         self.end_headers()
         self.wfile.write(json.dumps(data).encode('utf-8'))
 
@@ -1044,7 +1048,11 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(content)))
             self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
             self.send_header('Pragma', 'no-cache')
-            self.send_header('Access-Control-Allow-Origin', '*')
+
+            allowed_origin = os.environ.get('ALLOWED_ORIGIN')
+            if allowed_origin:
+                self.send_header('Access-Control-Allow-Origin', allowed_origin)
+
             self.end_headers()
             self.wfile.write(content)
         except OSError:
@@ -1098,7 +1106,11 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         """Handle CORS preflight requests."""
         self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
+
+        allowed_origin = os.environ.get('ALLOWED_ORIGIN')
+        if allowed_origin:
+            self.send_header('Access-Control-Allow-Origin', allowed_origin)
+
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
@@ -1151,7 +1163,11 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Cache-Control', 'no-cache')
             self.send_header('Connection', 'keep-alive')
-            self.send_header('Access-Control-Allow-Origin', '*')
+
+            allowed_origin = os.environ.get('ALLOWED_ORIGIN')
+            if allowed_origin:
+                self.send_header('Access-Control-Allow-Origin', allowed_origin)
+
             self.end_headers()
             
             try:
