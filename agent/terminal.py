@@ -1,27 +1,37 @@
 """
-agent/terminal.py — Terminal helpers and lightweight LaTeX math renderer
+agent/terminal.py — Frontier-lab terminal chrome + LaTeX math renderer
 
-Contains ANSI helpers, a spinner, and a compact LaTeX-to-terminal
-renderer used by the streaming output in `agent.core`.
+Scrollback-friendly CLI surface inspired by refined agent terminals
+(Grok Build / Claude Code): fixed prompt chrome, slash-command palette
+with descriptions and Tab autofill, soft panels, sparse status lines.
+
+LaTeX-to-Unicode rendering used by streaming markdown lives below the UI
+layer and must remain complete.
 """
 from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os.path import commonprefix
-from typing import Sequence
+from typing import Mapping, Sequence
+
 from rich.console import Console
 
 # Shared console (write to stderr so Live and spinner use the same stream)
 _console = Console(stderr=True)
 
 
+# ── Design tokens ─────────────────────────────────────────────────────
+
+
 @dataclass(frozen=True)
 class TerminalTheme:
-    """Frontier-lab palette: cool ice cyan, soft violet, precise mono chrome."""
+    """Portable palette: ice cyan + soft violet on neutral mono chrome.
 
-    # Named colors stay portable across terminal emulators without truecolor.
+    Named colors stay readable on 16-color, 256-color, and truecolor terminals.
+    """
+
     accent: str = "bright_cyan"
     accent_soft: str = "cyan"
     accent_2: str = "bright_magenta"
@@ -33,12 +43,15 @@ class TerminalTheme:
     border: str = "cyan"
     thinking: str = "bright_magenta"
     surface: str = "grey23"
-    prompt_name: str = "bold bright_cyan"
-    prompt_glyph: str = "dim cyan"
-    prompt_mark: str = "bold bright_magenta"
+    prompt_name: str = "bold bright_white"
+    prompt_glyph: str = "bright_cyan"
+    prompt_mark: str = "bold bright_cyan"
     rule: str = "dim cyan"
     label: str = "bold cyan"
     meta: str = "dim"
+    menu_selected: str = "bold bright_cyan"
+    menu_idle: str = "dim"
+    menu_desc: str = "dim cyan"
 
 
 THEME = TerminalTheme()
@@ -52,6 +65,8 @@ GLYPH_OK = "✓"
 GLYPH_WARN = "!"
 GLYPH_ERR = "×"
 GLYPH_RUN = "◌"
+GLYPH_DOT = "·"
+GLYPH_BAR = "│"
 
 
 _ANSI_ESCAPE_RE = re.compile(
@@ -117,6 +132,9 @@ PROMPT_MARKUP = (
 PROMPT_PLAIN = f"{GLYPH_MARK} selene {GLYPH_PROMPT} "
 
 
+# ── Slash-command completion ──────────────────────────────────────────
+
+
 @dataclass
 class _SlashCompletionState:
     """Track deterministic Tab completion for slash commands."""
@@ -174,7 +192,8 @@ class _SlashMenuState:
     """Filtered, keyboard-selectable slash-command menu state."""
 
     commands: tuple[str, ...]
-    max_visible: int = 7
+    descriptions: dict[str, str] = field(default_factory=dict)
+    max_visible: int = 8
     matches: tuple[str, ...] = ()
     selected: int = 0
     query: str = ""
@@ -219,18 +238,49 @@ class _SlashMenuState:
         self.query = ""
 
 
-def _slash_menu_lines(state: _SlashMenuState) -> tuple[str, ...]:
-    """Build compact ANSI menu rows; empty state leaves no prompt chrome."""
+def _menu_terminal_width() -> int:
+    try:
+        return max(40, int(getattr(_console.size, "width", 80) or 80))
+    except Exception:
+        return 80
+
+
+def _slash_menu_lines(state: _SlashMenuState, width: int | None = None) -> tuple[str, ...]:
+    """Build compact ANSI menu rows with optional command descriptions."""
     visible = state.visible_matches()
     if not visible:
         return ()
-    lines = []
+
+    term_width = width if width is not None else _menu_terminal_width()
+    commands = [command for _, command in visible]
+    cmd_col = max(len(command) for command in commands)
+    # Reserve room for indent, selector, gap, and a useful description.
+    cmd_col = min(cmd_col, max(10, term_width - 28))
+
+    lines: list[str] = []
+    total = len(state.matches)
     for index, command in visible:
+        display = command if len(command) <= cmd_col else command[: max(1, cmd_col - 1)] + "…"
+        padded = display.ljust(cmd_col)
+        desc = (state.descriptions.get(command) or "").strip()
+        desc_budget = max(0, term_width - cmd_col - 8)
+        if desc and desc_budget > 3 and len(desc) > desc_budget:
+            desc = desc[: desc_budget - 1] + "…"
+
         if index == state.selected:
-            lines.append(f"  \x1b[1;36m{GLYPH_PROMPT} {command}\x1b[0m")
+            row = f"  \x1b[1;36m{GLYPH_PROMPT} {padded}\x1b[0m"
+            if desc and desc_budget > 0:
+                row += f"  \x1b[36m{desc}\x1b[0m"
         else:
-            lines.append(f"    \x1b[2m{command}\x1b[0m")
-    lines.append("  \x1b[2m↑↓ choose · Tab autofill\x1b[0m")
+            row = f"    \x1b[2m{padded}\x1b[0m"
+            if desc and desc_budget > 0:
+                row += f"  \x1b[2m{desc}\x1b[0m"
+        lines.append(row)
+
+    hint = "↑↓ navigate  ·  Tab autofill  ·  Enter select"
+    if total > len(visible):
+        hint = f"{total} matches  ·  {hint}"
+    lines.append(f"  \x1b[2m{hint}\x1b[0m")
     return tuple(lines)
 
 
@@ -239,18 +289,25 @@ def _print_prompt_chrome() -> None:
     _console.print(PROMPT_MARKUP, markup=True, end="", highlight=False)
 
 
-def _read_line_with_fixed_prompt(completions: Sequence[str] = ()) -> str:
-    """Read one line while keeping ``selene $`` outside the editable buffer.
+def _read_line_with_fixed_prompt(
+    completions: Sequence[str] = (),
+    *,
+    descriptions: Mapping[str, str] | None = None,
+) -> str:
+    """Read one line while keeping ``selene ›`` outside the editable buffer.
 
     Rich's ``Console.input`` prints a styled prompt then calls bare ``input()``.
     That leaves the chrome on the same visual line without giving the line editor
-    a real prompt, so backspace can walk into ``selene $``.  Here the chrome is
+    a real prompt, so backspace can walk into the brand.  Here the chrome is
     painted once, then a character-level editor owns only the user text.
     """
     _print_prompt_chrome()
     if sys.stdin.isatty():
         try:
-            return _read_line_protected_tty(completions=completions)
+            return _read_line_protected_tty(
+                completions=completions,
+                descriptions=descriptions,
+            )
         except (ImportError, OSError, termios_error_type()) as exc:
             # Fall through when raw mode is unavailable.
             del exc
@@ -277,7 +334,11 @@ def _tty_out() -> "object":
     return getattr(_console, "file", None) or sys.stderr
 
 
-def _read_line_protected_tty(completions: Sequence[str] = ()) -> str:
+def _read_line_protected_tty(
+    completions: Sequence[str] = (),
+    *,
+    descriptions: Mapping[str, str] | None = None,
+) -> str:
     """Character-level line editor that refuses to erase the fixed prompt."""
     import os
 
@@ -285,8 +346,9 @@ def _read_line_protected_tty(completions: Sequence[str] = ()) -> str:
     buffer: list[str] = []
     cursor = 0
     commands = tuple(dict.fromkeys(completions))
+    desc_map = {str(k): str(v) for k, v in dict(descriptions or {}).items()}
     completion_state = _SlashCompletionState(commands)
-    menu_state = _SlashMenuState(commands)
+    menu_state = _SlashMenuState(commands, descriptions=desc_map)
     menu_rows = 0
 
     def write(text: str) -> None:
@@ -426,6 +488,20 @@ def _read_line_protected_tty(completions: Sequence[str] = ()) -> str:
         if completed != current:
             replace_buffer(completed)
 
+    def accept_line() -> str:
+        """Submit buffer; if a slash menu is open, accept the highlighted command."""
+        preferred = menu_state.selected_command()
+        current = "".join(buffer)
+        clear_menu()
+        write("\r\n")
+        if (
+            preferred
+            and current.startswith("/")
+            and preferred.casefold().startswith(current.casefold())
+        ):
+            return preferred
+        return current
+
     helpers = dict(
         write=write,
         insert=insert,
@@ -438,6 +514,7 @@ def _read_line_protected_tty(completions: Sequence[str] = ()) -> str:
         move_menu=move_menu,
         clear_menu=clear_menu,
         complete=complete,
+        accept_line=accept_line,
     )
     if os.name == "nt":
         return _read_line_protected_windows(buffer, **helpers)
@@ -458,6 +535,7 @@ def _read_line_protected_posix(
     move_menu,
     clear_menu,
     complete,
+    accept_line,
 ) -> str:
     import termios
     import tty
@@ -473,9 +551,7 @@ def _read_line_protected_posix(
                 write("\r\n")
                 raise EOFError
             if ch in ("\r", "\n"):
-                clear_menu()
-                write("\r\n")
-                return "".join(buffer)
+                return accept_line()
             if ch == "\x03":  # Ctrl+C
                 clear_menu()
                 write("\r\n")
@@ -553,12 +629,15 @@ def _read_line_protected_windows(
     move_menu,
     clear_menu,
     complete,
+    accept_line=None,
 ) -> str:
     import msvcrt
 
     while True:
         ch = msvcrt.getwch()
         if ch in ("\r", "\n"):
+            if accept_line is not None:
+                return accept_line()
             clear_menu()
             write("\r\n")
             return "".join(buffer)
@@ -593,14 +672,29 @@ def _read_line_protected_windows(
             insert(ch)
 
 
-def read_user_input(completions: Sequence[str] = ()) -> str:
-    """Read one prompt line; ``selene $`` is painted but never editable."""
+def read_user_input(
+    completions: Sequence[str] = (),
+    *,
+    descriptions: Mapping[str, str] | None = None,
+) -> str:
+    """Read one prompt line; brand chrome is painted but never editable.
+
+    When ``completions`` are provided and the user types ``/``, a filtered
+    slash palette appears under the prompt. Tab autofills (cycling on
+    ambiguity); ↑/↓ move the highlight; Enter accepts the highlighted match.
+    """
     flush_terminal_input()
     try:
-        raw = _read_line_with_fixed_prompt(completions=completions)
+        raw = _read_line_with_fixed_prompt(
+            completions=completions,
+            descriptions=descriptions,
+        )
     except EOFError:
         return ""
     return sanitize_terminal_input(raw)
+
+
+# ── Display chrome ─────────────────────────────────────────────────────
 
 
 def _section_rule(label: str, *, style: str | None = None, glyph: str = GLYPH_SECTION) -> None:
@@ -613,16 +707,18 @@ def _section_rule(label: str, *, style: str | None = None, glyph: str = GLYPH_SE
 
 
 def assistant_stream_panel(text: str):
-    """Build the live assistant renderable."""
+    """Build the live assistant renderable — soft rounded response card."""
+    from rich import box
     from rich.markdown import Markdown
     from rich.panel import Panel
 
     body = Markdown(_render_terminal_markdown(text or " "))
     return Panel(
         body,
+        box=box.ROUNDED,
         border_style=THEME.border,
-        padding=(1, 2),
-        title=f"[bold {THEME.accent}]{GLYPH_SECTION} response[/]",
+        padding=(0, 2),
+        title=f"[bold {THEME.accent}]{GLYPH_SECTION}[/] [{THEME.ink}]response[/]",
         title_align="left",
         subtitle=f"[{THEME.meta}]selene[/]",
         subtitle_align="right",
@@ -696,6 +792,22 @@ def print_lab_status(
         _console.print(f"  [{color}]{glyph}[/]  {message}")
 
 
+def print_ok(message: str, *, detail: str | None = None) -> None:
+    print_lab_status(message, kind="ok", detail=detail)
+
+
+def print_error(message: str, *, detail: str | None = None) -> None:
+    print_lab_status(message, kind="error", detail=detail)
+
+
+def print_warn(message: str, *, detail: str | None = None) -> None:
+    print_lab_status(message, kind="warn", detail=detail)
+
+
+def print_info(message: str, *, detail: str | None = None) -> None:
+    print_lab_status(message, kind="info", detail=detail)
+
+
 def print_tool_event(
     name: str,
     *,
@@ -706,7 +818,7 @@ def print_tool_event(
     """Print a tool lifecycle line: run / ok / error / parallel."""
     if phase == "parallel":
         print_lab_status(
-            message or f"parallel tools × {detail or '?'}",
+            message or f"parallel tools {GLYPH_DOT} {detail or '?'}",
             kind="info",
         )
         return
@@ -731,35 +843,121 @@ def print_tool_event(
     )
 
 
+def print_generation_stats(
+    *,
+    elapsed: float,
+    total_tokens: int,
+    tokens_per_sec: float,
+) -> None:
+    """Print a quiet footer line after a generation (verbose mode)."""
+    _console.print(
+        f"  [{THEME.meta}]{GLYPH_DOT}  {elapsed:.1f}s"
+        f"  {GLYPH_DOT}  ~{total_tokens} tokens"
+        f"  {GLYPH_DOT}  ~{tokens_per_sec:.1f} tok/s[/]"
+    )
+    _console.print()
+
+
+def print_command_help(
+    entries: Sequence[tuple[str, str]],
+    *,
+    title: str = "commands",
+    subtitle: str | None = "type / to open the palette",
+) -> None:
+    """Render a clean two-column command reference card."""
+    from rich import box
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    table = Table(
+        show_header=False,
+        box=None,
+        padding=(0, 2, 0, 0),
+        expand=True,
+        pad_edge=False,
+    )
+    table.add_column("cmd", style=f"bold {THEME.success}", no_wrap=True, ratio=2)
+    table.add_column("desc", style=THEME.meta, ratio=3)
+
+    for command, description in entries:
+        table.add_row(command, description)
+
+    header = Text()
+    header.append(f"{GLYPH_SECTION} ", style=f"bold {THEME.accent}")
+    header.append(title, style=f"bold {THEME.ink}")
+
+    panel = Panel(
+        table,
+        box=box.ROUNDED,
+        border_style=THEME.border,
+        padding=(1, 1),
+        title=header,
+        title_align="left",
+        subtitle=f"[{THEME.meta}]{subtitle}[/]" if subtitle else None,
+        subtitle_align="right",
+    )
+    _console.print()
+    _console.print(panel)
+    _console.print()
+
+
+def _console_width() -> int:
+    """Best-effort terminal width (honors Console(width=…) even on dumb TTYs)."""
+    forced = getattr(_console, "_width", None)
+    if isinstance(forced, int) and forced > 0:
+        return forced
+    try:
+        return max(40, int(getattr(_console.size, "width", 80) or 80))
+    except Exception:
+        return 80
+
+
 def _welcome_art_lines(width: int) -> list[tuple[str, str]]:
-    """Return ``(text, style)`` rows for the Selene cover mark."""
+    """Return ``(text, style)`` rows for the Selene crescent mark.
+
+    Pure-ASCII C-crescents, column-aligned so the moon does not shear. The open
+    face is on the right (classic waxing crescent).
+    """
+    # Compact mark for stacked / narrow panels.
     if width < 64:
-        return [
-            ("      .o888.", THEME.accent),
-            ("    .888P\"", THEME.accent_soft),
-            ("   d88P\"", THEME.accent_soft),
-            ("   888", THEME.accent),
-            ("   Y88b.", THEME.accent_soft),
-            ("    \"Y888.", THEME.accent),
-            ("      `\"\"'", THEME.muted),
-            ("", THEME.accent),
-            ("  S E L E N E", f"bold {THEME.accent}"),
-            ("  local agent runtime", THEME.meta),
+        rows = [
+            r"  .o8888o. ",
+            r" d88888888b",
+            r"d8888P'Y88b",
+            r"8888P'     ",
+            r"888P'      ",
+            r"888b.      ",
+            r"Y888b.     ",
+            r" Y888bood8P",
+            r"  'Y8888P' ",
+        ]
+    else:
+        # Wide mark — solid left rim, smooth caps, open face on the right.
+        rows = [
+            r"    .o8888888o.   ",
+            r"  .d88888888888b. ",
+            r" .d8888P'  'Y888b ",
+            r"d8888P'      'Y88 ",
+            r"8888P'            ",
+            r"888P'             ",
+            r"888b.             ",
+            r"Y888b.            ",
+            r" Y888b.     .d88P ",
+            r"  Y8888boood88P'  ",
+            r"   'Y8888888P'    ",
         ]
 
-    return [
-        ("              .o8888888o.", THEME.accent),
-        ("           .d888888888888b.", THEME.accent),
-        ("         .d888888P\"'", THEME.accent_soft),
-        ("        d88888P\"", THEME.accent_soft),
-        ("       d8888P\"", THEME.accent_soft),
-        ("       88888\"", THEME.accent),
-        ("       Y8888b.", THEME.accent_soft),
-        ("        Y88888b.", THEME.accent_soft),
-        ("         \"Y888888bo.", THEME.accent),
-        ("           \"Y8888888b.", THEME.accent),
-        ("             `\"Y888P\"'", THEME.muted),
-    ]
+    styles = (
+        [THEME.accent, THEME.accent]
+        + [THEME.accent_soft] * max(0, len(rows) - 3)
+        + [THEME.muted]
+    )
+    # Keep styles length == rows length.
+    while len(styles) < len(rows):
+        styles.insert(-1, THEME.accent_soft)
+    styles = styles[: len(rows)]
+    return list(zip(rows, styles))
 
 
 def _welcome_meta_pairs(context: dict | None = None) -> list[tuple[str, str]]:
@@ -800,64 +998,125 @@ def _welcome_meta_pairs(context: dict | None = None) -> list[tuple[str, str]]:
     return pairs
 
 
+def _welcome_meta_text(pairs: list[tuple[str, str]], max_width: int) -> "object":
+    """Build a meta strip that wraps cleanly on narrow terminals."""
+    from rich.console import Group
+    from rich.text import Text
+
+    if not pairs:
+        return Text("")
+
+    # Pack chips into rows that fit inside the panel body width.
+    rows: list[Text] = []
+    current = Text()
+    used = 0
+    for index, (label, value) in enumerate(pairs):
+        chip = Text()
+        chip.append(f"{label} ", style=THEME.meta)
+        chip.append(value, style=THEME.ink)
+        chip_len = len(label) + 1 + len(value)
+        sep_len = 3 if index and used else 0  # " · "
+        if used and used + sep_len + chip_len > max_width:
+            rows.append(current)
+            current = Text()
+            used = 0
+            sep_len = 0
+        if sep_len:
+            current.append(f" {GLYPH_DOT} ", style=THEME.meta)
+            used += sep_len
+        current.append_text(chip)
+        used += chip_len
+    if used:
+        rows.append(current)
+    if len(rows) == 1:
+        return rows[0]
+    return Group(*rows)
+
+
+def _welcome_brand_text() -> "object":
+    """Product identity block shown next to (or under) the crescent."""
+    from rich.text import Text
+
+    brand = Text()
+    brand.append("SELENE", style=f"bold {THEME.accent}")
+    brand.append("\n")
+    brand.append("local agent runtime", style=THEME.meta)
+    brand.append("\n\n")
+    brand.append("tools", style=f"dim {THEME.accent_2}")
+    brand.append(f"  {GLYPH_DOT}  ", style=THEME.meta)
+    brand.append("vault", style=f"dim {THEME.accent_2}")
+    brand.append(f"  {GLYPH_DOT}  ", style=THEME.meta)
+    brand.append("ollama", style=f"dim {THEME.accent_2}")
+    brand.append("\n\n")
+    brand.append(f"{GLYPH_PROMPT} ", style=THEME.prompt_mark)
+    brand.append("type ", style=THEME.meta)
+    brand.append("/", style=f"bold {THEME.accent}")
+    brand.append(" for commands", style=THEME.meta)
+    return brand
+
+
 def print_welcome_header(context: dict | None = None) -> None:
-    """Print a framed lab-style splash: crescent mark, product identity, runtime strip."""
+    """Print a framed lab splash: crescent mark, product identity, runtime strip."""
+    from rich import box
     from rich.align import Align
     from rich.console import Group
     from rich.panel import Panel
     from rich.table import Table
     from rich.text import Text
 
-    width = max(48, min(_console.size.width, 92))
-    art_lines = _welcome_art_lines(width)
-    art = Text(justify="left")
+    console_width = _console_width()
+    # Panel body budget: borders + horizontal padding.
+    panel_width = max(42, min(console_width, 88))
+    body_width = max(28, panel_width - 6)
+
+    # Side-by-side when crescent (~18) + gap + brand (~24) fit cleanly.
+    side_by_side = body_width >= 52
+    art_lines = _welcome_art_lines(80 if side_by_side else 48)
+    art_width = max((len(line.rstrip()) for line, _ in art_lines), default=12)
+
+    art = Text(justify="left", no_wrap=True)
     for index, (line, style) in enumerate(art_lines):
         if index:
             art.append("\n")
-        art.append(line, style=style)
+        # Preserve left padding so the crescent stays aligned; drop trailing pad.
+        art.append(line.rstrip(), style=style)
 
-    brand = Text()
-    brand.append("SELENE", style=f"bold {THEME.accent}")
-    brand.append("\n")
-    brand.append("local agent runtime", style=THEME.meta)
-    brand.append("\n")
-    brand.append("tools  ·  vault  ·  ollama", style=f"dim {THEME.accent_2}")
+    brand = _welcome_brand_text()
 
-    if width >= 64:
-        header = Table.grid(padding=(0, 3))
-        header.add_column(justify="left", no_wrap=True)
-        header.add_column(justify="left", ratio=1)
+    if side_by_side:
+        header = Table.grid(padding=(0, 3), expand=False)
+        header.add_column(justify="left", no_wrap=True, min_width=art_width)
+        header.add_column(justify="left", ratio=1, overflow="fold")
         header.add_row(art, Align.left(brand, vertical="middle"))
         body_renderable: object = header
     else:
-        body_renderable = Group(Align.center(art), Text(""), Align.center(brand))
+        body_renderable = Group(
+            Align.center(art),
+            Text(""),
+            Align.center(brand),
+        )
 
     meta = _welcome_meta_pairs(context)
-    footer = Text(justify="left")
-    if meta:
-        for index, (label, value) in enumerate(meta):
-            if index:
-                footer.append("   ", style=THEME.meta)
-            footer.append(f"{label} ", style=THEME.meta)
-            footer.append(value, style=THEME.ink)
+    footer = _welcome_meta_text(meta, max_width=body_width) if meta else None
 
+    panel_body = Group(body_renderable, Text(""), footer) if footer is not None else body_renderable
     panel = Panel(
-        Group(body_renderable, Text(""), footer) if meta else body_renderable,
+        panel_body,
+        box=box.ROUNDED,
         border_style=THEME.border,
         padding=(1, 2),
-        title=f"[bold {THEME.accent}]{GLYPH_MARK} selene[/]",
+        title=f"[bold {THEME.accent}]{GLYPH_MARK}[/] [bold {THEME.ink}]selene[/]",
         title_align="left",
-        subtitle=f"[{THEME.meta}]frontier local · type /help[/]",
+        subtitle=f"[{THEME.meta}]frontier local[/]",
         subtitle_align="right",
-        width=min(width, _console.size.width),
+        width=panel_width,
+        highlight=False,
     )
     _console.print()
-    _console.print(Align.center(panel))
-    _console.print()
-    _console.print(
-        f"  [{THEME.meta}]{GLYPH_PROMPT} local inference · /help for commands · "
-        f"empty line ignored[/]"
-    )
+    if console_width > panel_width + 2:
+        _console.print(Align.center(panel))
+    else:
+        _console.print(panel)
     _console.print()
 
 
@@ -881,7 +1140,7 @@ class _Spinner:
         return (
             f"[{self._color}]{GLYPH_RUN}[/] "
             f"[{THEME.label}]{self._message}[/]"
-            f"[{THEME.meta}] …[/]"
+            f"[{THEME.meta}] {GLYPH_DOT * 3}[/]"
         )
 
     def start(self) -> "_Spinner":
@@ -896,7 +1155,6 @@ class _Spinner:
     def stop(self) -> None:
         self._stop_event.set()
         self._status.stop()
-
 
 # Small helpers for rendering common LaTeX math to terminal-friendly text
 _UNICODE_FRACTIONS = {

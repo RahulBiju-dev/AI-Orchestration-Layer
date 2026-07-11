@@ -8,9 +8,7 @@ from agent.ollama_runtime import InvalidModelfileError, OllamaRuntimeError, Olla
 from agent.platform_runtime import get_runtime_paths, resource_path
 from agent.runtime_config import RuntimeConfig, RuntimeConfigurationError, get_runtime_config
 
-from rich.console import Console
-
-_console = Console()
+from agent.terminal import _console, print_error, print_info, print_lab_status, print_ok, print_warn
 
 
 def _get_modelfile_path() -> str:
@@ -48,23 +46,24 @@ def main() -> None:
     try:
         runtime = get_runtime_config(refresh=True)
         runtime_paths = get_runtime_paths()
-        _console.print(f"[cyan]Runtime profile:[/] {runtime.profile.value}")
-        _console.print(f"[dim]{runtime.selection_reason}[/]")
-        _console.print(
-            f"[dim]Runtime data: {runtime_paths.data_dir} ({runtime_paths.source})[/]"
-        )
+        print_info(f"Runtime profile · {runtime.profile.value}")
+        print_info(runtime.selection_reason)
+        print_info(f"Runtime data · {runtime_paths.data_dir}", detail=runtime_paths.source)
         for warning in runtime.warnings:
-            _console.print(f"[yellow]⚠ {warning}[/]")
+            print_warn(warning)
 
         service = OllamaService(runtime)
-        _console.print(f"[cyan bold]⟳  Verifying local model '{runtime.chat_model}'…[/]")
+        print_lab_status(
+            f"Verifying local model '{runtime.chat_model}'…",
+            kind="run",
+        )
         model_result = _ensure_model(runtime, service)
         if model_result.action in {"built", "rebuilt"}:
-            _console.print(
-                f"[cyan bold]✓  Model {model_result.action} safely through a verified staging alias.[/]"
+            print_ok(
+                f"Model {model_result.action} through a verified staging alias"
             )
         else:
-            _console.print(f"[cyan bold]✓  Model ready ({model_result.action}).[/]")
+            print_ok(f"Model ready ({model_result.action})")
         _console.print()
 
         if "--cli" in sys.argv:
@@ -76,9 +75,11 @@ def main() -> None:
 
             start_web_server() 
     except KeyboardInterrupt:
-        _console.print("\n[dim]Interrupted — goodbye.[/]")
+        _console.print()
+        print_info("Interrupted — goodbye")
     except (RuntimeConfigurationError, InvalidModelfileError, OllamaRuntimeError) as exc:
-        _console.print(f"\n[red bold]Selene startup failed:[/] {exc}", style="red")
+        _console.print()
+        print_error(f"Selene startup failed · {exc}")
         raise SystemExit(1) from None
     finally:
         if service is not None:

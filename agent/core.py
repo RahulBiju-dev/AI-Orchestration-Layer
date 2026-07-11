@@ -13,15 +13,20 @@ import re
 import shlex
 from agent.terminal import (
     _console,
-    _print_status,
     _Spinner,
     assistant_stream_panel,
     flush_terminal_input,
     print_assistant_message,
+    print_command_help,
+    print_error,
+    print_generation_stats,
+    print_info,
     print_lab_status,
+    print_ok,
     print_thinking_footer,
     print_thinking_header,
     print_tool_event,
+    print_warn,
     print_welcome_header,
     read_user_input,
     thinking_stream_style,
@@ -1008,7 +1013,8 @@ def _stream_thinking_response(
     except (ContextWindowError, RuntimeConfigurationError) as exc:
         spinner.stop()
         message = f"Context window guard stopped this response before generation: {exc}"
-        _console.print(f"\n[yellow]⚠ {message}[/]\n")
+        print_warn(message)
+        _console.print()
         return {"role": "assistant", "content": message}
 
     kwargs: dict = {
@@ -1036,7 +1042,8 @@ def _stream_thinking_response(
     except OllamaRuntimeError as exc:
         spinner.stop()
         message = f"Ollama chat failed before streaming: {exc}"
-        _console.print(f"\n[red]⚠ {message}[/]\n")
+        print_error(message)
+        _console.print()
         return {"role": "assistant", "content": message}
 
 
@@ -1062,7 +1069,8 @@ def _stream_thinking_response(
                     in_thinking = False
                     print_thinking_footer("interrupted")
                 shortcut = "Ctrl+\\" if hasattr(signal, "SIGQUIT") else "Ctrl+Break"
-                _console.print(f"\n[yellow]⚠ Generation interrupted by user ({shortcut}).[/]\n")
+                print_warn(f"Generation interrupted by user ({shortcut})")
+                _console.print()
                 break
 
             try:
@@ -1170,7 +1178,8 @@ def _stream_thinking_response(
                     "Ollama returned an unexpected stream chunk shape; "
                     f"generation stopped safely: {exc}"
                 )
-                _console.print(f"\n[red]⚠ {message}[/]\n")
+                print_error(message)
+                _console.print()
                 if not content_buf:
                     content_buf = message
                 break
@@ -1178,13 +1187,15 @@ def _stream_thinking_response(
     except OllamaRuntimeError as exc:
         spinner.stop()
         message = f"Ollama chat failed while streaming: {exc}"
-        _console.print(f"\n[red]⚠ {message}[/]\n")
+        print_error(message)
+        _console.print()
         if not content_buf:
             content_buf = message
     except Exception as exc:
         spinner.stop()
         message = f"Ollama stream ended with an unexpected error: {exc}"
-        _console.print(f"\n[red]⚠ {message}[/]\n")
+        print_error(message)
+        _console.print()
         if not content_buf:
             content_buf = message
     finally:
@@ -1222,8 +1233,10 @@ def _stream_thinking_response(
         c_tokens = len(content_buf.split()) if content_buf else 0
         total = t_tokens + c_tokens
         tps = total / elapsed if elapsed > 0 else 0
-        _console.print(
-                f"[dim]  ⏱  {elapsed:.1f}s  ·  ~{total} tokens  ·  ~{tps:.1f} tok/s[/]\n",
+        print_generation_stats(
+            elapsed=elapsed,
+            total_tokens=total,
+            tokens_per_sec=tps,
         )
 
     # Build the full message for history
@@ -1445,89 +1458,91 @@ def _process_tool_calls_with_turn_guard(tool_calls: list[dict], executed_tool_ca
 
 # ── Slash commands ────────────────────────────────────────────────────
 
-CLI_SLASH_COMPLETIONS = (
-    "/help",
-    "/?",
-    "/clear",
-    "/save",
-    "/load",
-    "/set parameter",
-    "/set profile",
-    "/set system",
-    "/set history",
-    "/set nohistory",
-    "/set wordwrap",
-    "/set nowordwrap",
-    "/set format",
-    "/set noformat",
-    "/set verbose",
-    "/set quiet",
-    "/set think",
-    "/set nothink",
-    "/show parameters",
-    "/show system",
-    "/show model",
-    "/vault alias",
-    "/vault aliases",
-    "/vault rename",
-    "/vault add",
-    "/vault status",
-    "/vault read",
-    "/vault list",
-    "/vault search",
-    "/vault delete",
-    "/quit",
-    "/exit",
-    "/q",
+# (command, description) — authoritative catalog for help + Tab palette.
+CLI_SLASH_SPECS: tuple[tuple[str, str], ...] = (
+    ("/help", "Show available commands"),
+    ("/?", "Show available commands"),
+    ("/clear", "Clear conversation history"),
+    ("/save", "Save the current session"),
+    ("/load", "Load a saved session"),
+    ("/set parameter", "Set a model parameter"),
+    ("/set profile", "Select hardware profile"),
+    ("/set system", "Set the session system prompt"),
+    ("/set history", "Enable conversation history"),
+    ("/set nohistory", "Disable conversation history"),
+    ("/set wordwrap", "Enable word wrapping"),
+    ("/set nowordwrap", "Disable word wrapping"),
+    ("/set format", "Force JSON model output"),
+    ("/set noformat", "Disable forced output format"),
+    ("/set verbose", "Show generation stats"),
+    ("/set quiet", "Hide generation stats"),
+    ("/set think", "Enable model thinking"),
+    ("/set nothink", "Disable model thinking"),
+    ("/show parameters", "Show session parameters"),
+    ("/show system", "Show the active system prompt"),
+    ("/show model", "Show model info"),
+    ("/vault alias", "Register a vault collection alias"),
+    ("/vault aliases", "List vault aliases"),
+    ("/vault rename", "Rename a vault collection"),
+    ("/vault add", "Index a file or folder"),
+    ("/vault status", "Show resumable PDF progress"),
+    ("/vault read", "Read vault chunks in order"),
+    ("/vault list", "List indexed vault collections"),
+    ("/vault search", "Search the indexed vault"),
+    ("/vault delete", "Delete indexed vault chunks"),
+    ("/quit", "Exit the agent"),
+    ("/exit", "Exit the agent"),
+    ("/q", "Exit the agent"),
 )
 
-_COMMANDS_HELP = f"""
-[cyan][bold]Available commands:[/]
-  [green]/help[/]                          — Show this help message
-  [green]/clear[/]                         — Clear conversation history
-  [green]/save [name][/]                   — Save current session  [dim](optional name)[/]
-  [green]/load [name|index][/]             — Load a saved session  [dim](lists sessions if no arg)[/]
-  [green]/set parameter <name> <val>[/]    — Set a model parameter  [dim](e.g. temperature 0.7)[/]
-  [green]/set profile <name>[/]             — Select auto, low-vram, balanced, or manual
-  [green]/set system "<prompt>"[/]         — Set the system prompt for this session
-  [green]/set history[/]                   — Enable conversation history  [dim](default)[/]
-  [green]/set nohistory[/]                 — Disable history  [dim](each turn is standalone)[/]
-  [green]/set wordwrap[/]                  — Enable word wrapping  [dim](default)[/]
-  [green]/set nowordwrap[/]                — Disable word wrapping
-  [green]/set format json[/]               — Force JSON output from the model
-  [green]/set noformat[/]                  — Disable forced output format  [dim](default)[/]
-  [green]/set verbose[/]                   — Show generation stats after each response
-  [green]/set quiet[/]                     — Hide generation stats  [dim](default)[/]
-  [green]/set think[/]                     — Enable model thinking/reasoning  [dim](default)[/]
-  [green]/set nothink[/]                   — Disable model thinking
-  [green]/show parameters[/]               — Show current session parameters
-  [green]/show system[/]                   — Show the active system prompt
-  [green]/show model[/]                    — Show model info
-  [green]/vault alias <name> <coll>[/]     — Register a friendly alias for a collection
-  [green]/vault aliases[/]                  — List registered vault aliases
-  [green]/vault rename <old> <new>[/]       — Rename a vault collection
-  [green]/vault add <path>[/]               — Add a file or folder to the searchable vault
-  [green]/vault list[/]                     — List indexed vault collections
-  [green]/vault search <query>[/]           — Search the indexed vault
-  [green]/vault delete <source>[/]          — Delete indexed vault chunks by source/path
-  [green]/quit[/]                          — Exit the agent  [dim](also /exit, /q)[/]
-"""
+CLI_SLASH_COMPLETIONS = tuple(command for command, _ in CLI_SLASH_SPECS)
+CLI_SLASH_DESCRIPTIONS = {command: description for command, description in CLI_SLASH_SPECS}
 
-_VAULT_HELP = f"""
-[cyan][bold]Vault commands:[/]
-  [green]/vault list[/]                                  — List indexed vault collections
-  [green]/vault aliases[/]                               — List registered vault aliases
-  [green]/vault alias <name> <coll>[/]                  — Register a friendly alias for a collection
-  [green]/vault rename <old> <new>[/]                   — Rename a vault collection
-  [green]/vault add <path> [--collection name][/]        — Index a file or folder
-  [green]/vault add <path> [--vision auto|all|off][/]    — Select PDF visual capture policy
-  [green]/vault status <path> [--collection name][/]     — Show resumable PDF progress
-  [green]/vault read [--cursor n] [--source path][/]     — Read every chunk in source order
-  [green]/vault search <query> [--top-k n][/]            — Search indexed content
-  [green]/vault search <query> [--source path][/]        — Restrict search to a source
-  [green]/vault delete <source> [--collection name][/]   — Remove indexed chunks
-  [green]/vault delete --all [--collection name][/]      — Delete a collection
-"""
+# Rich help cards (command · description). Kept separate so /help can show
+# argument forms while the palette stays short and scannable.
+_COMMAND_HELP_ENTRIES: tuple[tuple[str, str], ...] = (
+    ("/help", "Show this help message"),
+    ("/clear", "Clear conversation history and system override"),
+    ("/save [name]", "Save the current session (optional name)"),
+    ("/load [name|index]", "Load a saved session (lists if no arg)"),
+    ("/set parameter <name> <val>", "Set a model parameter (e.g. temperature 0.7)"),
+    ("/set profile <name>", "Select auto, low-vram, balanced, or manual"),
+    ("/set system \"<prompt>\"", "Set the system prompt for this session"),
+    ("/set history", "Enable conversation history (default)"),
+    ("/set nohistory", "Disable history — each turn is standalone"),
+    ("/set wordwrap", "Enable word wrapping (default)"),
+    ("/set nowordwrap", "Disable word wrapping"),
+    ("/set format json", "Force JSON output from the model"),
+    ("/set noformat", "Disable forced output format (default)"),
+    ("/set verbose", "Show generation stats after each response"),
+    ("/set quiet", "Hide generation stats (default)"),
+    ("/set think", "Enable model thinking/reasoning (default)"),
+    ("/set nothink", "Disable model thinking"),
+    ("/show parameters", "Show current session parameters"),
+    ("/show system", "Show the active system prompt"),
+    ("/show model", "Show model info"),
+    ("/vault …", "Vault tools — type /vault help for details"),
+    ("/quit", "Exit the agent (also /exit, /q)"),
+)
+
+_VAULT_HELP_ENTRIES: tuple[tuple[str, str], ...] = (
+    ("/vault list", "List indexed vault collections"),
+    ("/vault aliases", "List registered vault aliases"),
+    ("/vault alias <name> <coll>", "Register a friendly alias for a collection"),
+    ("/vault rename <old> <new>", "Rename a vault collection"),
+    ("/vault add <path> [--collection name]", "Index a file or folder"),
+    ("/vault add <path> [--vision auto|all|off]", "Select PDF visual capture policy"),
+    ("/vault status <path> [--collection name]", "Show resumable PDF progress"),
+    ("/vault read [--cursor n] [--source path]", "Read every chunk in source order"),
+    ("/vault search <query> [--top-k n]", "Search indexed content"),
+    ("/vault search <query> [--source path]", "Restrict search to a source"),
+    ("/vault delete <source> [--collection name]", "Remove indexed chunks"),
+    ("/vault delete --all [--collection name]", "Delete a collection"),
+)
+
+# Back-compat names used by a few older call sites / tests.
+_COMMANDS_HELP = _COMMAND_HELP_ENTRIES
+_VAULT_HELP = _VAULT_HELP_ENTRIES
 
 
 def _handle_set(args: str, session: dict, history: list[dict]) -> None:
@@ -1552,31 +1567,37 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
     # ── /set verbose / /set quiet ─────────────────────────────────────
     if sub == "verbose":
         session["verbose"] = True
-        _console.print(f"[cyan][bold]✓  Verbose mode enabled — stats shown after each response.[/]\n")
+        print_ok("Verbose mode enabled — stats shown after each response")
+        _console.print()
         return
     if sub == "quiet":
         session["verbose"] = False
-        _console.print(f"[cyan][bold]✓  Quiet mode enabled.[/]\n")
+        print_ok("Quiet mode enabled")
+        _console.print()
         return
 
     # ── /set wordwrap / /set nowordwrap ───────────────────────────────
     if sub == "wordwrap":
         session["wordwrap"] = True
-        _console.print(f"[cyan][bold]✓  Word wrapping enabled.[/]\n")
+        print_ok("Word wrapping enabled")
+        _console.print()
         return
     if sub == "nowordwrap":
         session["wordwrap"] = False
-        _console.print(f"[cyan][bold]✓  Word wrapping disabled.[/]\n")
+        print_ok("Word wrapping disabled")
+        _console.print()
         return
 
     # ── /set history / /set nohistory ─────────────────────────────────
     if sub == "history":
         session["history"] = True
-        _console.print(f"[cyan][bold]✓  Conversation history enabled.[/]\n")
+        print_ok("Conversation history enabled")
+        _console.print()
         return
     if sub == "nohistory":
         session["history"] = False
-        _console.print(f"[cyan][bold]✓  History disabled — each turn is now standalone.[/]\n")
+        print_ok("History disabled — each turn is now standalone")
+        _console.print()
         return
 
     # ── /set format json / /set noformat ──────────────────────────────
@@ -1584,23 +1605,27 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
         fmt = rest.strip().lower()
         if fmt == "json":
             session["format"] = "json"
-            _console.print(f"[cyan][bold]✓  JSON output mode enabled.[/]\n")
+            print_ok("JSON output mode enabled")
+            _console.print()
         else:
             _console.print(f"[red]Unsupported format: {fmt}[/]  [dim](supported: json)[/]\n")
         return
     if sub == "noformat":
         session["format"] = ""
-        _console.print(f"[cyan][bold]✓  Output formatting reset to default.[/]\n")
+        print_ok("Output formatting reset to default")
+        _console.print()
         return
 
     # ── /set think / /set nothink ─────────────────────────────────────
     if sub == "think":
         session["think"] = True
-        _console.print(f"[cyan][bold]✓  Thinking/reasoning enabled.[/]\n")
+        print_ok("Thinking/reasoning enabled")
+        _console.print()
         return
     if sub == "nothink":
         session["think"] = False
-        _console.print(f"[cyan][bold]✓  Thinking disabled — model will respond directly.[/]\n")
+        print_ok("Thinking disabled — model will respond directly")
+        _console.print()
         return
 
     # ── /set system "<prompt>" ────────────────────────────────────────
@@ -1613,7 +1638,8 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
 
         if not prompt or prompt.lower() == "default":
             session["system"] = ""
-            _console.print(f"[cyan][bold]✓  System prompt reset to default.[/]\n")
+            print_ok("System prompt reset to default")
+            _console.print()
             return
 
         # Insert new system message at the start
@@ -1622,7 +1648,8 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
         
         # Truncate display for confirmation
         display = prompt if len(prompt) <= 80 else prompt[:77] + "…"
-        _console.print(f"[cyan][bold]✓  System prompt set:[/] [dim]{display}[/]\n")
+        print_ok("System prompt set", detail=display)
+        _console.print()
         return
 
     if sub == "profile":
@@ -1635,10 +1662,10 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
             _console.print(f"[red]Invalid runtime profile: {exc}[/]\n")
             return
         session["runtime_profile"] = profile
-        _console.print(f"[cyan][bold]✓  Runtime profile = {runtime.profile.value}[/]")
-        _console.print(f"[dim]{runtime.selection_reason}[/]")
+        print_ok(f"Runtime profile = {runtime.profile.value}")
+        print_info(runtime.selection_reason)
         for warning in runtime.warnings:
-            _console.print(f"[yellow]⚠ {warning}[/]")
+            print_warn(warning)
         _console.print()
         return
 
@@ -1672,11 +1699,10 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
             _console.print(f"[red]Invalid value for {name}: {exc}[/]\n")
             return
         session["options"] = normalized
-        _console.print(f"[cyan][bold]✓  {name} = {value}[/]\n")
+        print_ok(f"{name} = {value}")
         for warning in warnings:
-            _console.print(f"[yellow]⚠ {warning}[/]")
-        if warnings:
-            _console.print()
+            print_warn(warning)
+        _console.print()
         return
 
     _console.print(f"[red]Unknown /set subcommand: {sub}[/]  [dim](try: parameter, profile, system, verbose, quiet, wordwrap, nowordwrap, history, nohistory, format, noformat, think, nothink)[/]\n")
@@ -1702,14 +1728,15 @@ def _handle_show(args: str, session: dict, history: list[dict]) -> None:
         except RuntimeConfigurationError as exc:
             _console.print(f"[red]Invalid session configuration: {exc}[/]\n")
             return
-        _console.print(f"\n[cyan][bold]Runtime profile:[/] {runtime.profile.value}")
-        _console.print(f"[dim]{runtime.selection_reason}[/]")
-        _console.print(f"[cyan][bold]Effective model parameters:[/]")
+        _console.print()
+        print_info(f"Runtime profile · {runtime.profile.value}")
+        print_info(runtime.selection_reason)
+        print_info("Effective model parameters")
         for key, value in sorted(effective.items()):
-            suffix = " [dim](session override)[/]" if key in opts else ""
-            _console.print(f"  [green]{key}[/] = {value}{suffix}")
+            suffix = "  (session override)" if key in opts else ""
+            _console.print(f"    [green]{key}[/] = {value}[dim]{suffix}[/]")
         for warning in runtime.warnings:
-            _console.print(f"[yellow]⚠ {warning}[/]")
+            print_warn(warning)
         _console.print()
         # Also show flags
         flags = []
@@ -1724,7 +1751,8 @@ def _handle_show(args: str, session: dict, history: list[dict]) -> None:
         if not session.get("think", True):
             flags.append("nothink")
         if flags:
-            _console.print(f"[dim]  Flags: {', '.join(flags)}[/]\n")
+            print_info(f"Flags: {', '.join(flags)}")
+            _console.print()
         return
 
     if sub == "system":
@@ -1734,9 +1762,12 @@ def _handle_show(args: str, session: dict, history: list[dict]) -> None:
             if history and history[0].get("role") == "system":
                 prompt = history[0]["content"]
         if prompt:
-            _console.print(f"\n[cyan][bold]System prompt:[/]\n[dim]{prompt}[/]\n")
+            _console.print()
+            print_info("System prompt")
+            _console.print(f"  [dim]{prompt}[/]\n")
         else:
-            _console.print(f"[dim]  No system prompt set (using Modelfile default).[/]\n")
+            print_info("No system prompt set (using Modelfile default)")
+            _console.print()
         return
 
     if sub in ("model", "info"):
@@ -1750,11 +1781,15 @@ def _handle_show(args: str, session: dict, history: list[dict]) -> None:
             )
             family = model_info.get("general.architecture", "unknown")
             params = model_info.get("general.parameter_count", "unknown")
-            _console.print(f"\n[cyan][bold]Model:[/]  {MODEL_NAME}")
-            _console.print(f"[cyan][bold]Family:[/] {family}")
-            _console.print(f"[cyan][bold]Params:[/] {params}\n")
+            _console.print()
+            print_info(f"Model · {MODEL_NAME}")
+            print_info(f"Family · {family}")
+            print_info(f"Params · {params}")
+            _console.print()
         except OllamaRuntimeError:
-            _console.print(f"\n[cyan][bold]Model:[/]  {MODEL_NAME}\n")
+            _console.print()
+            print_info(f"Model · {MODEL_NAME}")
+            _console.print()
         return
 
     _console.print(f"[red]Unknown /show subcommand: {sub}[/]  [dim](try: parameters, system, model)[/]\n")
@@ -1825,7 +1860,11 @@ def _handle_save(args: str, session: dict, history: list[dict]) -> None:
         atomic_write_json(filepath, payload, durable=True)
         display_name = os.path.basename(filepath)
         msg_count = sum(1 for m in history if m.get("role") == "user")
-        _console.print(f"[cyan][bold]✓  Session saved:[/] [dim]{display_name}[/]  ({msg_count} user message{'s' if msg_count != 1 else ''})\n")
+        print_ok(
+            f"Session saved · {display_name}",
+            detail=f"{msg_count} user message{'s' if msg_count != 1 else ''}",
+        )
+        _console.print()
     except OSError as exc:
         _console.print(f"[red]Failed to save session: {exc}[/]\n")
 
@@ -1846,9 +1885,11 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
     # No argument: list available sessions
     if not arg:
         if not saved:
-            _console.print(f"[dim]  No saved sessions found.[/]\n")
+            print_info("No saved sessions found")
+            _console.print()
             return
-        _console.print(f"\n[cyan][bold]Saved sessions:[/]")
+        _console.print()
+        print_info("Saved sessions")
         for i, fp in enumerate(saved, 1):
             name = os.path.basename(fp).replace(".json", "")
             mtime = datetime.fromtimestamp(os.path.getmtime(fp)).strftime("%Y-%m-%d %H:%M")
@@ -1860,8 +1901,9 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
                 info = f"{msg_count} msg{'s' if msg_count != 1 else ''}"
             except Exception:
                 info = "?"
-            _console.print(f"  [green]{i}.[/] {name}  [dim]({mtime} · {info})[/]")
-        _console.print(f"\n[dim]  Use /load <number> or /load <name> to restore.[/]\n")
+            _console.print(f"    [green]{i}.[/] {name}  [dim]({mtime} · {info})[/]")
+        print_info("Use /load <number> or /load <name> to restore")
+        _console.print()
         return
 
     # Try as index first
@@ -1937,11 +1979,13 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
 
     display_name = os.path.basename(target_path).replace(".json", "")
     msg_count = sum(1 for m in history if m.get("role") == "user")
-    _console.print(f"[cyan][bold]✓  Session loaded:[/] [dim]{display_name}[/]  ({msg_count} user message{'s' if msg_count != 1 else ''})\n")
+    print_ok(
+        f"Session loaded · {display_name}",
+        detail=f"{msg_count} user message{'s' if msg_count != 1 else ''}",
+    )
     for warning in warnings:
-        _console.print(f"[yellow]⚠ {warning}[/]")
-    if warnings:
-        _console.print()
+        print_warn(warning)
+    _console.print()
 
 
 def _extract_option(tokens: list[str], names: tuple[str, ...], default: str | None = None) -> str | None:
@@ -2046,7 +2090,7 @@ def _handle_vault(args: str) -> None:
         return
 
     if not parts or parts[0].lower() in ("help", "-h", "--help"):
-        print(_VAULT_HELP)
+        print_command_help(_VAULT_HELP_ENTRIES, title="vault", subtitle="local knowledge index")
         return
 
     sub = parts[0].lower()
@@ -2068,7 +2112,8 @@ def _handle_vault(args: str) -> None:
             _console.print(f"[dim]  No indexed vault collections found.[/]\n")
             return
 
-        _console.print(f"\n[cyan][bold]Indexed vaults:[/]")
+        _console.print()
+        print_info("Indexed vaults")
         for vault in vaults:
             name = vault.get("collection", "unknown")
             chunk_count = vault.get("indexed_chunks")
@@ -2076,7 +2121,7 @@ def _handle_vault(args: str) -> None:
                 count_text = f"{chunk_count} chunk{'s' if chunk_count != 1 else ''}"
             else:
                 count_text = "chunk count unavailable"
-            _console.print(f"  [green]{name}[/]  [dim]({count_text})[/]")
+            _console.print(f"    [green]{name}[/]  [dim]({count_text})[/]")
         _console.print()
         return
 
@@ -2088,7 +2133,8 @@ def _handle_vault(args: str) -> None:
         coll_name = tokens[1]
         from tools.vault_indexer import register_vault_alias
         register_vault_alias(alias_name, coll_name)
-        _console.print(f"[cyan][bold]✓  Vault alias registered:[/] [green]{alias_name}[/] -> [dim]{coll_name}[/]\n")
+        print_ok(f"Vault alias registered · {alias_name} → {coll_name}")
+        _console.print()
         return
 
     if sub in ("aliases", "list-aliases"):
@@ -2100,9 +2146,10 @@ def _handle_vault(args: str) -> None:
             if not aliases:
                 _console.print(f"[dim]  No vault aliases registered.[/]\n")
                 return
-            _console.print(f"\n[cyan][bold]Vault aliases:[/]")
+            _console.print()
+            print_info("Vault aliases")
             for entry in aliases:
-                _console.print(f"  [green]{entry['alias']}[/] -> [dim]{entry['collection']}[/]")
+                _console.print(f"    [green]{entry['alias']}[/] → [dim]{entry['collection']}[/]")
             _console.print()
         except Exception as e:
             _console.print(f"[red]Failed to list aliases: {e}[/]\n")
@@ -2121,9 +2168,12 @@ def _handle_vault(args: str) -> None:
             if data.get("error"):
                 _console.print(f"[red]✗  {data['error']}[/]\n")
             else:
-                _console.print(f"[cyan][bold]✓  Vault renamed:[/] [dim]{data['old_collection']}[/] -> [green]{data['new_collection']}[/]  ({data.get('chunks_moved', 0)} chunks moved)")
+                print_ok(
+                    f"Vault renamed · {data['old_collection']} → {data['new_collection']}",
+                    detail=f"{data.get('chunks_moved', 0)} chunks moved",
+                )
                 if data.get("updated_aliases"):
-                    _console.print(f"  [dim]Updated aliases: {', '.join(data['updated_aliases'])}[/]")
+                    print_info(f"Updated aliases: {', '.join(data['updated_aliases'])}")
                 _console.print()
         except Exception as e:
             _console.print(f"[red]Failed to rename vault: {e}[/]\n")
@@ -2146,7 +2196,7 @@ def _handle_vault(args: str) -> None:
             _console.print(f"[red]Vault path not found: {target}[/]\n")
             return
 
-        _print_status("🔧", f"Indexing vault content: [dim]{target}[/]", "yellow")
+        print_lab_status(f"Indexing vault content", kind="run", detail=target)
         if os.path.isdir(target):
             index_args = {
                 "vault_path": target,
@@ -2173,18 +2223,17 @@ def _handle_vault(args: str) -> None:
         skipped_count = data.get("skipped_count", 0)
         incomplete_count = data.get("incomplete_pdf_count", 0)
         status_label = "Index checkpoint saved" if incomplete_count else "Vault indexed"
-        _console.print(
-                f"[cyan][bold]✓  {status_label}:[/] "
-            f"{indexed_files} file{'s' if indexed_files != 1 else ''}, "
-            f"{indexed_chunks} chunk{'s' if indexed_chunks != 1 else ''} "
-            f"[dim](collection: {data.get('collection', collection)})[/]"
+        print_ok(
+            f"{status_label} · {indexed_files} file{'s' if indexed_files != 1 else ''}, "
+            f"{indexed_chunks} chunk{'s' if indexed_chunks != 1 else ''}",
+            detail=f"collection: {data.get('collection', collection)}",
         )
         if skipped_count:
-            _console.print(f"[yellow]  Skipped {skipped_count} file{'s' if skipped_count != 1 else ''}.[/]")
+            print_warn(f"Skipped {skipped_count} file{'s' if skipped_count != 1 else ''}")
         for job in data.get("pdf_jobs", []):
-            _console.print(
-                f"  [dim]{job.get('source')}: pages {job.get('indexed_pages')}/{job.get('page_count')}"
-                f" · vision {job.get('vision_pages')} · next {job.get('next_page')}[/]"
+            print_info(
+                f"{job.get('source')}: pages {job.get('indexed_pages')}/{job.get('page_count')}"
+                f" · vision {job.get('vision_pages')} · next {job.get('next_page')}"
             )
         _console.print()
         return
@@ -2248,7 +2297,7 @@ def _handle_vault(args: str) -> None:
             _console.print(f"[red]Invalid --top-k value: {top_k_raw}[/]\n")
             return
 
-        _print_status("🔍", f"Searching vault: [dim]{query}[/]", "yellow")
+        print_lab_status("Searching vault", kind="run", detail=query)
         data = _call_tool_json("vault_search", query=query, collection=collection, top_k=top_k, source=source)
 
         if "error" in data:
@@ -2256,10 +2305,9 @@ def _handle_vault(args: str) -> None:
             return
 
         matches = data.get("matches", [])
-        _console.print(
-                f"\n[cyan][bold]Vault search:[/] "
-            f"{len(matches)} match{'es' if len(matches) != 1 else ''} "
-            f"[dim](collection: {data.get('collection', collection)})[/]"
+        print_info(
+            f"Vault search · {len(matches)} match{'es' if len(matches) != 1 else ''}",
+            detail=f"collection: {data.get('collection', collection)}",
         )
         for match in matches:
             source_name = match.get("source") or match.get("filename") or "unknown"
@@ -2280,7 +2328,7 @@ def _handle_vault(args: str) -> None:
             _console.print(f"[red]Usage: /vault delete <source> [--collection name][/]\n")
             return
 
-        _print_status("🗑", "Deleting vault index entries…", "yellow")
+        print_lab_status("Deleting vault index entries…", kind="run")
         data = _call_tool_json(
             "delete_vault_item",
             source=source or None,
@@ -2293,18 +2341,20 @@ def _handle_vault(args: str) -> None:
             return
 
         if data.get("deleted_collection"):
-            _console.print(f"[cyan][bold]✓  Vault collection deleted:[/] [dim]{collection}[/]\n")
+            print_ok(f"Vault collection deleted · {collection}")
+            _console.print()
             return
 
         deleted_chunks = data.get("deleted_chunks", 0)
         if deleted_chunks:
-            _console.print(
-                f"[cyan][bold]✓  Vault entries deleted:[/] "
-                f"{deleted_chunks} chunk{'s' if deleted_chunks != 1 else ''} "
-                f"[dim](collection: {data.get('collection', collection)})[/]\n"
+            print_ok(
+                f"Vault entries deleted · {deleted_chunks} chunk{'s' if deleted_chunks != 1 else ''}",
+                detail=f"collection: {data.get('collection', collection)}",
             )
+            _console.print()
         else:
-            _console.print(f"[yellow]No indexed chunks matched:[/] [dim]{source}[/]\n")
+            print_warn("No indexed chunks matched", detail=str(source))
+            _console.print()
         return
 
     _console.print(f"[red]Unknown /vault subcommand: {sub}[/]  [dim](try: list, aliases, rename, add, search, delete)[/]\n")
@@ -2329,14 +2379,15 @@ def _handle_command(cmd: str, session: dict, history: list[dict]) -> bool | None
         return None  # Signal to quit
 
     if base in ("/help", "/?"):
-        print(_COMMANDS_HELP)
+        print_command_help(_COMMAND_HELP_ENTRIES, title="commands")
         return True
 
     if base == "/clear":
         history.clear()
         # Also clear the custom system prompt override
         session["system"] = ""
-        _console.print(f"[cyan][bold]✓  Conversation history and system prompt cleared.[/]\n")
+        print_ok("Conversation history and system prompt cleared")
+        _console.print()
         return True
 
     if base == "/set":
@@ -2405,7 +2456,10 @@ def run() -> None:
     while True:
         # ── User input ────────────────────────────────────────────────
         try:
-            user_input = read_user_input(completions=CLI_SLASH_COMPLETIONS)
+            user_input = read_user_input(
+                completions=CLI_SLASH_COMPLETIONS,
+                descriptions=CLI_SLASH_DESCRIPTIONS,
+            )
         except EOFError:
             # Exit loop if EOF (Ctrl+D) is encountered
             break
@@ -2441,7 +2495,11 @@ def run() -> None:
                 # Threshold in bytes for auto-indexing (tunable)
                 INDEX_THRESHOLD = 200_000
                 if size > INDEX_THRESHOLD or ext in (".pdf", ".docx"):
-                    _print_status("🔧", f"Large/binary file detected — indexing: [dim]{user_input}[/]", "yellow")
+                    print_lab_status(
+                        "Large/binary file detected — indexing",
+                        kind="run",
+                        detail=user_input,
+                    )
                     if "index_vault" in TOOL_DISPATCH:
                         try:
                             execution = execute_tool_calls([{
@@ -2471,17 +2529,19 @@ def run() -> None:
                                     index_payload = {}
                                 if index_payload.get("incomplete_pdf_count"):
                                     job = (index_payload.get("pdf_jobs") or [{}])[0]
-                                    _print_status(
-                                        "◌",
-                                        f"Index checkpoint saved — pages {job.get('indexed_pages', '?')}/{job.get('page_count', '?')}; resume required.",
-                                        "yellow",
+                                    print_warn(
+                                        f"Index checkpoint saved — pages "
+                                        f"{job.get('indexed_pages', '?')}/{job.get('page_count', '?')}; "
+                                        "resume required."
                                     )
                                 else:
-                                    _print_status("✓", "Indexing complete.", "green")
+                                    print_ok("Indexing complete")
                             else:
-                                _print_status("⚠", "Indexing did not complete; the model will receive the error.", "yellow")
+                                print_warn(
+                                    "Indexing did not complete; the model will receive the error."
+                                )
                         except Exception as e:
-                            _print_status("⚠", f"Indexing failed: {e}", "red")
+                            print_error(f"Indexing failed: {e}")
         except Exception:
             # Best-effort; don't let indexing errors stop the agent
             pass
@@ -2524,7 +2584,8 @@ def run() -> None:
                     f"Stopped after {MAX_TOOL_CALL_ROUNDS} tool-call rounds to avoid an unreliable loop. "
                     "Please narrow the request or ask me to continue from the latest result."
                 )
-                _console.print(f"\n[yellow]⚠ {message}[/]\n")
+                print_warn(message)
+                _console.print()
                 if session["history"]:
                     history.append({"role": "assistant", "content": message})
                 break
