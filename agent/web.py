@@ -28,6 +28,8 @@ from agent.core import (
     ContextWindowError,
     MODEL_NAME,
     MAX_TOOL_CALL_ROUNDS,
+    MAX_OUTPUT_CONTINUATION_ROUNDS,
+    OUTPUT_CONTINUATION_PROMPT,
     TOOL_CONTINUATION_PROMPT,
     _check_and_compact_history,
     effective_session_model_options,
@@ -36,6 +38,8 @@ from agent.core import (
     prepare_messages_for_model,
     tool_schemas_for_model,
     _tool_call_turn_key,
+    _chunk_done_reason,
+    _output_limit_reached,
 )
 from agent.tool_runner import (
     build_execution_batches,
@@ -1184,16 +1188,23 @@ def _generate_chat_events_impl(
     # 4. Stream response loop (supports tool execution and model chain-calling)
     executed_tool_calls: dict[str, dict] = {}
     tool_rounds = 0
+    output_continuation_rounds = 0
+    output_continuation_base: list[dict] | None = None
+    accumulated_content = ""
+    accumulated_thinking = ""
+    continuing_output = False
     while True:
         cancellation_token.raise_if_cancelled()
-        runtime_tools = tool_schemas_for_model(messages_to_send, session_data, TOOL_SCHEMAS)
+        runtime_tools = None if continuing_output else tool_schemas_for_model(
+            messages_to_send, session_data, TOOL_SCHEMAS
+        )
         try:
             guarded_options = guarded_options_for_call(
                 messages_to_send,
                 effective_session_model_options(session_data)[1],
                 runtime_tools,
                 extra_reserved_tokens=(
-                    CONTEXT_TOOL_LOOP_RESERVE if tool_rounds else 0
+                    CONTEXT_TOOL_LOOP_RESERVE if tool_rounds and not continuing_output else 0
                 ),
             )
         except ContextWindowError as exc:
@@ -1223,7 +1234,7 @@ def _generate_chat_events_impl(
             "model": MODEL_NAME,
             "messages": messages_to_send,
             "stream": True,
-            "think": session_data.get("think", True),
+            "think": False if continuing_output else session_data.get("think", True),
         }
         if session_data.get("format"):
             kwargs["format"] = session_data["format"]
@@ -1260,10 +1271,12 @@ def _generate_chat_events_impl(
         thinking_started = False
         prompt_tokens = 0
         eval_tokens = 0
+        done_reason = ""
         
         try:
             for chunk in stream:
                 cancellation_token.raise_if_cancelled()
+                done_reason = _chunk_done_reason(chunk) or done_reason
                 msg = chunk.message
             
                 if getattr(chunk, "prompt_eval_count", None):
@@ -1307,6 +1320,55 @@ def _generate_chat_events_impl(
                 
         if in_thinking:
             yield {"type": "thinking_end"}
+
+        if (
+            not tool_calls
+            and content_buf
+            and _output_limit_reached(
+                done_reason,
+                eval_tokens,
+                int(guarded_options.get("num_predict", 0)),
+            )
+            and output_continuation_rounds < MAX_OUTPUT_CONTINUATION_ROUNDS
+        ):
+            accumulated_content += content_buf
+            accumulated_thinking += thinking_buf
+            output_continuation_rounds += 1
+            if output_continuation_base is None:
+                output_continuation_base = list(messages_to_send)
+            reminder = {
+                "role": "user",
+                "content": OUTPUT_CONTINUATION_PROMPT.format(user_input=user_input),
+            }
+            messages_to_send = prepare_messages_for_model(
+                [
+                    *output_continuation_base,
+                    {"role": "assistant", "content": accumulated_content},
+                    reminder,
+                ],
+                session_data,
+                tools=None,
+            )
+            continuing_output = True
+            continue
+
+        content_buf = accumulated_content + content_buf
+        thinking_buf = accumulated_thinking + thinking_buf
+        if (
+            content_buf
+            and _output_limit_reached(
+                done_reason,
+                eval_tokens,
+                int(guarded_options.get("num_predict", 0)),
+            )
+            and output_continuation_rounds >= MAX_OUTPUT_CONTINUATION_ROUNDS
+        ):
+            notice = (
+                "\n\n[Selene paused after the safe automatic continuation limit. "
+                "Ask to continue if you need more.]"
+            )
+            content_buf += notice
+            yield {"type": "content_chunk", "text": notice}
             
         # Send token usage if available
         if prompt_tokens or eval_tokens:

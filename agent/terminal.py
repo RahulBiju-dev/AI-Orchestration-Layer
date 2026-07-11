@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass
+from os.path import commonprefix
+from typing import Sequence
 from rich.console import Console
 
 # Shared console (write to stderr so Live and spinner use the same stream)
@@ -17,18 +19,39 @@ _console = Console(stderr=True)
 
 @dataclass(frozen=True)
 class TerminalTheme:
-    """Small central palette for the CLI chrome."""
+    """Frontier-lab palette: cool ice cyan, soft violet, precise mono chrome."""
 
-    accent: str = "cyan"
+    # Named colors stay portable across terminal emulators without truecolor.
+    accent: str = "bright_cyan"
+    accent_soft: str = "cyan"
     accent_2: str = "bright_magenta"
+    ink: str = "bright_white"
     success: str = "green"
     warning: str = "yellow"
     danger: str = "red"
     muted: str = "dim"
     border: str = "cyan"
+    thinking: str = "bright_magenta"
+    surface: str = "grey23"
+    prompt_name: str = "bold bright_cyan"
+    prompt_glyph: str = "dim cyan"
+    prompt_mark: str = "bold bright_magenta"
+    rule: str = "dim cyan"
+    label: str = "bold cyan"
+    meta: str = "dim"
 
 
 THEME = TerminalTheme()
+
+# Geometric glyphs used consistently across the CLI chrome.
+GLYPH_MARK = "◈"
+GLYPH_PROMPT = "›"
+GLYPH_SECTION = "◆"
+GLYPH_TOOL = "▸"
+GLYPH_OK = "✓"
+GLYPH_WARN = "!"
+GLYPH_ERR = "×"
+GLYPH_RUN = "◌"
 
 
 _ANSI_ESCAPE_RE = re.compile(
@@ -84,11 +107,509 @@ def sanitize_terminal_input(text: str) -> str:
     return cleaned.strip()
 
 
-def read_user_input() -> str:
-    """Read one prompt line using the shared console and terminal hygiene."""
+# Visible prompt chrome. The colored form is printed by Rich; the plain form is
+# documentation for the fixed width. Chrome is never part of the editable buffer.
+PROMPT_MARKUP = (
+    f"[{THEME.prompt_glyph}]{GLYPH_MARK}[/] "
+    f"[{THEME.prompt_name}]selene[/] "
+    f"[{THEME.prompt_mark}]{GLYPH_PROMPT}[/] "
+)
+PROMPT_PLAIN = f"{GLYPH_MARK} selene {GLYPH_PROMPT} "
+
+
+@dataclass
+class _SlashCompletionState:
+    """Track deterministic Tab completion for slash commands."""
+
+    commands: tuple[str, ...]
+    matches: tuple[str, ...] = ()
+    index: int = -1
+    last_value: str = ""
+
+    def complete(self, value: str, preferred: str | None = None) -> str:
+        if not value.startswith("/"):
+            self.reset()
+            return value
+
+        if preferred and preferred.casefold().startswith(value.casefold()):
+            self.last_value = preferred
+            return preferred
+
+        if value != self.last_value:
+            folded = value.casefold()
+            matches = tuple(
+                command for command in self.commands
+                if command.casefold().startswith(folded)
+            )
+            # At an exact parent command, the next useful completion is its
+            # argument/subcommand boundary rather than the same text again.
+            children = tuple(
+                command for command in matches
+                if command.casefold().startswith(f"{folded} ")
+            )
+            self.matches = children or matches
+            self.index = -1
+
+        if not self.matches:
+            self.last_value = value
+            return value
+
+        shared = commonprefix(self.matches)
+        if self.index < 0 and len(shared) > len(value):
+            completed = shared
+        else:
+            self.index = (self.index + 1) % len(self.matches)
+            completed = self.matches[self.index]
+        self.last_value = completed
+        return completed
+
+    def reset(self) -> None:
+        self.matches = ()
+        self.index = -1
+        self.last_value = ""
+
+
+@dataclass
+class _SlashMenuState:
+    """Filtered, keyboard-selectable slash-command menu state."""
+
+    commands: tuple[str, ...]
+    max_visible: int = 7
+    matches: tuple[str, ...] = ()
+    selected: int = 0
+    query: str = ""
+
+    def update(self, value: str) -> None:
+        normalized = str(value or "")
+        if not normalized.startswith("/") or "\n" in normalized:
+            self.reset()
+            return
+        matches = tuple(
+            command for command in self.commands
+            if command.casefold().startswith(normalized.casefold())
+        )
+        if normalized != self.query or matches != self.matches:
+            previous = self.selected_command()
+            self.query = normalized
+            self.matches = matches
+            self.selected = matches.index(previous) if previous in matches else 0
+
+    def move(self, delta: int) -> None:
+        if self.matches:
+            self.selected = (self.selected + int(delta)) % len(self.matches)
+
+    def selected_command(self) -> str | None:
+        if not self.matches:
+            return None
+        return self.matches[self.selected % len(self.matches)]
+
+    def visible_matches(self) -> tuple[tuple[int, str], ...]:
+        if not self.matches:
+            return ()
+        size = max(1, int(self.max_visible))
+        start = min(
+            max(0, self.selected - size + 1),
+            max(0, len(self.matches) - size),
+        )
+        return tuple(enumerate(self.matches[start:start + size], start=start))
+
+    def reset(self) -> None:
+        self.matches = ()
+        self.selected = 0
+        self.query = ""
+
+
+def _slash_menu_lines(state: _SlashMenuState) -> tuple[str, ...]:
+    """Build compact ANSI menu rows; empty state leaves no prompt chrome."""
+    visible = state.visible_matches()
+    if not visible:
+        return ()
+    lines = []
+    for index, command in visible:
+        if index == state.selected:
+            lines.append(f"  \x1b[1;36m{GLYPH_PROMPT} {command}\x1b[0m")
+        else:
+            lines.append(f"    \x1b[2m{command}\x1b[0m")
+    lines.append("  \x1b[2m↑↓ choose · Tab autofill\x1b[0m")
+    return tuple(lines)
+
+
+def _print_prompt_chrome() -> None:
+    """Render the colored prompt without placing it in the editable input buffer."""
+    _console.print(PROMPT_MARKUP, markup=True, end="", highlight=False)
+
+
+def _read_line_with_fixed_prompt(completions: Sequence[str] = ()) -> str:
+    """Read one line while keeping ``selene $`` outside the editable buffer.
+
+    Rich's ``Console.input`` prints a styled prompt then calls bare ``input()``.
+    That leaves the chrome on the same visual line without giving the line editor
+    a real prompt, so backspace can walk into ``selene $``.  Here the chrome is
+    painted once, then a character-level editor owns only the user text.
+    """
+    _print_prompt_chrome()
+    if sys.stdin.isatty():
+        try:
+            return _read_line_protected_tty(completions=completions)
+        except (ImportError, OSError, termios_error_type()) as exc:
+            # Fall through when raw mode is unavailable.
+            del exc
+
+    # Non-interactive or raw-mode failure: never put chrome into the buffer.
+    try:
+        return sys.stdin.readline()
+    except EOFError:
+        return ""
+
+
+def termios_error_type() -> type[BaseException]:
+    """Return the local termios error type, or a harmless stand-in."""
+    try:
+        import termios
+
+        return termios.error
+    except ImportError:
+        return OSError
+
+
+def _tty_out() -> "object":
+    """Stream used for prompt chrome and the protected line editor (same TTY)."""
+    return getattr(_console, "file", None) or sys.stderr
+
+
+def _read_line_protected_tty(completions: Sequence[str] = ()) -> str:
+    """Character-level line editor that refuses to erase the fixed prompt."""
+    import os
+
+    out = _tty_out()
+    buffer: list[str] = []
+    cursor = 0
+    commands = tuple(dict.fromkeys(completions))
+    completion_state = _SlashCompletionState(commands)
+    menu_state = _SlashMenuState(commands)
+    menu_rows = 0
+
+    def write(text: str) -> None:
+        out.write(text)
+        out.flush()
+
+    def restore_prompt_cursor(rows: int) -> None:
+        """Return from menu rows using relative movement that survives scrolling."""
+        write("\r")
+        if rows > 0:
+            write(f"\x1b[{rows}A")
+        column = len(PROMPT_PLAIN) + cursor
+        if column > 0:
+            write(f"\x1b[{column}C")
+
+    def clear_menu() -> None:
+        nonlocal menu_rows
+        if menu_rows <= 0:
+            return
+        write("\x1b[?25l")
+        for _ in range(menu_rows):
+            write("\r\n\x1b[2K")
+        restore_prompt_cursor(menu_rows)
+        write("\x1b[?25h")
+        menu_rows = 0
+
+    def refresh_menu() -> None:
+        nonlocal menu_rows
+        value = "".join(buffer) if cursor == len(buffer) else ""
+        menu_state.update(value)
+        lines = _slash_menu_lines(menu_state)
+        rows_to_clear = max(menu_rows, len(lines))
+        if rows_to_clear <= 0:
+            return
+        write("\x1b[?25l")
+        for index in range(rows_to_clear):
+            write("\r\n\x1b[2K")
+            if index < len(lines):
+                write(lines[index])
+        restore_prompt_cursor(rows_to_clear)
+        write("\x1b[?25h")
+        menu_rows = len(lines)
+
+    def redraw_from_cursor() -> None:
+        # Clear from cursor to end of line, rewrite tail, restore cursor.
+        tail = "".join(buffer[cursor:])
+        write("\x1b[K" + tail)
+        if tail:
+            write(f"\x1b[{len(tail)}D")
+
+    def insert(text: str) -> None:
+        nonlocal cursor
+        for char in text:
+            if char in ("\n", "\r") or ord(char) < 32:
+                continue
+            buffer.insert(cursor, char)
+            write(char)
+            cursor += 1
+            redraw_from_cursor()
+        refresh_menu()
+
+    def backspace() -> None:
+        nonlocal cursor
+        if cursor <= 0:
+            return
+        cursor -= 1
+        del buffer[cursor]
+        write("\b")
+        redraw_from_cursor()
+        refresh_menu()
+
+    def delete_forward() -> None:
+        if cursor >= len(buffer):
+            return
+        del buffer[cursor]
+        redraw_from_cursor()
+        refresh_menu()
+
+    def move_left() -> None:
+        nonlocal cursor
+        if cursor <= 0:
+            return
+        cursor -= 1
+        write("\b")
+        refresh_menu()
+
+    def move_right() -> None:
+        nonlocal cursor
+        if cursor >= len(buffer):
+            return
+        write(buffer[cursor])
+        cursor += 1
+        refresh_menu()
+
+    def move_home() -> None:
+        nonlocal cursor
+        if cursor <= 0:
+            return
+        write(f"\x1b[{cursor}D")
+        cursor = 0
+        refresh_menu()
+
+    def move_end() -> None:
+        nonlocal cursor
+        remaining = len(buffer) - cursor
+        if remaining <= 0:
+            return
+        write("".join(buffer[cursor:]))
+        cursor = len(buffer)
+        refresh_menu()
+
+    def replace_buffer(text: str) -> None:
+        nonlocal cursor
+        if cursor:
+            write(f"\x1b[{cursor}D")
+        write("\x1b[K")
+        buffer[:] = list(text)
+        cursor = len(buffer)
+        write(text)
+        refresh_menu()
+
+    def move_menu(delta: int) -> bool:
+        if not menu_state.matches:
+            return False
+        menu_state.move(delta)
+        refresh_menu()
+        return True
+
+    def complete() -> None:
+        if cursor != len(buffer):
+            return
+        current = "".join(buffer)
+        completed = completion_state.complete(
+            current,
+            preferred=menu_state.selected_command(),
+        )
+        if completed != current:
+            replace_buffer(completed)
+
+    helpers = dict(
+        write=write,
+        insert=insert,
+        backspace=backspace,
+        delete_forward=delete_forward,
+        move_left=move_left,
+        move_right=move_right,
+        move_home=move_home,
+        move_end=move_end,
+        move_menu=move_menu,
+        clear_menu=clear_menu,
+        complete=complete,
+    )
+    if os.name == "nt":
+        return _read_line_protected_windows(buffer, **helpers)
+    return _read_line_protected_posix(buffer, **helpers)
+
+
+def _read_line_protected_posix(
+    buffer: list[str],
+    *,
+    write,
+    insert,
+    backspace,
+    delete_forward,
+    move_left,
+    move_right,
+    move_home,
+    move_end,
+    move_menu,
+    clear_menu,
+    complete,
+) -> str:
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if not ch:
+                clear_menu()
+                write("\r\n")
+                raise EOFError
+            if ch in ("\r", "\n"):
+                clear_menu()
+                write("\r\n")
+                return "".join(buffer)
+            if ch == "\x03":  # Ctrl+C
+                clear_menu()
+                write("\r\n")
+                raise KeyboardInterrupt
+            if ch == "\x04":  # Ctrl+D
+                if not buffer:
+                    clear_menu()
+                    write("\r\n")
+                    raise EOFError
+                continue
+            if ch in ("\x7f", "\b"):
+                backspace()
+                continue
+            if ch == "\x01":  # Ctrl+A home
+                move_home()
+                continue
+            if ch == "\x05":  # Ctrl+E end
+                move_end()
+                continue
+            if ch == "\t":
+                complete()
+                continue
+            if ch == "\x1b":
+                # Escape sequence (arrows, delete, home/end)
+                seq = sys.stdin.read(1)
+                if seq == "[":
+                    rest = sys.stdin.read(1)
+                    if rest == "D":
+                        move_left()
+                    elif rest == "C":
+                        move_right()
+                    elif rest == "A":
+                        move_menu(-1)
+                    elif rest == "B":
+                        move_menu(1)
+                    elif rest == "H":
+                        move_home()
+                    elif rest == "F":
+                        move_end()
+                    elif rest == "3":
+                        tilde = sys.stdin.read(1)
+                        if tilde == "~":
+                            delete_forward()
+                    elif rest in ("1", "7"):
+                        tilde = sys.stdin.read(1)
+                        if tilde == "~":
+                            move_home()
+                    elif rest in ("4", "8"):
+                        tilde = sys.stdin.read(1)
+                        if tilde == "~":
+                            move_end()
+                continue
+            if ch == "\x15":  # Ctrl+U clear buffer only (not the chrome)
+                while buffer:
+                    backspace()
+                continue
+            if ord(ch) >= 32:
+                insert(ch)
+    finally:
+        clear_menu()
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _read_line_protected_windows(
+    buffer: list[str],
+    *,
+    write,
+    insert,
+    backspace,
+    delete_forward,
+    move_left,
+    move_right,
+    move_home,
+    move_end,
+    move_menu,
+    clear_menu,
+    complete,
+) -> str:
+    import msvcrt
+
+    while True:
+        ch = msvcrt.getwch()
+        if ch in ("\r", "\n"):
+            clear_menu()
+            write("\r\n")
+            return "".join(buffer)
+        if ch == "\x03":
+            clear_menu()
+            write("\r\n")
+            raise KeyboardInterrupt
+        if ch in ("\x08", "\x7f"):
+            backspace()
+            continue
+        if ch == "\t":
+            complete()
+            continue
+        if ch in ("\x00", "\xe0"):
+            code = msvcrt.getwch()
+            if code == "K":  # left
+                move_left()
+            elif code == "M":  # right
+                move_right()
+            elif code == "H":  # up
+                move_menu(-1)
+            elif code == "P":  # down
+                move_menu(1)
+            elif code == "G":  # home
+                move_home()
+            elif code == "O":  # end
+                move_end()
+            elif code == "S":  # delete
+                delete_forward()
+            continue
+        if ord(ch) >= 32:
+            insert(ch)
+
+
+def read_user_input(completions: Sequence[str] = ()) -> str:
+    """Read one prompt line; ``selene $`` is painted but never editable."""
     flush_terminal_input()
-    raw = _console.input("[bold cyan]selene[/] [dim]$[/] ")
+    try:
+        raw = _read_line_with_fixed_prompt(completions=completions)
+    except EOFError:
+        return ""
     return sanitize_terminal_input(raw)
+
+
+def _section_rule(label: str, *, style: str | None = None, glyph: str = GLYPH_SECTION) -> None:
+    """Print a frontier-lab section rule with a left-aligned label."""
+    from rich.rule import Rule
+
+    color = style or THEME.rule
+    title = f"[{THEME.label}]{glyph} {label}[/]"
+    _console.print(Rule(title, style=color, align="left", characters="─"))
 
 
 def assistant_stream_panel(text: str):
@@ -101,8 +622,10 @@ def assistant_stream_panel(text: str):
         body,
         border_style=THEME.border,
         padding=(1, 2),
-        title="[bold cyan]assistant[/]",
+        title=f"[bold {THEME.accent}]{GLYPH_SECTION} response[/]",
         title_align="left",
+        subtitle=f"[{THEME.meta}]selene[/]",
+        subtitle_align="right",
     )
 
 
@@ -115,102 +638,262 @@ def print_assistant_message(text: str) -> None:
 
 
 def print_thinking_header() -> None:
-    from rich.rule import Rule
-
-    _console.print(Rule("[dim magenta]thinking[/]", style="dim magenta"))
+    _section_rule("thinking", style=THEME.thinking, glyph=GLYPH_MARK)
 
 
 def print_thinking_footer(label: str | None = None) -> None:
     from rich.rule import Rule
 
-    text = f"[dim magenta]{label}[/]" if label else ""
-    _console.print(Rule(text, style="dim magenta"))
+    if label:
+        _console.print(
+            Rule(
+                f"[{THEME.thinking}]{GLYPH_MARK} {label}[/]",
+                style=THEME.thinking,
+                align="left",
+                characters="─",
+            )
+        )
+    else:
+        _console.print(Rule(style=THEME.thinking, characters="─"))
     _console.print()
+
+
+def thinking_stream_style() -> str:
+    """Style used for streamed chain-of-thought tokens."""
+    return f"dim {THEME.thinking}"
 
 
 def _print_status(icon: str, message: str, color: str = "cyan") -> None:
     """Print a formatted status line to stderr so it doesn't mix with piped output.
-    
-    Args:
-        icon (str): The emoji or icon to display at the beginning of the line.
-        message (str): The status message to print.
-        color (str, optional): The rich color to use for the output. Defaults to "cyan".
+
+    Legacy callers may still pass emoji icons; new code should prefer
+    ``print_lab_status`` / ``print_tool_event``.
     """
-    _console.print(f"[{color} bold]{icon}  {message}[/]")
+    _console.print(f"[{color}]{icon}[/]  {message}")
 
 
-def print_welcome_header() -> None:
-    """Print the terminal app header."""
+def print_lab_status(
+    message: str,
+    *,
+    kind: str = "info",
+    detail: str | None = None,
+) -> None:
+    """Print a refined status line (success / warn / error / info / run)."""
+    styles = {
+        "info": (GLYPH_MARK, THEME.accent_soft),
+        "run": (GLYPH_RUN, THEME.warning),
+        "ok": (GLYPH_OK, THEME.success),
+        "warn": (GLYPH_WARN, THEME.warning),
+        "error": (GLYPH_ERR, THEME.danger),
+        "tool": (GLYPH_TOOL, THEME.accent),
+    }
+    glyph, color = styles.get(kind, styles["info"])
+    if detail:
+        _console.print(
+            f"  [{color}]{glyph}[/]  {message}  [{THEME.meta}]{detail}[/]"
+        )
+    else:
+        _console.print(f"  [{color}]{glyph}[/]  {message}")
+
+
+def print_tool_event(
+    name: str,
+    *,
+    phase: str = "run",
+    detail: str | None = None,
+    message: str | None = None,
+) -> None:
+    """Print a tool lifecycle line: run / ok / error / parallel."""
+    if phase == "parallel":
+        print_lab_status(
+            message or f"parallel tools × {detail or '?'}",
+            kind="info",
+        )
+        return
+    if phase == "error":
+        print_lab_status(
+            f"[{THEME.label}]{name}[/]  {message or 'failed'}",
+            kind="error",
+            detail=detail,
+        )
+        return
+    if phase == "ok":
+        print_lab_status(
+            f"[{THEME.label}]{name}[/]  {message or 'complete'}",
+            kind="ok",
+            detail=detail,
+        )
+        return
+    print_lab_status(
+        f"[{THEME.label}]{name}[/]  {message or 'running'}",
+        kind="run",
+        detail=detail,
+    )
+
+
+def _welcome_art_lines(width: int) -> list[tuple[str, str]]:
+    """Return ``(text, style)`` rows for the Selene cover mark."""
+    if width < 64:
+        return [
+            ("      .o888.", THEME.accent),
+            ("    .888P\"", THEME.accent_soft),
+            ("   d88P\"", THEME.accent_soft),
+            ("   888", THEME.accent),
+            ("   Y88b.", THEME.accent_soft),
+            ("    \"Y888.", THEME.accent),
+            ("      `\"\"'", THEME.muted),
+            ("", THEME.accent),
+            ("  S E L E N E", f"bold {THEME.accent}"),
+            ("  local agent runtime", THEME.meta),
+        ]
+
+    return [
+        ("              .o8888888o.", THEME.accent),
+        ("           .d888888888888b.", THEME.accent),
+        ("         .d888888P\"'", THEME.accent_soft),
+        ("        d88888P\"", THEME.accent_soft),
+        ("       d8888P\"", THEME.accent_soft),
+        ("       88888\"", THEME.accent),
+        ("       Y8888b.", THEME.accent_soft),
+        ("        Y88888b.", THEME.accent_soft),
+        ("         \"Y888888bo.", THEME.accent),
+        ("           \"Y8888888b.", THEME.accent),
+        ("             `\"Y888P\"'", THEME.muted),
+    ]
+
+
+def _welcome_meta_pairs(context: dict | None = None) -> list[tuple[str, str]]:
+    """Build key/value pairs for the splash status strip."""
+    pairs: list[tuple[str, str]] = []
+    ctx = dict(context or {})
+    if not ctx:
+        try:
+            from agent.runtime_config import get_runtime_config
+
+            runtime = get_runtime_config()
+            ctx = {
+                "profile": runtime.profile.value,
+                "model": runtime.chat_model,
+                "num_ctx": str(runtime.num_ctx),
+                "num_predict": str(runtime.num_predict),
+            }
+        except Exception:
+            ctx = {}
+        try:
+            from agent.platform_runtime import platform_family
+
+            ctx.setdefault("platform", platform_family())
+        except Exception:
+            pass
+
+    mapping = (
+        ("profile", "profile"),
+        ("model", "model"),
+        ("num_ctx", "ctx"),
+        ("num_predict", "out"),
+        ("platform", "host"),
+    )
+    for key, label in mapping:
+        value = ctx.get(key)
+        if value is not None and str(value).strip():
+            pairs.append((label, str(value)))
+    return pairs
+
+
+def print_welcome_header(context: dict | None = None) -> None:
+    """Print a framed lab-style splash: crescent mark, product identity, runtime strip."""
+    from rich.align import Align
+    from rich.console import Group
+    from rich.panel import Panel
+    from rich.table import Table
     from rich.text import Text
 
-    logo_lines = [
-        r"*          .                  .",
-        r"      _..._",
-        r"   .::::   `.",
-        r"  :::::      :       ____  _____ _     _____ _   _ _____",
-        r"  `::::.   .'       / ___|| ____| |   | ____| \ | | ____|",
-        r"     `''''`         \___ \|  _| | |   |  _| |  \| |  _|",
-        r".                    ___) | |___| |___| |___| |\  | |___",
-        r"     *              |____/|_____|_____|_____|_| \_|_____|",
-        "",
-        r"                 N I G H T   M O D E   A G E N T",
-    ]
-    width = min(_console.size.width, 100)
-    block_width = max(len(line) for line in logo_lines)
-    left_margin = max((width - block_width) // 2, 0)
+    width = max(48, min(_console.size.width, 92))
+    art_lines = _welcome_art_lines(width)
+    art = Text(justify="left")
+    for index, (line, style) in enumerate(art_lines):
+        if index:
+            art.append("\n")
+        art.append(line, style=style)
+
+    brand = Text()
+    brand.append("SELENE", style=f"bold {THEME.accent}")
+    brand.append("\n")
+    brand.append("local agent runtime", style=THEME.meta)
+    brand.append("\n")
+    brand.append("tools  ·  vault  ·  ollama", style=f"dim {THEME.accent_2}")
+
+    if width >= 64:
+        header = Table.grid(padding=(0, 3))
+        header.add_column(justify="left", no_wrap=True)
+        header.add_column(justify="left", ratio=1)
+        header.add_row(art, Align.left(brand, vertical="middle"))
+        body_renderable: object = header
+    else:
+        body_renderable = Group(Align.center(art), Text(""), Align.center(brand))
+
+    meta = _welcome_meta_pairs(context)
+    footer = Text(justify="left")
+    if meta:
+        for index, (label, value) in enumerate(meta):
+            if index:
+                footer.append("   ", style=THEME.meta)
+            footer.append(f"{label} ", style=THEME.meta)
+            footer.append(value, style=THEME.ink)
+
+    panel = Panel(
+        Group(body_renderable, Text(""), footer) if meta else body_renderable,
+        border_style=THEME.border,
+        padding=(1, 2),
+        title=f"[bold {THEME.accent}]{GLYPH_MARK} selene[/]",
+        title_align="left",
+        subtitle=f"[{THEME.meta}]frontier local · type /help[/]",
+        subtitle_align="right",
+        width=min(width, _console.size.width),
+    )
     _console.print()
-    for index, line in enumerate(logo_lines):
-        style = "dim cyan" if index == len(logo_lines) - 1 else "cyan"
-        padded_line = f"{' ' * left_margin}{line}"
-        _console.print(
-            Text(padded_line, style=style),
-            markup=False,
-            highlight=False,
-            no_wrap=True,
-            overflow="crop",
-        )
+    _console.print(Align.center(panel))
+    _console.print()
+    _console.print(
+        f"  [{THEME.meta}]{GLYPH_PROMPT} local inference · /help for commands · "
+        f"empty line ignored[/]"
+    )
     _console.print()
 
 
 class _Spinner:
-    """Animated spinner wrapper that uses rich.status.Status.
-    
-    This class provides a simple API to start, update, and stop a terminal spinner.
-    It handles its own state and threading compatibility variables.
-    """
+    """Animated spinner wrapper that uses rich.status.Status."""
 
-    def __init__(self, message: str = "Thinking", color: str = "magenta") -> None:
+    def __init__(self, message: str = "reasoning", color: str | None = None) -> None:
         self._message = message
-        
-        self._color = color
-        self._status = _console.status(f"[{self._color} bold]{self._message}…[/]", spinner="dots", spinner_style=f"{self._color} bold")
-        
-        # Keep threading variables for backwards compatibility with core.py's interrupt checking
+        self._color = color or THEME.thinking
+        self._status = _console.status(
+            self._render_message(),
+            spinner="dots12",
+            spinner_style=f"{self._color}",
+        )
         import threading
+
         self._stop_event = threading.Event()
-        self._thread = type('MockThread', (), {'is_alive': lambda: False, 'join': lambda: None})()
+        self._thread = type("MockThread", (), {"is_alive": lambda: False, "join": lambda: None})()
+
+    def _render_message(self) -> str:
+        return (
+            f"[{self._color}]{GLYPH_RUN}[/] "
+            f"[{THEME.label}]{self._message}[/]"
+            f"[{THEME.meta}] …[/]"
+        )
 
     def start(self) -> "_Spinner":
-        """Start the animated spinner in the terminal.
-        
-        Returns:
-            _Spinner: The current spinner instance for method chaining.
-        """
         self._stop_event.clear()
         self._status.start()
         return self
 
     def update(self, message: str) -> None:
-        """Update the spinner's message dynamically while it is running.
-        
-        Args:
-            message (str): The new message to display.
-        """
         self._message = message
-        self._status.update(f"[{self._color} bold]{self._message}…[/]")
+        self._status.update(self._render_message())
 
     def stop(self) -> None:
-        """Stop the animated spinner and mark the stop event as set."""
         self._stop_event.set()
         self._status.stop()
 

@@ -327,6 +327,65 @@ class TestChatEventTerminalState(unittest.TestCase):
         self.assertEqual(len(assistant_calls), len(tool_results))
         self.assertNotIn("tool_calls", terminal_history[-1])
 
+    def test_length_limited_web_segments_stream_and_persist_as_one_answer(self):
+        from agent import web
+
+        def chunk(content, *, reason, count):
+            return SimpleNamespace(
+                message=SimpleNamespace(tool_calls=[], thinking="", content=content),
+                prompt_eval_count=20,
+                eval_count=count,
+                done_reason=reason,
+            )
+
+        service = MagicMock()
+        service.chat.side_effect = [
+            iter([chunk("Once upon a ", reason="length", count=768)]),
+            iter([chunk("time.", reason="stop", count=12)]),
+        ]
+        session = {
+            "runtime_profile": "low-vram",
+            "options": {},
+            "history": True,
+            "system": "",
+            "think": True,
+            "format": "",
+        }
+        history = []
+        with (
+            patch.object(web, "TOOL_DISPATCH", {}),
+            patch.object(web, "OllamaService", return_value=service),
+            patch.object(web, "load_default_system_prompt", return_value=""),
+            patch.object(web, "prepare_messages_for_model", side_effect=lambda messages, *args, **kwargs: list(messages)),
+            patch.object(web, "tool_schemas_for_model", return_value=[]),
+            patch.object(web, "guarded_options_for_call", return_value={"num_ctx": 4096, "num_predict": 768}),
+            patch.object(web, "effective_session_model_options", return_value=(None, {"num_ctx": 4096, "num_predict": 768})),
+            patch.object(web, "title_temporary_session", return_value=None),
+            patch.object(web, "save_session_snapshot", return_value="conversation.json"),
+            patch.object(web, "list_saved_sessions", return_value=["conversation.json"]),
+        ):
+            events = list(web._generate_chat_events_impl(
+                "Write a story",
+                session,
+                history,
+                "conversation.json",
+                cancellation_token=CancellationToken(),
+                publish_global=False,
+                client_id="client-one",
+            ))
+
+        visible = "".join(
+            event.get("text", "") for event in events
+            if event.get("type") == "content_chunk"
+        )
+        terminal = next(event for event in reversed(events) if event.get("type") == "done")
+        self.assertEqual(visible, "Once upon a time.")
+        self.assertEqual(terminal["state"], "completed")
+        self.assertEqual(terminal["history"][-1]["content"], "Once upon a time.")
+        self.assertEqual(service.chat.call_count, 2)
+        self.assertFalse(service.chat.call_args_list[1].kwargs["think"])
+        self.assertNotIn("tools", service.chat.call_args_list[1].kwargs)
+
 
 class TestHTTPGenerationLifecycle(unittest.TestCase):
     @staticmethod

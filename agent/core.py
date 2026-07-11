@@ -18,10 +18,13 @@ from agent.terminal import (
     assistant_stream_panel,
     flush_terminal_input,
     print_assistant_message,
+    print_lab_status,
     print_thinking_footer,
     print_thinking_header,
+    print_tool_event,
     print_welcome_header,
     read_user_input,
+    thinking_stream_style,
 )
 
 import signal
@@ -75,6 +78,7 @@ MIN_EMERGENCY_RESPONSE_TOKENS = 96
 CONTEXT_SAFETY_MARGIN_RATIO = 0.08
 CONTEXT_TOOL_LOOP_RESERVE = 512
 MAX_TOOL_CALL_ROUNDS = 8
+MAX_OUTPUT_CONTINUATION_ROUNDS = 8
 SYSTEM_PERSISTENCE_REMINDER = (
     "Runtime system reminder: Follow the active system prompt exactly. "
     "Use tools over memory for verifiable state, preserve the vault > web > internal knowledge hierarchy, "
@@ -87,10 +91,36 @@ TOOL_CONTINUATION_PROMPT = (
     "otherwise call only the next distinct tool that is still required.\n\n"
     "Original user request:\n{user_input}"
 )
+OUTPUT_CONTINUATION_PROMPT = (
+    "The previous response reached the model's per-call output limit. Continue exactly where it ended. "
+    "Do not restart, repeat earlier text, add a continuation heading, or discuss the limit. "
+    "Finish the original request, then stop normally.\n\n"
+    "Original user request:\n{user_input}"
+)
 
 
 class ContextWindowError(RuntimeError):
     """Raised when a prompt cannot safely fit inside the configured context."""
+
+
+def _chunk_done_reason(chunk) -> str:
+    """Return Ollama's terminal reason across object and mapping responses."""
+    if isinstance(chunk, dict):
+        reason = chunk.get("done_reason")
+    else:
+        reason = getattr(chunk, "done_reason", None)
+    return str(reason or "").strip().lower()
+
+
+def _output_limit_reached(done_reason: str, eval_tokens: int, num_predict: int) -> bool:
+    """Detect explicit and legacy Ollama output-budget stops."""
+    reason = str(done_reason or "").strip().lower()
+    if reason:
+        return reason in {"length", "max_tokens", "token_limit"}
+    try:
+        return int(eval_tokens) >= int(num_predict) > 0
+    except (TypeError, ValueError):
+        return False
 
 # Parameters that accept float values via /set parameter
 _FLOAT_PARAMS = {"temperature", "top_p", "repeat_penalty", "presence_penalty", "frequency_penalty", "min_p", "tfs_z"}
@@ -543,6 +573,51 @@ def _is_tool_continuation_prompt(message: dict) -> bool:
     )
 
 
+def _is_output_continuation_prompt(message: dict) -> bool:
+    return (
+        message.get("role") == "user"
+        and str(message.get("content") or "").startswith(
+            "The previous response reached the model's per-call output limit"
+        )
+    )
+
+
+def _output_continuation_tail_start(messages: list[dict]) -> int | None:
+    """Find the partial-answer/reminder pair needed for seamless continuation."""
+    if len(messages) < 2 or not _is_output_continuation_prompt(messages[-1]):
+        return None
+    if messages[-2].get("role") != "assistant":
+        return None
+    return len(messages) - 2
+
+
+def _fit_output_continuation_tail(messages: list[dict], token_budget: int) -> list[dict]:
+    """Keep the latest possible answer suffix beside its continuation prompt."""
+    tail = [dict(message) for message in messages]
+    if _estimate_messages_tokens(tail) <= token_budget:
+        return tail
+
+    content = str(tail[0].get("content") or "")
+
+    def with_suffix(suffix_chars: int) -> list[dict]:
+        candidate = [dict(message) for message in tail]
+        candidate[0]["content"] = content[-suffix_chars:] if suffix_chars else ""
+        return candidate
+
+    low = 0
+    high = len(content)
+    best = with_suffix(0)
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate = with_suffix(midpoint)
+        if _estimate_messages_tokens(candidate) <= token_budget:
+            best = candidate
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return best
+
+
 def _tool_continuation_tail_start(messages: list[dict]) -> int | None:
     """Find the assistant/tool/user tail that must stay atomic after tools."""
     if not messages or not _is_tool_continuation_prompt(messages[-1]):
@@ -566,12 +641,70 @@ def _compact_tool_continuation_tail(messages: list[dict]) -> list[dict]:
         if message.get("role") == "assistant" and message.get("tool_calls"):
             compacted.append({
                 "role": "assistant",
-                "content": message.get("content", ""),
+                # Thinking/content from the pre-tool response is no longer useful
+                # once the structured call and its result are present.
+                "content": "",
                 "tool_calls": message.get("tool_calls", []),
             })
         else:
-            compacted.append(message)
+            compacted.append(dict(message))
     return compacted
+
+
+def _truncate_tool_content_for_context(content: str, preview_chars: int) -> str:
+    """Return a truthful preview when a tool result must yield response space."""
+    value = str(content or "")
+    if len(value) <= preview_chars:
+        return value
+    preview = value[:max(0, int(preview_chars))].rstrip()
+    marker = (
+        f"...[Tool result truncated from {len(value)} characters to fit the active "
+        "context window. Use a narrower follow-up tool call if more detail is required.]"
+    )
+    return f"{preview}\n{marker}" if preview else marker
+
+
+def _fit_tool_continuation_tail(messages: list[dict], token_budget: int) -> list[dict]:
+    """Bound result previews while preserving the complete tool protocol tail."""
+    compacted = _compact_tool_continuation_tail(messages)
+    if _estimate_messages_tokens(compacted) <= token_budget:
+        return compacted
+
+    tool_indexes = [
+        index for index, message in enumerate(compacted)
+        if message.get("role") == "tool" and str(message.get("content") or "")
+    ]
+    if not tool_indexes:
+        return compacted
+
+    original_contents = {
+        index: str(compacted[index].get("content") or "")
+        for index in tool_indexes
+    }
+
+    def with_preview_limit(preview_chars: int) -> list[dict]:
+        candidate = [dict(message) for message in compacted]
+        for index, content in original_contents.items():
+            candidate[index]["content"] = _truncate_tool_content_for_context(
+                content,
+                preview_chars,
+            )
+        return candidate
+
+    # Use an exact estimate rather than a chars/token conversion: serialized
+    # JSON, Unicode results, and escaping can all change the ratio materially.
+    low = 0
+    high = max(len(content) for content in original_contents.values())
+    best = with_preview_limit(0)
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate = with_preview_limit(midpoint)
+        if _estimate_messages_tokens(candidate) <= token_budget:
+            best = candidate
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return best
 
 
 _interrupted = False
@@ -629,9 +762,19 @@ def _trim_history(
         # System prompt alone exceeds budget; keep it + last user message as a fallback
         return system_msgs + conv_msgs[-1:]
 
+    output_tail_start = _output_continuation_tail_start(conv_msgs)
     tail_start = _tool_continuation_tail_start(conv_msgs)
-    if tail_start is not None:
-        preserved_tail = _compact_tool_continuation_tail(conv_msgs[tail_start:])
+    if output_tail_start is not None:
+        preserved_tail = _fit_output_continuation_tail(
+            conv_msgs[output_tail_start:],
+            max(0, remaining_budget),
+        )
+        older_msgs = conv_msgs[:output_tail_start]
+    elif tail_start is not None:
+        preserved_tail = _fit_tool_continuation_tail(
+            conv_msgs[tail_start:],
+            max(0, remaining_budget),
+        )
         older_msgs = conv_msgs[:tail_start]
     else:
         preserved_tail = []
@@ -664,7 +807,7 @@ def _insert_system_persistence_reminder(messages: list[dict]) -> list[dict]:
     system_msgs, conv_msgs = _split_system_and_conversation(messages)
     if not system_msgs or not conv_msgs:
         return messages
-    if _is_tool_continuation_prompt(conv_msgs[-1]):
+    if _is_tool_continuation_prompt(conv_msgs[-1]) or _is_output_continuation_prompt(conv_msgs[-1]):
         return [*system_msgs, *conv_msgs]
 
     reminder = {"role": "system", "content": SYSTEM_PERSISTENCE_REMINDER}
@@ -845,6 +988,8 @@ def _stream_thinking_response(
 
     thinking_buf = ""
     content_buf = ""
+    done_reason = ""
+    eval_tokens = 0
     in_thinking = False
     thinking_displayed = False
 
@@ -917,6 +1062,13 @@ def _stream_thinking_response(
                 break
 
             try:
+                done_reason = _chunk_done_reason(chunk) or done_reason
+                chunk_eval_count = (
+                    chunk.get("eval_count") if isinstance(chunk, dict)
+                    else getattr(chunk, "eval_count", None)
+                )
+                if chunk_eval_count is not None:
+                    eval_tokens = int(chunk_eval_count or 0)
                 msg = getattr(chunk, "message", None)
                 if msg is None and isinstance(chunk, dict):
                     msg = chunk.get("message")
@@ -976,7 +1128,7 @@ def _stream_thinking_response(
 
                     thinking_buf += str(thinking_chunk)
                     from rich.markup import escape
-                    _console.print(escape(str(thinking_chunk)), style="dim magenta", end="")
+                    _console.print(escape(str(thinking_chunk)), style=thinking_stream_style(), end="")
                     continue
 
                 # ── Content tokens ────────────────────────────────────────
@@ -1074,33 +1226,117 @@ def _stream_thinking_response(
     assistant_msg = {"role": "assistant", "content": content_buf}
     if thinking_buf:
         assistant_msg["thinking"] = thinking_buf
+    assistant_msg["_done_reason"] = done_reason
+    assistant_msg["_eval_count"] = eval_tokens
+    assistant_msg["_num_predict"] = int(guarded_options.get("num_predict", 0))
     return assistant_msg
 
 
+def _stream_complete_response(
+    *,
+    model: str,
+    messages: list[dict],
+    session: dict,
+    user_input: str,
+    tools: list[dict] | None = None,
+    extra_reserved_tokens: int = 0,
+) -> dict:
+    """Stream one logical answer across bounded Ollama output-limit stops."""
+    response = _stream_thinking_response(
+        model=model,
+        messages=messages,
+        tools=tools,
+        options=effective_session_model_options(session)[1],
+        verbose=session.get("verbose", False),
+        think=session.get("think", True),
+        fmt=session.get("format") or None,
+        extra_reserved_tokens=extra_reserved_tokens,
+    )
+    combined_content = str(response.get("content") or "")
+    combined_thinking = str(response.get("thinking") or "")
+    continuation_rounds = 0
+
+    while (
+        not response.get("tool_calls")
+        and combined_content
+        and _output_limit_reached(
+            response.get("_done_reason", ""),
+            response.get("_eval_count", 0),
+            response.get("_num_predict", 0),
+        )
+        and continuation_rounds < MAX_OUTPUT_CONTINUATION_ROUNDS
+    ):
+        continuation_rounds += 1
+        reminder = {
+            "role": "user",
+            "content": OUTPUT_CONTINUATION_PROMPT.format(user_input=user_input),
+        }
+        continuation_messages = prepare_messages_for_model(
+            [
+                *messages,
+                {"role": "assistant", "content": combined_content},
+                reminder,
+            ],
+            session,
+            tools=None,
+        )
+        response = _stream_thinking_response(
+            model=model,
+            messages=continuation_messages,
+            tools=None,
+            options=effective_session_model_options(session)[1],
+            verbose=session.get("verbose", False),
+            think=False,
+            fmt=session.get("format") or None,
+        )
+        next_content = str(response.get("content") or "")
+        if not next_content:
+            break
+        combined_content += next_content
+        if response.get("thinking"):
+            combined_thinking += str(response["thinking"])
+
+    still_limited = _output_limit_reached(
+        response.get("_done_reason", ""),
+        response.get("_eval_count", 0),
+        response.get("_num_predict", 0),
+    )
+    if still_limited and continuation_rounds >= MAX_OUTPUT_CONTINUATION_ROUNDS:
+        notice = (
+            "\n\n[Selene paused after the safe automatic continuation limit. "
+            "Ask to continue if you need more.]"
+        )
+        combined_content += notice
+        _console.print(f"[yellow]{notice.strip()}[/]")
+
+    combined = {"role": "assistant", "content": combined_content}
+    if combined_thinking:
+        combined["thinking"] = combined_thinking
+    if response.get("tool_calls"):
+        combined["tool_calls"] = response["tool_calls"]
+    return combined
+
+
+def _tool_detail(spec: ToolCallSpec) -> str | None:
+    """Compact argument preview for tool status chrome."""
+    args = spec.arguments or {}
+    for key in ("query", "url", "file_path", "path", "app_name", "collection", "title"):
+        value = args.get(key)
+        if value:
+            text = str(value)
+            return text if len(text) <= 72 else text[:69] + "…"
+    names = args.get("app_names")
+    if isinstance(names, list) and names:
+        joined = ", ".join(str(item) for item in names[:4])
+        return joined if len(joined) <= 72 else joined[:69] + "…"
+    return None
+
+
 def _tool_start_status(spec: ToolCallSpec) -> None:
-    fn_name = spec.name
-    fn_args = spec.arguments
-    if fn_name not in TOOL_DISPATCH:
-        _print_status("⚠", f"Unknown tool: {fn_name}", "red")
-    elif fn_name == "web_search":
-        _print_status("🔍", f"Searching the web: [dim]{fn_args.get('query', '')}[/]", "yellow")
-    elif fn_name == "web_scrape":
-        _print_status("🌐", f"Reading web page: [dim]{fn_args.get('url', '')}[/]", "yellow")
-    elif fn_name == "read_document":
-        _print_status("📄", f"Reading document: [dim]{fn_args.get('file_path', '')}[/]", "yellow")
-    elif fn_name == "read_file":
-        _print_status("📂", f"Reading file: [dim]{fn_args.get('file_path', '')}[/]", "yellow")
-    elif fn_name == "spotify_play":
-        _print_status("🎵", f"Opening Spotify: [dim]{fn_args.get('query', '')}[/]", "yellow")
-    elif fn_name == "open_app":
-        _print_status("🚀", f"Opening app: [dim]{fn_args.get('app_name', '')}[/]", "yellow")
-    elif fn_name == "launch_apps":
-        names = ", ".join(str(value) for value in fn_args.get("app_names", []))
-        _print_status("🚀", f"Opening apps: [dim]{names}[/]", "yellow")
-    elif fn_name == "open_terminal_at_path":
-        _print_status("💻", f"Opening terminal at: [dim]{fn_args.get('path', '')}[/]", "yellow")
-    else:
-        _print_status("⚙️", f"Executing {fn_name}…", "yellow")
+    if spec.name not in TOOL_DISPATCH:
+        print_tool_event(spec.name or "?", phase="error", message="unknown tool")
+        return
+    print_tool_event(spec.name, phase="run", detail=_tool_detail(spec))
 
 
 def _tool_result_has_error(content: str) -> str | None:
@@ -1116,26 +1352,13 @@ def _tool_result_has_error(content: str) -> str | None:
 def _tool_end_status(result: ToolCallResult) -> None:
     error = _tool_result_has_error(result.content)
     if error:
-        _print_status("❌", f"Error executing {result.spec.name}: {error}", "red")
+        print_tool_event(result.spec.name, phase="error", detail=error[:120])
         return
-    if result.spec.name == "web_search":
-        _print_status("✓", "Search complete — synthesizing answer…", "green")
-    elif result.spec.name == "web_scrape":
-        _print_status("✓", "Page read — synthesizing answer…", "green")
-    elif result.spec.name == "read_document":
-        _print_status("✓", "Document read — synthesizing answer…", "green")
-    elif result.spec.name == "read_file":
-        _print_status("✓", "File read — synthesizing answer…", "green")
-    elif result.spec.name == "spotify_play":
-        _print_status("✓", "Spotify action complete — synthesizing answer…", "green")
-    elif result.spec.name == "open_app":
-        _print_status("✓", "App launch request sent — synthesizing answer…", "green")
-    elif result.spec.name == "launch_apps":
-        _print_status("✓", "App launch requests processed — synthesizing answer…", "green")
-    elif result.spec.name == "open_terminal_at_path":
-        _print_status("✓", "Terminal launch request sent — synthesizing answer…", "green")
-    else:
-        _print_status("✓", "Tool execution complete — synthesizing answer…", "green")
+    print_tool_event(
+        result.spec.name,
+        phase="ok",
+        message="complete · synthesizing",
+    )
 
 
 def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
@@ -1155,10 +1378,10 @@ def _process_tool_calls(tool_calls: list[dict]) -> list[dict]:
         tool_calls,
         on_start=_tool_start_status,
         on_end=_tool_end_status,
-        on_parallel_batch=lambda batch: _print_status(
-            "⚡",
-            f"Running {len(batch)} independent tools in parallel…",
-            "cyan",
+        on_parallel_batch=lambda batch: print_tool_event(
+            "batch",
+            phase="parallel",
+            detail=str(len(batch)),
         ),
     )
     return [result.as_tool_message() for result in results]
@@ -1217,6 +1440,40 @@ def _process_tool_calls_with_turn_guard(tool_calls: list[dict], executed_tool_ca
 
 
 # ── Slash commands ────────────────────────────────────────────────────
+
+CLI_SLASH_COMPLETIONS = (
+    "/help",
+    "/?",
+    "/clear",
+    "/save",
+    "/load",
+    "/set parameter",
+    "/set profile",
+    "/set system",
+    "/set history",
+    "/set nohistory",
+    "/set wordwrap",
+    "/set nowordwrap",
+    "/set format",
+    "/set noformat",
+    "/set verbose",
+    "/set quiet",
+    "/set think",
+    "/set nothink",
+    "/show parameters",
+    "/show system",
+    "/show model",
+    "/vault alias",
+    "/vault aliases",
+    "/vault rename",
+    "/vault add",
+    "/vault list",
+    "/vault search",
+    "/vault delete",
+    "/quit",
+    "/exit",
+    "/q",
+)
 
 _COMMANDS_HELP = f"""
 [cyan][bold]Available commands:[/]
@@ -2053,12 +2310,25 @@ def run() -> None:
         "runtime_profile": "auto",  # Hardware-aware profile; explicit options still win
     }
 
-    print_welcome_header()
+    try:
+        from agent.runtime_config import get_runtime_config
+
+        _boot_runtime = get_runtime_config()
+        print_welcome_header(
+            {
+                "profile": _boot_runtime.profile.value,
+                "model": _boot_runtime.chat_model,
+                "num_ctx": str(_boot_runtime.num_ctx),
+                "num_predict": str(_boot_runtime.num_predict),
+            }
+        )
+    except Exception:
+        print_welcome_header()
 
     while True:
         # ── User input ────────────────────────────────────────────────
         try:
-            user_input = read_user_input()
+            user_input = read_user_input(completions=CLI_SLASH_COMPLETIONS)
         except EOFError:
             # Exit loop if EOF (Ctrl+D) is encountered
             break
@@ -2145,14 +2415,12 @@ def run() -> None:
             messages_to_send = prepare_messages_for_model(messages_to_send, session, tools=TOOL_SCHEMAS)
 
         # ── LLM call with streaming + thinking ────────────────────────
-        assistant_msg = _stream_thinking_response(
+        assistant_msg = _stream_complete_response(
             model=MODEL_NAME,
             messages=messages_to_send,
+            session=session,
+            user_input=user_input,
             tools=TOOL_SCHEMAS,
-            options=effective_session_model_options(session)[1],
-            verbose=session["verbose"],
-            think=session["think"],
-            fmt=session["format"] or None,
         )
 
         if session["history"]:
@@ -2202,14 +2470,12 @@ def run() -> None:
                 )
 
             # Follow-up call after tool results — also streamed
-            assistant_msg = _stream_thinking_response(
+            assistant_msg = _stream_complete_response(
                 model=MODEL_NAME,
                 messages=messages_to_send,
+                session=session,
+                user_input=user_input,
                 tools=TOOL_SCHEMAS,
-                options=effective_session_model_options(session)[1],
-                verbose=session["verbose"],
-                think=session["think"],
-                fmt=session["format"] or None,
                 extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
             )
             if session["history"]:

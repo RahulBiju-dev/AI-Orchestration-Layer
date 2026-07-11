@@ -144,7 +144,7 @@ The agent manages this automatically:
 - **System prompt persistence** keeps the active model system prompt in every model request. Selene reads the local `Modelfile` system prompt first, then falls back to Ollama's built-model prompt, then to `~/.selene-agent/system_prompt_cache.txt` (or `$SELENE_DATA_DIR/system_prompt_cache.txt`). This makes prompt edits effective at runtime even before the model is rebuilt, while still keeping a durable fallback.
 - **System reminder anchoring** adds a compact runtime system reminder near the active user turn while preserving the full system prompt at the front. This helps long conversations retain tool/evidence rules even when the beginning of the context is far away.
 - **History trimming and compaction** keep the prompt within the active token budget. Near 75% usage, older turns are summarized and passed through the context optimizer while system instructions and recent exchanges remain intact; hard trimming remains the final bound.
-- **Context preflight guards** reserve output space before every Ollama call, including follow-up calls after tools. The guard counts serialized chat messages, the runtime tool schema list, a safety margin, and the requested `num_predict` output budget; if necessary it lowers `num_predict` for that call instead of letting generation run into the end of the context window mid-response.
+- **Context preflight guards** reserve output space before every Ollama call, including follow-up calls after tools. The guard counts serialized chat messages, the runtime tool schema list, a safety margin, and the requested `num_predict` output budget; if necessary it lowers `num_predict` for that call. When Ollama reaches the per-call output limit, Selene automatically continues from the latest answer suffix and streams one combined response instead of silently ending mid-output.
 - **Compact runtime tool schemas** are sent to Ollama instead of the verbose documentation schemas. Function names, descriptions, parameters, required fields, and enums are preserved, but prose-heavy parameter descriptions are stripped because the detailed tool explanations already live in the system prompt and README.
 - **Graceful overflow handling** stops before generation if the prompt still cannot safely fit after trimming. In that case Selene returns a controlled warning asking for a narrower request, a fresh chat, or a larger `num_ctx`, rather than producing unstable output.
 - Both values can be overridden at runtime via `/set parameter num_ctx <value>`.
@@ -611,6 +611,8 @@ Type naturally. The agent will decide whether to answer directly or use tools. W
 ```
 
 ### Slash Commands
+
+Type `/` in the terminal CLI to open the filtered command menu. Use **Up/Down** to select a command and **Tab** to autofill it; continuing to type narrows the suggestions.
 
 | Command | Description |
 |---------|-------------|
