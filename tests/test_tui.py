@@ -461,11 +461,15 @@ class ThemeCatalogTests(unittest.TestCase):
                 self.assertEqual(app.theme, "Tokyo")
                 self.assertEqual(session.get("tui_theme"), "tokyo")
                 self.assertIsNotNone(app._selene_palette)
-                # Glyph is ASCII '>'
+                # Glyph is ASCII '>' on the same row as Input text (y=0).
                 glyph = app.query_one("#prompt-glyph")
                 content = getattr(glyph, "content", None) or getattr(glyph, "_content", ">")
                 plain = content.plain if hasattr(content, "plain") else str(content)
                 self.assertIn(">", plain)
+                cache = getattr(glyph, "_render_cache", None)
+                if cache is not None and getattr(cache, "lines", None):
+                    first = "".join(seg.text for seg in cache.lines[0])
+                    self.assertIn(">", first)
 
         asyncio.run(_run())
 

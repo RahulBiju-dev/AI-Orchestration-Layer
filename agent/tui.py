@@ -519,14 +519,16 @@ def build_app_class():
             background: $background;
             padding: 0 1;
             margin: 0 0 0 0;
-            align: left middle;
+            /* Top-align so the '>' shares the Input's text row (Input draws y=0). */
+            align: left top;
         }
         #input-shell:focus-within {
             border: round $primary;
         }
         #prompt-glyph {
             width: 2;
-            height: 3;
+            height: 1;
+            min-width: 2;
             color: $foreground;
             content-align: left middle;
             background: transparent;
@@ -612,8 +614,8 @@ def build_app_class():
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="input-shell"):
-                # Clear ASCII prompt arrow at the start of the chatbox.
-                yield Static(">", id="prompt-glyph", markup=False)
+                # ASCII '>' on the same row as typed text (Input renders on y=0).
+                yield Static(">", id="prompt-glyph", markup=False, shrink=False)
                 yield Input(placeholder="", id="prompt-input")
                 if self._meta_text:
                     yield Static(self._meta_text, id="composer-meta")
@@ -623,7 +625,7 @@ def build_app_class():
                 yield Static("0 / 0", id="composer-context")
 
         def on_mount(self) -> None:
-            # Ensure the prompt arrow stays visible after theme/CSS apply.
+            # Keep the leading prompt arrow on the input text row.
             try:
                 glyph = self.query_one("#prompt-glyph", Static)
                 glyph.update(">")
