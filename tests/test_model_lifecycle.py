@@ -14,8 +14,9 @@ from agent.runtime_config import HardwareInfo, resolve_runtime_config
 
 
 def _config(**overrides):
+    # Default runtime settings follow the bundled Modelfile (manual profile).
     return resolve_runtime_config(
-        {"profile": "low-vram", **overrides},
+        overrides or None,
         environ={},
         hardware=HardwareInfo(gpu_vram_mb=4096, reason="test"),
     )
@@ -45,13 +46,16 @@ class _LifecycleService:
 
 
 class ModelLifecycleTests(unittest.TestCase):
-    def test_bundled_modelfile_fallback_matches_conservative_profile(self):
+    def test_bundled_modelfile_fallback_matches_modelfile_defaults(self):
         config = _config()
         parsed = parse_modelfile(Path(__file__).resolve().parents[1] / "Modelfile")
 
         self.assertEqual(parsed.base_model, config.base_model)
-        for name, value in config.ollama_options().items():
-            self.assertEqual(parsed.parameters[name], value)
+        runtime_options = config.ollama_options()
+        # Compare only parameters declared in the Modelfile (not Selene-only knobs).
+        for name, value in parsed.parameters.items():
+            self.assertIn(name, runtime_options)
+            self.assertEqual(runtime_options[name], value)
 
     def _fixture(self, directory):
         root = Path(directory)

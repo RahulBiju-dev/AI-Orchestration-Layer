@@ -15,14 +15,17 @@ from agent.terminal import (
     _console,
     _Spinner,
     assistant_stream_panel,
+    display_is_tui,
     flush_terminal_input,
     print_assistant_message,
     print_command_help,
+    print_content_stream,
     print_error,
     print_generation_stats,
     print_info,
     print_lab_status,
     print_ok,
+    print_thinking_delta,
     print_thinking_footer,
     print_thinking_header,
     print_tool_event,
@@ -1139,8 +1142,7 @@ def _stream_thinking_response(
                         thinking_displayed = True
 
                     thinking_buf += str(thinking_chunk)
-                    from rich.markup import escape
-                    _console.print(escape(str(thinking_chunk)), style=thinking_stream_style(), end="")
+                    print_thinking_delta(str(thinking_chunk))
                     continue
 
                 # ── Content tokens ────────────────────────────────────────
@@ -1152,26 +1154,32 @@ def _stream_thinking_response(
                         spinner.stop()
                     elif spinner._thread and not spinner._stop_event.is_set():
                         spinner.stop()
-                        if not thinking_displayed:
+                        if not thinking_displayed and not display_is_tui():
                             _console.print()
 
                     content_buf += str(content_chunk)
 
-                    if live is None:
-                        live = Live(
-                            assistant_stream_panel(content_buf),
-                            console=_console,
-                            auto_refresh=False,
-                            screen=False,
-                            transient=True,
-                            vertical_overflow="visible",
-                        )
-                        live.start()
+                    if display_is_tui():
+                        now = time.monotonic()
+                        if now - _last_render >= _RENDER_INTERVAL:
+                            print_content_stream(content_buf)
+                            _last_render = now
+                    else:
+                        if live is None:
+                            live = Live(
+                                assistant_stream_panel(content_buf),
+                                console=_console,
+                                auto_refresh=False,
+                                screen=False,
+                                transient=True,
+                                vertical_overflow="visible",
+                            )
+                            live.start()
 
-                    now = time.monotonic()
-                    if now - _last_render >= _RENDER_INTERVAL:
-                        live.update(assistant_stream_panel(content_buf), refresh=True)
-                        _last_render = now
+                        now = time.monotonic()
+                        if now - _last_render >= _RENDER_INTERVAL:
+                            live.update(assistant_stream_panel(content_buf), refresh=True)
+                            _last_render = now
             except Exception as exc:
                 spinner.stop()
                 message = (
@@ -1222,8 +1230,9 @@ def _stream_thinking_response(
         print_thinking_footer()
 
     if content_buf:
-        # Print the final complete markdown to persistent scrollback after the
-        # transient live panel is removed.
+        # Flush any throttled stream frame, then pin the final markdown card.
+        if display_is_tui():
+            print_content_stream(content_buf)
         print_assistant_message(content_buf)
 
     # Verbose stats
@@ -1458,91 +1467,179 @@ def _process_tool_calls_with_turn_guard(tool_calls: list[dict], executed_tool_ca
 
 # ── Slash commands ────────────────────────────────────────────────────
 
-# (command, description) — authoritative catalog for help + Tab palette.
-CLI_SLASH_SPECS: tuple[tuple[str, str], ...] = (
-    ("/help", "Show available commands"),
-    ("/?", "Show available commands"),
-    ("/clear", "Clear conversation history"),
-    ("/save", "Save the current session"),
-    ("/load", "Load a saved session"),
-    ("/set parameter", "Set a model parameter"),
-    ("/set profile", "Select hardware profile"),
-    ("/set system", "Set the session system prompt"),
-    ("/set history", "Enable conversation history"),
-    ("/set nohistory", "Disable conversation history"),
-    ("/set wordwrap", "Enable word wrapping"),
-    ("/set nowordwrap", "Disable word wrapping"),
-    ("/set format", "Force JSON model output"),
-    ("/set noformat", "Disable forced output format"),
-    ("/set verbose", "Show generation stats"),
-    ("/set quiet", "Hide generation stats"),
-    ("/set think", "Enable model thinking"),
-    ("/set nothink", "Disable model thinking"),
-    ("/show parameters", "Show session parameters"),
-    ("/show system", "Show the active system prompt"),
-    ("/show model", "Show model info"),
-    ("/vault alias", "Register a vault collection alias"),
-    ("/vault aliases", "List vault aliases"),
-    ("/vault rename", "Rename a vault collection"),
-    ("/vault add", "Index a file or folder"),
-    ("/vault status", "Show resumable PDF progress"),
-    ("/vault read", "Read vault chunks in order"),
-    ("/vault list", "List indexed vault collections"),
-    ("/vault search", "Search the indexed vault"),
-    ("/vault delete", "Delete indexed vault chunks"),
-    ("/quit", "Exit the agent"),
-    ("/exit", "Exit the agent"),
-    ("/q", "Exit the agent"),
+# Runtime profiles (shared by /set profile and /profile).
+_PROFILE_SPECS: tuple[tuple[str, str], ...] = (
+    ("manual", "Modelfile defaults (recommended)"),
+    ("auto", "Pick low-vram or balanced from VRAM"),
+    ("low-vram", "Conservative ~4 GiB settings"),
+    ("balanced", "Higher ctx/batch for larger GPUs"),
+)
+_PROFILE_NAMES = frozenset(name for name, _ in _PROFILE_SPECS)
+
+# Common model knobs surfaced in Tab autocomplete (full list still via /set parameter).
+_PARAMETER_SPECS: tuple[tuple[str, str], ...] = (
+    ("temperature", "Sampling randomness  ·  e.g. 0.25"),
+    ("top_p", "Nucleus sampling  ·  e.g. 0.85"),
+    ("top_k", "Top-k sampling  ·  e.g. 40"),
+    ("num_ctx", "Context window tokens  ·  e.g. 8192"),
+    ("num_predict", "Max output tokens  ·  e.g. 768"),
+    ("num_batch", "Prompt batch size  ·  e.g. 128"),
+    ("repeat_penalty", "Repetition penalty  ·  e.g. 1.08"),
 )
 
+
+def _build_cli_slash_specs() -> tuple[tuple[str, str], ...]:
+    """Catalog for Tab palette + descriptions (scannable, not verbose)."""
+    specs: list[tuple[str, str]] = [
+        ("/help", "Commands and usage"),
+        ("/?", "Commands and usage"),
+        ("/clear", "Reset conversation + system override"),
+        ("/save", "Save session  ·  /save [name]"),
+        ("/load", "Load session  ·  /load [name|index]"),
+        # Profiles — first-class + /set form for discoverability.
+        ("/profile", "Show or set profile  ·  /profile <name>"),
+        ("/set profile", "Set profile  ·  manual|auto|low-vram|balanced"),
+    ]
+    for name, desc in _PROFILE_SPECS:
+        specs.append((f"/profile {name}", desc))
+        specs.append((f"/set profile {name}", desc))
+
+    specs.extend(
+        [
+            ("/set parameter", "Set model knob  ·  /set parameter <name> <value>"),
+        ]
+    )
+    for name, desc in _PARAMETER_SPECS:
+        specs.append((f"/set parameter {name}", desc))
+
+    specs.extend(
+        [
+            ("/set system", "Session system prompt  ·  /set system \"…\"|default"),
+            ("/set history", "Keep multi-turn context (default)"),
+            ("/set nohistory", "One-shot turns only"),
+            ("/set wordwrap", "Wrap long lines (default)"),
+            ("/set nowordwrap", "Disable line wrap"),
+            ("/set format", "Force output format  ·  /set format json"),
+            ("/set format json", "JSON-only model output"),
+            ("/set noformat", "Normal free-form output (default)"),
+            ("/set verbose", "Show generation timing/stats"),
+            ("/set quiet", "Hide generation stats (default)"),
+            ("/set think", "Stream model thinking (default)"),
+            ("/set nothink", "Answer without thinking stream"),
+            ("/show parameters", "Active profile + model options"),
+            ("/show system", "Active system prompt"),
+            ("/show model", "Model name / family / size"),
+            ("/show profile", "Current runtime profile"),
+            ("/vault list", "Indexed vault collections"),
+            ("/vault aliases", "Friendly collection aliases"),
+            ("/vault alias", "Map name → collection  ·  /vault alias <name> <coll>"),
+            ("/vault rename", "Rename collection  ·  /vault rename <old> <new>"),
+            ("/vault add", "Index path  ·  /vault add <path> [--collection n]"),
+            ("/vault status", "PDF index progress  ·  /vault status <pdf>"),
+            ("/vault read", "Read chunks in order  ·  [--cursor n]"),
+            ("/vault search", "Semantic search  ·  /vault search <query>"),
+            ("/vault delete", "Remove indexed source  ·  /vault delete <path>"),
+            ("/quit", "Exit Selene"),
+            ("/exit", "Exit Selene"),
+            ("/q", "Exit Selene"),
+        ]
+    )
+    return tuple(specs)
+
+
+CLI_SLASH_SPECS: tuple[tuple[str, str], ...] = _build_cli_slash_specs()
 CLI_SLASH_COMPLETIONS = tuple(command for command, _ in CLI_SLASH_SPECS)
 CLI_SLASH_DESCRIPTIONS = {command: description for command, description in CLI_SLASH_SPECS}
 
-# Rich help cards (command · description). Kept separate so /help can show
-# argument forms while the palette stays short and scannable.
+# /help card — usage forms on the left, short effect on the right.
 _COMMAND_HELP_ENTRIES: tuple[tuple[str, str], ...] = (
-    ("/help", "Show this help message"),
-    ("/clear", "Clear conversation history and system override"),
-    ("/save [name]", "Save the current session (optional name)"),
-    ("/load [name|index]", "Load a saved session (lists if no arg)"),
-    ("/set parameter <name> <val>", "Set a model parameter (e.g. temperature 0.7)"),
-    ("/set profile <name>", "Select auto, low-vram, balanced, or manual"),
-    ("/set system \"<prompt>\"", "Set the system prompt for this session"),
-    ("/set history", "Enable conversation history (default)"),
-    ("/set nohistory", "Disable history — each turn is standalone"),
-    ("/set wordwrap", "Enable word wrapping (default)"),
-    ("/set nowordwrap", "Disable word wrapping"),
-    ("/set format json", "Force JSON output from the model"),
-    ("/set noformat", "Disable forced output format (default)"),
-    ("/set verbose", "Show generation stats after each response"),
-    ("/set quiet", "Hide generation stats (default)"),
-    ("/set think", "Enable model thinking/reasoning (default)"),
-    ("/set nothink", "Disable model thinking"),
-    ("/show parameters", "Show current session parameters"),
-    ("/show system", "Show the active system prompt"),
-    ("/show model", "Show model info"),
-    ("/vault …", "Vault tools — type /vault help for details"),
-    ("/quit", "Exit the agent (also /exit, /q)"),
+    ("/help", "Show this help"),
+    ("/clear", "Clear history and system override"),
+    ("/save [name]", "Save this session"),
+    ("/load [name|index]", "Load a session (lists if no arg)"),
+    ("/profile [name]", "Show or set profile (manual · auto · low-vram · balanced)"),
+    ("/set profile <name>", "Same as /profile <name>"),
+    ("/set parameter <name> <val>", "Model option (temperature, num_ctx, …)"),
+    ("/set system \"…\"|default", "Override or reset system prompt"),
+    ("/set history | nohistory", "Multi-turn context on/off"),
+    ("/set wordwrap | nowordwrap", "Line wrap on/off"),
+    ("/set format json | noformat", "Force JSON or free-form output"),
+    ("/set verbose | quiet", "Generation stats on/off"),
+    ("/set think | nothink", "Thinking stream on/off"),
+    ("/show parameters | system | model | profile", "Inspect session/runtime"),
+    ("/vault …", "Vault tools — /vault help for details"),
+    ("/quit", "Exit (also /exit, /q)"),
 )
 
 _VAULT_HELP_ENTRIES: tuple[tuple[str, str], ...] = (
-    ("/vault list", "List indexed vault collections"),
-    ("/vault aliases", "List registered vault aliases"),
-    ("/vault alias <name> <coll>", "Register a friendly alias for a collection"),
-    ("/vault rename <old> <new>", "Rename a vault collection"),
-    ("/vault add <path> [--collection name]", "Index a file or folder"),
-    ("/vault add <path> [--vision auto|all|off]", "Select PDF visual capture policy"),
-    ("/vault status <path> [--collection name]", "Show resumable PDF progress"),
-    ("/vault read [--cursor n] [--source path]", "Read every chunk in source order"),
-    ("/vault search <query> [--top-k n]", "Search indexed content"),
-    ("/vault search <query> [--source path]", "Restrict search to a source"),
-    ("/vault delete <source> [--collection name]", "Remove indexed chunks"),
-    ("/vault delete --all [--collection name]", "Delete a collection"),
+    ("/vault list", "List indexed collections"),
+    ("/vault aliases", "List name → collection maps"),
+    ("/vault alias <name> <coll>", "Register an alias"),
+    ("/vault rename <old> <new>", "Rename a collection"),
+    ("/vault add <path> [--collection n]", "Index a file or folder"),
+    ("/vault add <path> [--vision auto|all|off]", "PDF vision capture policy"),
+    ("/vault status <path> [--collection n]", "Resumable PDF progress"),
+    ("/vault read [--cursor n] [--source p]", "Walk chunks in source order"),
+    ("/vault search <query> [--top-k n]", "Semantic search"),
+    ("/vault search <query> [--source p]", "Search one source only"),
+    ("/vault delete <source> [--collection n]", "Remove indexed chunks"),
+    ("/vault delete --all [--collection n]", "Delete a whole collection"),
 )
 
 # Back-compat names used by a few older call sites / tests.
 _COMMANDS_HELP = _COMMAND_HELP_ENTRIES
 _VAULT_HELP = _VAULT_HELP_ENTRIES
+
+
+def _print_profile_catalog() -> None:
+    """List runtime profiles with short descriptions."""
+    print_info("Runtime profiles")
+    for name, description in _PROFILE_SPECS:
+        _console.print(f"    [bold]{name:<10}[/]  [dim]{description}[/]")
+    print_info("Usage · /profile <name>  or  /set profile <name>")
+    _console.print()
+
+
+def _apply_runtime_profile(session: dict, profile: str) -> None:
+    """Validate and apply a runtime profile name to the session."""
+    normalized = profile.strip().lower().replace("_", "-")
+    if not normalized:
+        _print_profile_catalog()
+        current = str(session.get("runtime_profile") or "manual")
+        print_info(f"Current profile · {current}")
+        _console.print()
+        return
+    if normalized not in _PROFILE_NAMES:
+        print_error(
+            f"Unknown profile · {normalized}",
+            detail="manual · auto · low-vram · balanced",
+        )
+        _print_profile_catalog()
+        return
+
+    candidate = dict(session)
+    candidate["runtime_profile"] = normalized
+    try:
+        runtime = get_runtime_config(candidate)
+    except RuntimeConfigurationError as exc:
+        print_error(f"Invalid runtime profile · {exc}")
+        _console.print()
+        return
+
+    session["runtime_profile"] = normalized
+    print_ok(f"Runtime profile · {runtime.profile.value}")
+    if runtime.requested_profile.value != runtime.profile.value:
+        print_info(
+            f"Resolved · {runtime.requested_profile.value} → {runtime.profile.value}"
+        )
+    print_info(runtime.selection_reason)
+    print_info(
+        f"ctx {runtime.num_ctx}  ·  out {runtime.num_predict}  ·  "
+        f"batch {runtime.num_batch}  ·  temp {runtime.temperature}"
+    )
+    for warning in runtime.warnings:
+        print_warn(warning)
+    _console.print()
 
 
 def _handle_set(args: str, session: dict, history: list[dict]) -> None:
@@ -1558,7 +1655,13 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
     """
     parts = args.strip().split(None, 1)
     if not parts:
-        _console.print(f"[red]Usage: /set <subcommand> [args][/]  [dim](type /help for details)[/]\n")
+        print_info("Usage · /set <subcommand> [args]")
+        print_info(
+            "Subcommands · profile · parameter · system · history · nohistory · "
+            "wordwrap · nowordwrap · format · noformat · verbose · quiet · think · nothink"
+        )
+        print_info("Tip · type /help or start with /set and Tab")
+        _console.print()
         return
 
     sub = parts[0].lower()
@@ -1653,42 +1756,34 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
         return
 
     if sub == "profile":
-        profile = rest.strip().lower().replace("_", "-")
-        candidate = dict(session)
-        candidate["runtime_profile"] = profile
-        try:
-            runtime = get_runtime_config(candidate)
-        except RuntimeConfigurationError as exc:
-            _console.print(f"[red]Invalid runtime profile: {exc}[/]\n")
-            return
-        session["runtime_profile"] = profile
-        print_ok(f"Runtime profile = {runtime.profile.value}")
-        print_info(runtime.selection_reason)
-        for warning in runtime.warnings:
-            print_warn(warning)
-        _console.print()
+        _apply_runtime_profile(session, rest)
         return
 
     # ── /set parameter <name> <value> ─────────────────────────────────
     if sub == "parameter":
         param_parts = rest.strip().split(None, 1)
         if len(param_parts) != 2:
-            _console.print(f"[red]Usage: /set parameter <name> <value>[/]")
-            _console.print(f"[dim]  Available: {', '.join(sorted(_ALL_PARAMS))}[/]\n")
+            print_error("Usage · /set parameter <name> <value>")
+            print_info("Common · " + " · ".join(name for name, _ in _PARAMETER_SPECS))
+            print_info("All · " + ", ".join(sorted(_ALL_PARAMS)))
+            _console.print()
             return
 
         name, raw_val = param_parts[0].lower(), param_parts[1]
 
         if name not in _ALL_PARAMS:
-            _console.print(f"[red]Unknown parameter: {name}[/]")
-            _console.print(f"[dim]  Available: {', '.join(sorted(_ALL_PARAMS))}[/]\n")
+            print_error(f"Unknown parameter · {name}")
+            print_info("Common · " + " · ".join(n for n, _ in _PARAMETER_SPECS))
+            print_info("All · " + ", ".join(sorted(_ALL_PARAMS)))
+            _console.print()
             return
 
         try:
             value = float(raw_val) if name in _FLOAT_PARAMS else int(raw_val)
         except ValueError:
             expected = "float" if name in _FLOAT_PARAMS else "integer"
-            _console.print(f"[red]Invalid value for {name}: expected {expected}, got '{raw_val}'[/]\n")
+            print_error(f"Invalid value for {name}", detail=f"expected {expected}, got {raw_val!r}")
+            _console.print()
             return
 
         candidate = dict(session.get("options", {}))
@@ -1705,7 +1800,12 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
         _console.print()
         return
 
-    _console.print(f"[red]Unknown /set subcommand: {sub}[/]  [dim](try: parameter, profile, system, verbose, quiet, wordwrap, nowordwrap, history, nohistory, format, noformat, think, nothink)[/]\n")
+    print_error(
+        f"Unknown /set subcommand · {sub}",
+        detail="profile · parameter · system · history · format · verbose · think · …",
+    )
+    print_info("Tip · /set  or  /help  for the full list")
+    _console.print()
 
 
 def _handle_show(args: str, session: dict, history: list[dict]) -> None:
@@ -1792,7 +1892,31 @@ def _handle_show(args: str, session: dict, history: list[dict]) -> None:
             _console.print()
         return
 
-    _console.print(f"[red]Unknown /show subcommand: {sub}[/]  [dim](try: parameters, system, model)[/]\n")
+    if sub == "profile":
+        try:
+            runtime = get_runtime_config(session)
+        except RuntimeConfigurationError as exc:
+            print_error(f"Invalid session configuration · {exc}")
+            _console.print()
+            return
+        print_info(
+            f"Profile · {runtime.profile.value}"
+            + (
+                f"  (requested {runtime.requested_profile.value})"
+                if runtime.requested_profile.value != runtime.profile.value
+                else ""
+            )
+        )
+        print_info(runtime.selection_reason)
+        print_info(
+            f"ctx {runtime.num_ctx}  ·  out {runtime.num_predict}  ·  "
+            f"batch {runtime.num_batch}  ·  temp {runtime.temperature}"
+        )
+        _print_profile_catalog()
+        return
+
+    print_error(f"Unknown /show subcommand · {sub}", detail="parameters · system · model · profile")
+    _console.print()
 
 
 def _list_saved_sessions() -> list[str]:
@@ -1851,7 +1975,7 @@ def _handle_save(args: str, session: dict, history: list[dict]) -> None:
             "history": session.get("history", True),
             "format": session.get("format", ""),
             "think": session.get("think", True),
-            "runtime_profile": session.get("runtime_profile", "auto"),
+            "runtime_profile": session.get("runtime_profile", "manual"),
         },
         "history": history,
     }
@@ -1953,7 +2077,7 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
     except RuntimeConfigurationError as exc:
         _console.print(f"[red]Failed to load session: invalid model settings: {exc}[/]\n")
         return
-    runtime_profile = saved_session.get("runtime_profile", "auto")
+    runtime_profile = saved_session.get("runtime_profile", "manual")
     try:
         restored_runtime = get_runtime_config({
             "runtime_profile": runtime_profile,
@@ -2394,6 +2518,27 @@ def _handle_command(cmd: str, session: dict, history: list[dict]) -> bool | None
         _handle_set(rest, session, history)
         return True
 
+    if base == "/profile":
+        # First-class profile command: bare → show catalog + current; with arg → set.
+        if not rest.strip():
+            try:
+                runtime = get_runtime_config(session)
+                print_info(
+                    f"Current · {runtime.profile.value}"
+                    + (
+                        f"  (requested {runtime.requested_profile.value})"
+                        if runtime.requested_profile.value != runtime.profile.value
+                        else ""
+                    )
+                )
+                print_info(runtime.selection_reason)
+            except RuntimeConfigurationError as exc:
+                print_error(f"Invalid session configuration · {exc}")
+            _print_profile_catalog()
+        else:
+            _apply_runtime_profile(session, rest)
+        return True
+
     if base == "/show":
         _handle_show(rest, session, history)
         return True
@@ -2417,220 +2562,305 @@ def _handle_command(cmd: str, session: dict, history: list[dict]) -> bool | None
 
 # ── Main loop ─────────────────────────────────────────────────────────
 
-def run() -> None:
-    """Run the interactive agent loop.
-    
-    This acts as the primary entry point for terminal interaction.
-    Initializes state, parses user input, handles commands, constructs history,
-    and runs the streaming generator loop.
-    """
-    default_system_prompt = load_default_system_prompt()
 
-    history: list[dict] = []
-    session: dict = {
-        "options": {},       # Runtime model parameters (temperature, etc.)
-        "verbose": False,    # Show generation stats
-        "wordwrap": True,    # Word wrapping (reserved for future use)
-        "system": "",        # Custom system prompt override
-        "history": True,     # Whether to keep conversation history across turns
-        "format": "",        # Output format ("" = default, "json" = JSON mode)
-        "think": True,       # Whether to enable model thinking/reasoning
-        "runtime_profile": "auto",  # Hardware-aware profile; explicit options still win
+def _new_session_state() -> dict:
+    """Fresh session options for a CLI/TUI conversation."""
+    return {
+        "options": {},
+        "verbose": False,
+        "wordwrap": True,
+        "system": "",
+        "history": True,
+        "format": "",
+        "think": True,
+        "runtime_profile": "manual",
     }
 
+
+def _boot_status_meta() -> dict[str, str]:
+    """Runtime chips for the TUI status bar / classic splash."""
+    meta: dict[str, str] = {}
     try:
         from agent.runtime_config import get_runtime_config
+        from agent.platform_runtime import platform_family
 
-        _boot_runtime = get_runtime_config()
-        print_welcome_header(
-            {
-                "profile": _boot_runtime.profile.value,
-                "model": _boot_runtime.chat_model,
-                "num_ctx": str(_boot_runtime.num_ctx),
-                "num_predict": str(_boot_runtime.num_predict),
-            }
-        )
+        runtime = get_runtime_config()
+        meta = {
+            "profile": runtime.profile.value,
+            "model": runtime.chat_model,
+            "ctx": str(runtime.num_ctx),
+            "out": str(runtime.num_predict),
+            "host": platform_family(),
+        }
     except Exception:
-        print_welcome_header()
+        pass
+    return meta
 
-    while True:
-        # ── User input ────────────────────────────────────────────────
-        try:
-            user_input = read_user_input(
-                completions=CLI_SLASH_COMPLETIONS,
-                descriptions=CLI_SLASH_DESCRIPTIONS,
-            )
-        except EOFError:
-            # Exit loop if EOF (Ctrl+D) is encountered
-            break
 
-        if not user_input:
-            continue
+def process_user_turn(
+    user_input: str,
+    session: dict,
+    history: list[dict],
+    default_system_prompt: str | None = None,
+) -> None:
+    """Run one user→assistant turn (shared by classic CLI and the TUI).
 
-        # ── Handle slash commands ─────────────────────────────────────
-        if user_input.startswith("/"):
-            result = _handle_command(user_input, session, history)
-            if result is None:
-                break  # /quit
-            continue  # Command was handled, skip LLM call
+    Handles system-prompt sync, optional vault auto-index, streaming generation,
+    tool-call rounds, and background history compaction.
+    """
+    if default_system_prompt is None:
+        default_system_prompt = load_default_system_prompt()
 
-        # ── Sync system prompt ────────────────────────────────────────
-        # Ensure the custom or default system prompt is consistently present in history
-        active_system = session.get("system") or default_system_prompt
-        if active_system:
-            if not history or history[0].get("role") != "system" or history[0].get("content") != active_system:
-                # Remove any stray system messages elsewhere and insert at front
-                history[:] = [m for m in history if m.get("role") != "system"]
-                history.insert(0, {"role": "system", "content": active_system})
-        else:
-            # If no system prompt is available at all, strip any injected ones
+    # ── Sync system prompt ────────────────────────────────────────
+    active_system = session.get("system") or default_system_prompt
+    if active_system:
+        if (
+            not history
+            or history[0].get("role") != "system"
+            or history[0].get("content") != active_system
+        ):
             history[:] = [m for m in history if m.get("role") != "system"]
+            history.insert(0, {"role": "system", "content": active_system})
+    else:
+        history[:] = [m for m in history if m.get("role") != "system"]
 
-        # ── Auto-index large or binary files when user inputs a local file path ─
-        pre_tool_message = None
-        try:
-            if os.path.exists(user_input) and os.path.isfile(user_input):
-                size = os.path.getsize(user_input)
-                ext = os.path.splitext(user_input)[1].lower()
-                # Threshold in bytes for auto-indexing (tunable)
-                INDEX_THRESHOLD = 200_000
-                if size > INDEX_THRESHOLD or ext in (".pdf", ".docx"):
-                    print_lab_status(
-                        "Large/binary file detected — indexing",
-                        kind="run",
-                        detail=user_input,
-                    )
-                    if "index_vault" in TOOL_DISPATCH:
-                        try:
-                            execution = execute_tool_calls([{
-                                "function": {
-                                    "name": "index_vault",
-                                    "arguments": {
-                                        "vault_path": os.path.dirname(user_input) or ".",
-                                        "file_path": user_input,
-                                    },
-                                }
-                            }])[0]
-                            tool_content = execution.content
-                            tool_msg = {
-                                "role": "tool",
-                                "tool_name": "index_vault",
+    # ── Auto-index large or binary files when user inputs a local file path ─
+    pre_tool_message = None
+    try:
+        if os.path.exists(user_input) and os.path.isfile(user_input):
+            size = os.path.getsize(user_input)
+            ext = os.path.splitext(user_input)[1].lower()
+            INDEX_THRESHOLD = 200_000
+            if size > INDEX_THRESHOLD or ext in (".pdf", ".docx"):
+                print_lab_status(
+                    "Large/binary file detected — indexing",
+                    kind="run",
+                    detail=user_input,
+                )
+                if "index_vault" in TOOL_DISPATCH:
+                    try:
+                        execution = execute_tool_calls([{
+                            "function": {
                                 "name": "index_vault",
-                                "content": tool_content,
+                                "arguments": {
+                                    "vault_path": os.path.dirname(user_input) or ".",
+                                    "file_path": user_input,
+                                },
                             }
-                            if session["history"]:
-                                history.append(tool_msg)
-                            else:
-                                pre_tool_message = tool_msg
-                            if execution.ok:
-                                try:
-                                    index_payload = json.loads(tool_content)
-                                except (TypeError, json.JSONDecodeError):
-                                    index_payload = {}
-                                if index_payload.get("incomplete_pdf_count"):
-                                    job = (index_payload.get("pdf_jobs") or [{}])[0]
-                                    print_warn(
-                                        f"Index checkpoint saved — pages "
-                                        f"{job.get('indexed_pages', '?')}/{job.get('page_count', '?')}; "
-                                        "resume required."
-                                    )
-                                else:
-                                    print_ok("Indexing complete")
-                            else:
+                        }])[0]
+                        tool_content = execution.content
+                        tool_msg = {
+                            "role": "tool",
+                            "tool_name": "index_vault",
+                            "name": "index_vault",
+                            "content": tool_content,
+                        }
+                        if session["history"]:
+                            history.append(tool_msg)
+                        else:
+                            pre_tool_message = tool_msg
+                        if execution.ok:
+                            try:
+                                index_payload = json.loads(tool_content)
+                            except (TypeError, json.JSONDecodeError):
+                                index_payload = {}
+                            if index_payload.get("incomplete_pdf_count"):
+                                job = (index_payload.get("pdf_jobs") or [{}])[0]
                                 print_warn(
-                                    "Indexing did not complete; the model will receive the error."
+                                    f"Index checkpoint saved — pages "
+                                    f"{job.get('indexed_pages', '?')}/{job.get('page_count', '?')}; "
+                                    "resume required."
                                 )
-                        except Exception as e:
-                            print_error(f"Indexing failed: {e}")
-        except Exception:
-            # Best-effort; don't let indexing errors stop the agent
-            pass
+                            else:
+                                print_ok("Indexing complete")
+                        else:
+                            print_warn(
+                                "Indexing did not complete; the model will receive the error."
+                            )
+                    except Exception as e:
+                        print_error(f"Indexing failed: {e}")
+    except Exception:
+        pass
 
-        # ── Build messages to send ────────────────────────────────────
-        # When history is disabled, send only the current message (+ system if set)
+    # ── Build messages to send ────────────────────────────────────
+    if session["history"]:
+        history.append({"role": "user", "content": user_input})
+        messages_to_send = prepare_messages_for_model(history, session, tools=TOOL_SCHEMAS)
+    else:
+        messages_to_send = []
+        if history and history[0].get("role") == "system":
+            messages_to_send.append(history[0])
+        if pre_tool_message:
+            messages_to_send.append(pre_tool_message)
+        messages_to_send.append({"role": "user", "content": user_input})
+        messages_to_send = prepare_messages_for_model(
+            messages_to_send, session, tools=TOOL_SCHEMAS
+        )
+
+    # ── LLM call with streaming + thinking ────────────────────────
+    assistant_msg = _stream_complete_response(
+        model=MODEL_NAME,
+        messages=messages_to_send,
+        session=session,
+        user_input=user_input,
+        tools=TOOL_SCHEMAS,
+    )
+
+    if session["history"]:
+        history.append(assistant_msg)
+
+    # ── Tool-call loop (iterative, in case of chained calls) ──────
+    executed_tool_calls: dict[str, dict] = {}
+    tool_rounds = 0
+    while assistant_msg.get("tool_calls"):
+        if tool_rounds >= MAX_TOOL_CALL_ROUNDS:
+            message = (
+                f"Stopped after {MAX_TOOL_CALL_ROUNDS} tool-call rounds to avoid an unreliable loop. "
+                "Please narrow the request or ask me to continue from the latest result."
+            )
+            print_warn(message)
+            if not display_is_tui():
+                _console.print()
+            if session["history"]:
+                history.append({"role": "assistant", "content": message})
+            break
+        tool_rounds += 1
+        tool_results = _process_tool_calls_with_turn_guard(
+            assistant_msg["tool_calls"], executed_tool_calls
+        )
+
         if session["history"]:
-            history.append({"role": "user", "content": user_input})
-            # Trim history to keep prompt size bounded for consistent tok/s
-            messages_to_send = prepare_messages_for_model(history, session, tools=TOOL_SCHEMAS)
+            history.extend(tool_results)
+            reminder = {
+                "role": "user",
+                "content": TOOL_CONTINUATION_PROMPT.format(user_input=user_input),
+            }
+            messages_to_send = prepare_messages_for_model(
+                [*history, reminder],
+                session,
+                tools=TOOL_SCHEMAS,
+                extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
+            )
         else:
-            messages_to_send = []
-            if history and history[0].get("role") == "system":
-                messages_to_send.append(history[0])
-            # If we have a pre-tool message (index result) and history is disabled,
-            # insert it before the user message so the model sees it in the same turn.
-            if pre_tool_message:
-                messages_to_send.append(pre_tool_message)
-            messages_to_send.append({"role": "user", "content": user_input})
-            messages_to_send = prepare_messages_for_model(messages_to_send, session, tools=TOOL_SCHEMAS)
+            messages_to_send.append(assistant_msg)
+            messages_to_send.extend(tool_results)
+            messages_to_send.append({
+                "role": "user",
+                "content": TOOL_CONTINUATION_PROMPT.format(user_input=user_input),
+            })
+            messages_to_send = prepare_messages_for_model(
+                messages_to_send,
+                session,
+                tools=TOOL_SCHEMAS,
+                extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
+            )
 
-        # ── LLM call with streaming + thinking ────────────────────────
         assistant_msg = _stream_complete_response(
             model=MODEL_NAME,
             messages=messages_to_send,
             session=session,
             user_input=user_input,
             tools=TOOL_SCHEMAS,
+            extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
         )
-
         if session["history"]:
             history.append(assistant_msg)
 
-        # ── Tool-call loop (iterative, in case of chained calls) ──────
-        executed_tool_calls: dict[str, dict] = {}
-        tool_rounds = 0
-        while assistant_msg.get("tool_calls"):
-            if tool_rounds >= MAX_TOOL_CALL_ROUNDS:
-                message = (
-                    f"Stopped after {MAX_TOOL_CALL_ROUNDS} tool-call rounds to avoid an unreliable loop. "
-                    "Please narrow the request or ask me to continue from the latest result."
-                )
-                print_warn(message)
-                _console.print()
-                if session["history"]:
-                    history.append({"role": "assistant", "content": message})
-                break
-            tool_rounds += 1
-            tool_results = _process_tool_calls_with_turn_guard(assistant_msg["tool_calls"], executed_tool_calls)
+    if session["history"]:
+        _check_and_compact_history(history, session)
 
-            if session["history"]:
-                history.extend(tool_results)
-                # Trim history to keep follow-up requests within token budget
-                reminder = {
-                    "role": "user",
-                    "content": TOOL_CONTINUATION_PROMPT.format(user_input=user_input),
-                }
-                messages_to_send = prepare_messages_for_model(
-                    [*history, reminder],
-                    session,
-                    tools=TOOL_SCHEMAS,
-                    extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
-                )
-            else:
-                messages_to_send.append(assistant_msg)
-                messages_to_send.extend(tool_results)
-                messages_to_send.append({
-                    "role": "user",
-                    "content": TOOL_CONTINUATION_PROMPT.format(user_input=user_input),
-                })
-                messages_to_send = prepare_messages_for_model(
-                    messages_to_send,
-                    session,
-                    tools=TOOL_SCHEMAS,
-                    extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
-                )
 
-            # Follow-up call after tool results — also streamed
-            assistant_msg = _stream_complete_response(
-                model=MODEL_NAME,
-                messages=messages_to_send,
-                session=session,
-                user_input=user_input,
-                tools=TOOL_SCHEMAS,
-                extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
+def _should_use_tui() -> bool:
+    """Prefer the full-screen TUI on interactive TTYs when Textual is available."""
+    if "--classic" in sys.argv or "--classic-cli" in sys.argv:
+        return False
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return False
+    try:
+        import textual  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def run_classic() -> None:
+    """Scrollback-friendly classic CLI loop (no alternate screen)."""
+    default_system_prompt = load_default_system_prompt()
+    history: list[dict] = []
+    session = _new_session_state()
+
+    meta = _boot_status_meta()
+    try:
+        print_welcome_header(
+            {
+                "profile": meta.get("profile", ""),
+                "model": meta.get("model", ""),
+                "num_ctx": meta.get("ctx", ""),
+                "num_predict": meta.get("out", ""),
+                "platform": meta.get("host", ""),
+            }
+            if meta
+            else None
+        )
+    except Exception:
+        print_welcome_header()
+
+    while True:
+        try:
+            user_input = read_user_input(
+                completions=CLI_SLASH_COMPLETIONS,
+                descriptions=CLI_SLASH_DESCRIPTIONS,
             )
-            if session["history"]:
-                history.append(assistant_msg)
-                
-        # ── Trigger automatic history compaction in background ──────
-        if session["history"]:
-            _check_and_compact_history(history, session)
+        except EOFError:
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.startswith("/"):
+            result = _handle_command(user_input, session, history)
+            if result is None:
+                break
+            continue
+
+        process_user_turn(user_input, session, history, default_system_prompt)
+
+
+def run() -> None:
+    """Run the interactive agent — full-screen TUI by default, classic fallback.
+
+    Use ``--classic`` / ``--classic-cli`` to force the legacy scrollback prompt.
+    """
+    default_system_prompt = load_default_system_prompt()
+    history: list[dict] = []
+    session = _new_session_state()
+    meta = _boot_status_meta()
+
+    if _should_use_tui():
+        from agent.tui import run_tui
+
+        run_tui(
+            session=session,
+            history=history,
+            default_system_prompt=default_system_prompt,
+            process_turn=process_user_turn,
+            handle_command=_handle_command,
+            slash_completions=CLI_SLASH_COMPLETIONS,
+            slash_descriptions=CLI_SLASH_DESCRIPTIONS,
+            status_meta=meta,
+        )
+        return
+
+    # Classic path (or TUI unavailable).
+    if not any(flag in sys.argv for flag in ("--classic", "--classic-cli")):
+        # Non-TTY or missing Textual — still try to be helpful.
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            print_warn(
+                "Full TUI unavailable (install textual: pip install 'textual>=1.0.0'). "
+                "Using classic CLI."
+            )
+
+    # Re-enter classic with the same session objects for a clean start.
+    run_classic()

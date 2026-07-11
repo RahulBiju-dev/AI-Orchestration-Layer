@@ -40,8 +40,8 @@ Resolve settings in this order:
 
 1. Session / command override
 2. Environment or user config (`SELENE_*`)
-3. Selected hardware profile (`auto`, `low-vram`, `balanced`, `manual`)
-4. Conservative defaults (4 GiB-safe low-VRAM profile)
+3. Selected profile (`manual`, `low-vram`, `balanced`, or explicit `auto`)
+4. Bundled Modelfile parameter defaults (no hardware auto-pick unless `profile=auto`)
 
 Key knobs: `num_ctx`, `num_predict`, `num_batch`, model concurrency, tool workers, keep-alive.
 

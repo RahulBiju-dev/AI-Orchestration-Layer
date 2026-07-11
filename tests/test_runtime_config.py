@@ -33,8 +33,28 @@ LOW_VRAM_HARDWARE = HardwareInfo(
 
 
 class RuntimeConfigTests(unittest.TestCase):
-    def test_auto_profile_is_conservative_for_four_gib_vram(self):
+    def test_default_profile_uses_modelfile_parameters_without_auto_hardware_pick(self):
+        """Fresh systems must not auto-select low-vram/balanced from VRAM."""
         config = resolve_runtime_config(environ={}, hardware=LOW_VRAM_HARDWARE)
+
+        self.assertEqual(config.requested_profile, RuntimeProfile.MANUAL)
+        self.assertEqual(config.profile, RuntimeProfile.MANUAL)
+        # Bundled Modelfile PARAMETER values.
+        self.assertEqual(config.num_ctx, 8192)
+        self.assertEqual(config.num_predict, 768)
+        self.assertEqual(config.num_batch, 128)
+        self.assertEqual(config.temperature, 0.25)
+        self.assertEqual(config.top_p, 0.85)
+        self.assertEqual(config.top_k, 40)
+        self.assertIn("Modelfile", config.selection_reason)
+        self.assertNotIn("selected the conservative low-VRAM profile", config.selection_reason)
+
+    def test_explicit_auto_profile_is_conservative_for_four_gib_vram(self):
+        config = resolve_runtime_config(
+            {"profile": "auto"},
+            environ={},
+            hardware=LOW_VRAM_HARDWARE,
+        )
 
         self.assertEqual(config.requested_profile, RuntimeProfile.AUTO)
         self.assertEqual(config.profile, RuntimeProfile.LOW_VRAM)

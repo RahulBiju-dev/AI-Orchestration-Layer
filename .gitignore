@@ -249,3 +249,4 @@ bun.lock
 
 # Later
 .github/
+AGENTS.md

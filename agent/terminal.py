@@ -21,6 +21,28 @@ from rich.console import Console
 # Shared console (write to stderr so Live and spinner use the same stream)
 _console = Console(stderr=True)
 
+# Optional alternate display target (full-screen TUI). When set, chrome helpers
+# route structured events there instead of (or in addition to) the Rich console.
+_display_sink = None
+
+
+def set_display_sink(sink) -> None:
+    """Install or clear the active display sink (used by the Textual TUI)."""
+    global _display_sink
+    _display_sink = sink
+
+
+def get_display_sink():
+    """Return the active display sink, or None for classic scrollback mode."""
+    return _display_sink
+
+
+def display_is_tui() -> bool:
+    """True when a full-screen TUI owns the terminal chrome."""
+    sink = _display_sink
+    return bool(sink is not None and getattr(sink, "is_tui", False))
+
+
 
 # ── Design tokens ─────────────────────────────────────────────────────
 
@@ -729,15 +751,27 @@ def print_assistant_message(text: str) -> None:
     """Print the final assistant response in the persistent scrollback."""
     if not text:
         return
+    sink = get_display_sink()
+    if sink is not None and getattr(sink, "is_tui", False):
+        sink.content_final(text)
+        return
     _console.print(assistant_stream_panel(text))
     _console.print()
 
 
 def print_thinking_header() -> None:
+    sink = get_display_sink()
+    if sink is not None and getattr(sink, "is_tui", False):
+        sink.thinking_header()
+        return
     _section_rule("thinking", style=THEME.thinking, glyph=GLYPH_MARK)
 
 
 def print_thinking_footer(label: str | None = None) -> None:
+    sink = get_display_sink()
+    if sink is not None and getattr(sink, "is_tui", False):
+        sink.thinking_footer(label)
+        return
     from rich.rule import Rule
 
     if label:
@@ -752,6 +786,28 @@ def print_thinking_footer(label: str | None = None) -> None:
     else:
         _console.print(Rule(style=THEME.thinking, characters="─"))
     _console.print()
+
+
+def print_thinking_delta(text: str) -> None:
+    """Stream a chain-of-thought token chunk to the active display."""
+    if not text:
+        return
+    sink = get_display_sink()
+    if sink is not None and getattr(sink, "is_tui", False):
+        sink.thinking_delta(text)
+        return
+    from rich.markup import escape
+
+    _console.print(escape(str(text)), style=thinking_stream_style(), end="")
+
+
+def print_content_stream(text: str) -> None:
+    """Update the in-progress assistant response on the active display."""
+    sink = get_display_sink()
+    if sink is not None and getattr(sink, "is_tui", False):
+        sink.content_stream(text)
+        return
+    # Classic mode uses Rich Live in the stream loop; nothing to do here.
 
 
 def thinking_stream_style() -> str:
@@ -775,6 +831,10 @@ def print_lab_status(
     detail: str | None = None,
 ) -> None:
     """Print a refined status line (success / warn / error / info / run)."""
+    sink = get_display_sink()
+    if sink is not None and getattr(sink, "is_tui", False):
+        sink.lab_status(message, kind=kind, detail=detail)
+        return
     styles = {
         "info": (GLYPH_MARK, THEME.accent_soft),
         "run": (GLYPH_RUN, THEME.warning),
@@ -850,6 +910,14 @@ def print_generation_stats(
     tokens_per_sec: float,
 ) -> None:
     """Print a quiet footer line after a generation (verbose mode)."""
+    sink = get_display_sink()
+    if sink is not None and getattr(sink, "is_tui", False):
+        sink.generation_stats(
+            elapsed=elapsed,
+            total_tokens=total_tokens,
+            tokens_per_sec=tokens_per_sec,
+        )
+        return
     _console.print(
         f"  [{THEME.meta}]{GLYPH_DOT}  {elapsed:.1f}s"
         f"  {GLYPH_DOT}  ~{total_tokens} tokens"
@@ -865,6 +933,10 @@ def print_command_help(
     subtitle: str | None = "type / to open the palette",
 ) -> None:
     """Render a clean two-column command reference card."""
+    sink = get_display_sink()
+    if sink is not None and getattr(sink, "is_tui", False):
+        sink.command_help(entries, title=title, subtitle=subtitle)
+        return
     from rich import box
     from rich.panel import Panel
     from rich.table import Table
@@ -1121,16 +1193,19 @@ def print_welcome_header(context: dict | None = None) -> None:
 
 
 class _Spinner:
-    """Animated spinner wrapper that uses rich.status.Status."""
+    """Animated spinner — Rich Status in classic CLI, activity line in the TUI."""
 
     def __init__(self, message: str = "reasoning", color: str | None = None) -> None:
         self._message = message
         self._color = color or THEME.thinking
-        self._status = _console.status(
-            self._render_message(),
-            spinner="dots12",
-            spinner_style=f"{self._color}",
-        )
+        self._tui = display_is_tui()
+        self._status = None
+        if not self._tui:
+            self._status = _console.status(
+                self._render_message(),
+                spinner="dots12",
+                spinner_style=f"{self._color}",
+            )
         import threading
 
         self._stop_event = threading.Event()
@@ -1143,18 +1218,42 @@ class _Spinner:
             f"[{THEME.meta}] {GLYPH_DOT * 3}[/]"
         )
 
+    def _tui_activity(self, action: str, message: str | None = None) -> None:
+        sink = get_display_sink()
+        if sink is None:
+            return
+        if action == "start" and hasattr(sink, "activity_start"):
+            sink.activity_start(message or self._message)
+        elif action == "update" and hasattr(sink, "activity_update"):
+            sink.activity_update(message or self._message)
+        elif action == "stop" and hasattr(sink, "activity_stop"):
+            sink.activity_stop()
+
     def start(self) -> "_Spinner":
         self._stop_event.clear()
-        self._status.start()
+        if self._tui:
+            # Transient animated activity line — not a permanent chat status row.
+            self._tui_activity("start", self._message)
+            return self
+        if self._status is not None:
+            self._status.start()
         return self
 
     def update(self, message: str) -> None:
         self._message = message
-        self._status.update(self._render_message())
+        if self._tui:
+            self._tui_activity("update", self._message)
+            return
+        if self._status is not None:
+            self._status.update(self._render_message())
 
     def stop(self) -> None:
         self._stop_event.set()
-        self._status.stop()
+        if self._tui:
+            self._tui_activity("stop")
+            return
+        if self._status is not None:
+            self._status.stop()
 
 # Small helpers for rendering common LaTeX math to terminal-friendly text
 _UNICODE_FRACTIONS = {

@@ -31,5 +31,8 @@ google-auth-oauthlib>=1.2.0
 keyring>=24.0.0
 # Terminal UI styling and Markdown rendering
 rich>=13.0.0
+# Full-screen CLI TUI (Claude Code / Grok Build style). Optional at import
+# time — classic scrollback mode works without it; --cli prefers Textual.
+textual>=1.0.0
 # HTML parsing for web_scrape (optional; tool reports a capability error if absent)
 beautifulsoup4>=4.12.0

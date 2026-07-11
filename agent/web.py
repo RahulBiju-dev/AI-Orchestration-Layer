@@ -503,31 +503,22 @@ def load_session(filename: str, client_id: str = LEGACY_CLIENT_ID) -> None:
 
 _COMMANDS_HELP_MD = """
 ### Available Commands
-* `/help` or `/?` — Show this help message
-* `/clear` — Clear conversation history and system prompt override
-* `/save [name]` — Save current session (optional name)
-* `/load [name|index]` — Load a saved session (lists sessions if no arg)
-* `/set parameter <name> <val>` — Set a model parameter (e.g., `temperature 0.7`)
-* `/set profile <name>` — Select `auto`, `low-vram`, `balanced`, or `manual`
-* `/set system "<prompt>"` — Set custom system prompt for this session
-* `/set history` / `/set nohistory` — Enable/disable conversation history
-* `/set wordwrap` / `/set nowordwrap` — Enable/disable word wrapping
-* `/set format json` / `/set noformat` — Enable/disable JSON output format
-* `/set verbose` / `/set quiet` — Enable/disable generation stats
-* `/set think` / `/set nothink` — Enable/disable model thinking/reasoning
-* `/show parameters` — Show current session parameters
-* `/show system` — Show the active system prompt
-* `/show model` — Show model info
-* `/vault list` — List indexed vault collections
-* `/vault aliases` — List registered vault aliases
-* `/vault alias <name> <coll>` — Register a friendly alias for a collection
-* `/vault rename <old> <new>` — Rename a vault collection
-* `/vault add <path>` — Add a file or folder to the searchable vault
-* `/vault status <path>` — Show resumable large-PDF progress
-* `/vault read [--cursor n]` — Read all chunks in source order
-* `/vault search <query>` — Search the indexed vault
-* `/vault delete <source>` — Delete indexed chunks
-* `/quit` or `/exit` or `/q` — Quit/exit the session
+* `/help` or `/?` — Show this help
+* `/clear` — Reset conversation and system override
+* `/save [name]` — Save this session
+* `/load [name|index]` — Load a session (lists if no arg)
+* `/profile [name]` — Show or set profile (`manual` · `auto` · `low-vram` · `balanced`)
+* `/set profile <name>` — Same as `/profile <name>` (default is Modelfile / manual)
+* `/set parameter <name> <val>` — Model option (e.g. `temperature 0.25`, `num_ctx 8192`)
+* `/set system "…"|default` — Override or reset system prompt
+* `/set history` / `/set nohistory` — Multi-turn context on/off
+* `/set wordwrap` / `/set nowordwrap` — Line wrap on/off
+* `/set format json` / `/set noformat` — Force JSON or free-form output
+* `/set verbose` / `/set quiet` — Generation stats on/off
+* `/set think` / `/set nothink` — Thinking stream on/off
+* `/show parameters` · `/show system` · `/show model` · `/show profile` — Inspect session
+* `/vault list` · `/vault search <q>` · `/vault add <path>` · … — Local knowledge tools
+* `/quit` or `/exit` or `/q` — Exit
 """
 
 def execute_command_web(
@@ -618,9 +609,57 @@ def execute_command_web(
         history[:] = loaded_history
         return f"✓ Session loaded: `{target_filename.replace('.json', '')}`"
         
+    elif base == "/profile":
+        # First-class profile command (parity with CLI).
+        if not rest.strip():
+            runtime = get_runtime_config(session)
+            lines = [
+                f"**Current profile:** `{runtime.profile.value}`",
+                runtime.selection_reason,
+                "",
+                "Profiles:",
+                "- `manual` — Modelfile defaults (recommended)",
+                "- `auto` — Pick low-vram or balanced from VRAM",
+                "- `low-vram` — Conservative ~4 GiB settings",
+                "- `balanced` — Higher ctx/batch for larger GPUs",
+                "",
+                "Usage: `/profile <name>` or `/set profile <name>`",
+            ]
+            return "\n".join(lines)
+        profile = rest.strip().lower().replace("_", "-")
+        if profile not in {"manual", "auto", "low-vram", "balanced"}:
+            return (
+                f"Unknown profile: `{profile}`\n"
+                "Valid: `manual` · `auto` · `low-vram` · `balanced`"
+            )
+        candidate = deepcopy(session)
+        candidate["runtime_profile"] = profile
+        try:
+            normalized = _normalize_session_settings(candidate, fallback=session)
+        except RuntimeConfigurationError as exc:
+            return f"Invalid runtime profile: {exc}"
+        session.clear()
+        session.update(normalized)
+        runtime = get_runtime_config(session)
+        lines = [
+            f"✓ Runtime profile = `{runtime.profile.value}`",
+            runtime.selection_reason,
+            (
+                f"ctx {runtime.num_ctx} · out {runtime.num_predict} · "
+                f"batch {runtime.num_batch} · temp {runtime.temperature}"
+            ),
+        ]
+        lines.extend(f"⚠ {warning}" for warning in runtime.warnings)
+        return "\n".join(lines)
+
     elif base == "/set":
         if not rest:
-            return "Usage: `/set <subcommand> [args]` (type `/help` for details)"
+            return (
+                "Usage: `/set <subcommand> [args]`\n"
+                "Subcommands: `profile` · `parameter` · `system` · `history` · "
+                "`format` · `verbose` · `think` · …\n"
+                "Tip: type `/help` or try `/profile`"
+            )
         subparts = rest.split(None, 1)
         sub = subparts[0].lower()
         args = subparts[1].strip() if len(subparts) > 1 else ""
@@ -677,10 +716,16 @@ def execute_command_web(
             }
             subparts = args.split(None, 1)
             if len(subparts) != 2:
-                return f"Usage: `/set parameter <name> <value>`\nAvailable: {', '.join(sorted(_ALL_PARAMS.keys()))}"
+                return (
+                    "Usage: `/set parameter <name> <value>`\n"
+                    f"Common: {', '.join(sorted(_ALL_PARAMS.keys()))}"
+                )
             name, raw_val = subparts[0].lower(), subparts[1]
             if name not in _ALL_PARAMS:
-                return f"Unknown parameter: `{name}`\nAvailable: {', '.join(sorted(_ALL_PARAMS.keys()))}"
+                return (
+                    f"Unknown parameter: `{name}`\n"
+                    f"Available: {', '.join(sorted(_ALL_PARAMS.keys()))}"
+                )
             try:
                 val = _ALL_PARAMS[name](raw_val)
                 candidate = deepcopy(session)
@@ -695,7 +740,18 @@ def execute_command_web(
                 expected = _ALL_PARAMS[name].__name__
                 return f"Invalid value for {name}: expected {expected}, got '{raw_val}'"
         elif sub == "profile":
+            if not args.strip():
+                return (
+                    "Usage: `/set profile <name>`\n"
+                    "Profiles: `manual` · `auto` · `low-vram` · `balanced`\n"
+                    "Tip: `/profile` lists the current profile"
+                )
             profile = args.lower().replace("_", "-")
+            if profile not in {"manual", "auto", "low-vram", "balanced"}:
+                return (
+                    f"Unknown profile: `{profile}`\n"
+                    "Valid: `manual` · `auto` · `low-vram` · `balanced`"
+                )
             candidate = deepcopy(session)
             candidate["runtime_profile"] = profile
             try:
@@ -708,6 +764,10 @@ def execute_command_web(
             lines = [
                 f"✓ Runtime profile = `{runtime.profile.value}`",
                 runtime.selection_reason,
+                (
+                    f"ctx {runtime.num_ctx} · out {runtime.num_predict} · "
+                    f"batch {runtime.num_batch} · temp {runtime.temperature}"
+                ),
             ]
             lines.extend(f"⚠ {warning}" for warning in runtime.warnings)
             return "\n".join(lines)
@@ -716,7 +776,7 @@ def execute_command_web(
             
     elif base == "/show":
         if not rest:
-            return "Usage: `/show <subcommand>` (parameters, system, model)"
+            return "Usage: `/show <subcommand>` (parameters · system · model · profile)"
         sub = rest.lower()
         if sub == "parameters":
             runtime = get_runtime_config(session)
@@ -729,6 +789,18 @@ def execute_command_web(
             if session.get("options"):
                 out.append("\nExplicit session overrides are active.")
             return "\n".join(out)
+        if sub == "profile":
+            runtime = get_runtime_config(session)
+            return "\n".join(
+                [
+                    f"**Runtime profile:** `{runtime.profile.value}`",
+                    runtime.selection_reason,
+                    (
+                        f"ctx {runtime.num_ctx} · out {runtime.num_predict} · "
+                        f"batch {runtime.num_batch} · temp {runtime.temperature}"
+                    ),
+                ]
+            )
         elif sub == "system":
             prompt = session.get("system", "")
             if prompt:

@@ -1,9 +1,12 @@
-"""Central runtime configuration and conservative hardware profile selection.
+"""Central runtime configuration and optional hardware profile selection.
 
 The resolver in this module is intentionally independent from the CLI and web
 frontends.  Both frontends can therefore resolve the same settings while still
-supplying session-scoped overrides.  Hardware inspection is local, bounded, and
-advisory: explicit settings are never silently reduced.
+supplying session-scoped overrides.
+
+Default behaviour follows the bundled ``Modelfile`` parameters. Hardware
+auto-selection only runs when the user (or a session) explicitly requests the
+``auto`` profile. Explicit settings are never silently reduced.
 """
 
 from __future__ import annotations
@@ -125,13 +128,15 @@ class RuntimeConfig:
         return data
 
 
-# These are conservative operating points, not claims of measured optimality.
-_CONSERVATIVE_DEFAULTS: dict[str, Any] = {
+# Defaults mirror the bundled Modelfile PARAMETER lines (plus non-Modelfile
+# runtime knobs that Ollama/Selene still need centrally). Hardware profiles may
+# diverge only when the user explicitly selects low-vram / balanced / auto.
+_MODELFILE_DEFAULTS: dict[str, Any] = {
     "chat_model": "selene",
     "base_model": "gemma4:e4b",
     "embedding_model": "embeddinggemma",
     "vision_model": "moondream",
-    "num_ctx": 4096,
+    "num_ctx": 8192,
     "num_predict": 768,
     "num_batch": 128,
     "temperature": 0.25,
@@ -152,10 +157,22 @@ _CONSERVATIVE_DEFAULTS: dict[str, Any] = {
     "build_timeout_seconds": 900.0,
 }
 
+# Backward-compatible alias used by older call sites / docs.
+_CONSERVATIVE_DEFAULTS: dict[str, Any] = dict(_MODELFILE_DEFAULTS)
+
 _PROFILE_DEFAULTS: dict[RuntimeProfile, dict[str, Any]] = {
-    RuntimeProfile.LOW_VRAM: dict(_CONSERVATIVE_DEFAULTS),
+    # Explicit opt-in for constrained GPUs (~4 GiB class).
+    RuntimeProfile.LOW_VRAM: {
+        **_MODELFILE_DEFAULTS,
+        "num_ctx": 4096,
+        "model_concurrency": 1,
+        "heavy_tool_concurrency": 1,
+        "tool_workers": 2,
+        "serialize_embeddings": True,
+        "serialize_vision": True,
+    },
     RuntimeProfile.BALANCED: {
-        **_CONSERVATIVE_DEFAULTS,
+        **_MODELFILE_DEFAULTS,
         "num_ctx": 8192,
         "num_predict": 1536,
         "num_batch": 512,
@@ -163,8 +180,8 @@ _PROFILE_DEFAULTS: dict[RuntimeProfile, dict[str, Any]] = {
         "model_concurrency": 2,
         "tool_workers": 4,
     },
-    # Manual starts conservatively; only explicit values change it.
-    RuntimeProfile.MANUAL: dict(_CONSERVATIVE_DEFAULTS),
+    # Manual / default: stay on Modelfile parameters unless the user overrides.
+    RuntimeProfile.MANUAL: dict(_MODELFILE_DEFAULTS),
 }
 
 _ENV_SETTINGS = {
@@ -317,7 +334,10 @@ def _hardware_profile(hardware: HardwareInfo) -> tuple[RuntimeProfile, str]:
 def _parse_profile(value: Any) -> RuntimeProfile:
     if isinstance(value, RuntimeProfile):
         return value
-    normalized = str(value or RuntimeProfile.AUTO.value).strip().lower().replace("_", "-")
+    # Empty / missing values default to manual (Modelfile parameters), not auto.
+    normalized = str(value if value is not None else RuntimeProfile.MANUAL.value).strip().lower().replace("_", "-")
+    if not normalized:
+        return RuntimeProfile.MANUAL
     try:
         return RuntimeProfile(normalized)
     except ValueError as exc:
@@ -458,14 +478,19 @@ def resolve_runtime_config(
     hardware: HardwareInfo | None = None,
     inherited_warnings: tuple[str, ...] | list[str] = (),
 ) -> RuntimeConfig:
-    """Resolve config with session > environment > user > profile precedence."""
+    """Resolve config with session > environment > user > profile precedence.
+
+    Unconfigured systems default to the bundled Modelfile parameter set and the
+    ``manual`` profile. Hardware-based selection only runs when ``auto`` is
+    requested explicitly.
+    """
     environment = os.environ if environ is None else environ
     user_values = _flatten_settings(user_config)
     environment_values = _environment_settings(environment)
     session_values = _flatten_settings(session_overrides)
 
-    profile_value: Any = RuntimeProfile.AUTO.value
-    profile_source = "conservative default"
+    profile_value: Any = RuntimeProfile.MANUAL.value
+    profile_source = "Modelfile defaults"
     if "profile" in user_values:
         profile_value, profile_source = user_values["profile"], "user config"
     if "profile" in environment_values:
@@ -474,6 +499,8 @@ def resolve_runtime_config(
         profile_value, profile_source = session_values["profile"], "session override"
     requested_profile = _parse_profile(profile_value)
 
+    # Hardware inspection is advisory for warnings. It only *selects* a profile
+    # when the user explicitly requests ``auto``.
     detected = hardware or detect_hardware()
     detected_profile, detected_reason = _hardware_profile(detected)
     if requested_profile is RuntimeProfile.AUTO:
@@ -481,17 +508,34 @@ def resolve_runtime_config(
         selection_reason = detected_reason
     elif requested_profile is RuntimeProfile.MANUAL:
         selected_profile = RuntimeProfile.MANUAL
-        selection_reason = f"Manual profile selected by {profile_source}; explicit values are preserved."
+        if profile_source == "Modelfile defaults":
+            selection_reason = (
+                "Using bundled Modelfile parameter defaults "
+                "(hardware profile auto-selection is off unless profile=auto)."
+            )
+        else:
+            selection_reason = (
+                f"Manual profile selected by {profile_source}; "
+                "explicit values are preserved over hardware defaults."
+            )
     else:
         selected_profile = requested_profile
         selection_reason = f"{selected_profile.value} profile selected by {profile_source}."
 
-    values = dict(_CONSERVATIVE_DEFAULTS)
-    sources: dict[str, str] = {name: "conservative default" for name in values}
-    if selected_profile in (RuntimeProfile.LOW_VRAM, RuntimeProfile.BALANCED):
+    values = dict(_MODELFILE_DEFAULTS)
+    sources: dict[str, str] = {name: "Modelfile default" for name in values}
+    if selected_profile in (
+        RuntimeProfile.LOW_VRAM,
+        RuntimeProfile.BALANCED,
+        RuntimeProfile.MANUAL,
+    ):
         for name, value in _PROFILE_DEFAULTS[selected_profile].items():
             values[name] = value
-            sources[name] = f"{selected_profile.value} profile"
+            sources[name] = (
+                "Modelfile default"
+                if selected_profile is RuntimeProfile.MANUAL
+                else f"{selected_profile.value} profile"
+            )
 
     _apply_layer(values, sources, user_values, "user config")
     _apply_layer(values, sources, environment_values, "environment")
