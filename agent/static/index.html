@@ -59,7 +59,15 @@
               <span id="context-label">0 / 4096</span>
               <span class="meter-track"><span id="context-fill"></span></span>
             </div>
-            <button id="send-btn" class="send-btn" type="submit" disabled>Send</button>
+            <div class="composer-actions">
+              <button id="mic-btn" class="mic-btn" type="button" aria-label="Start voice input" aria-pressed="false" title="Start voice input">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 0 0-8 0v4a4 4 0 0 0 4 4Z"/>
+                  <path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/>
+                </svg>
+              </button>
+              <button id="send-btn" class="send-btn" type="submit" disabled>Send</button>
+            </div>
           </div>
         </div>
       </form>

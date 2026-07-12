@@ -511,6 +511,75 @@ class SlashFilterTests(unittest.TestCase):
         self.assertIn("/vault search", cmds)
 
 
+class CommandPaletteEscapeTests(unittest.TestCase):
+    def test_escape_closes_palette_opened_via_shortcut(self):
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            self.skipTest("textual not installed")
+
+        import asyncio
+
+        from agent.tui import build_app_class
+
+        AppCls = build_app_class()
+        session = {
+            "history": True,
+            "system": "",
+            "options": {},
+            "verbose": True,
+            "wordwrap": True,
+            "format": "",
+            "think": True,
+            "runtime_profile": "manual",
+            "tui_theme": "oslo",
+        }
+        app = AppCls(
+            session=session,
+            history=[],
+            default_system_prompt="sys",
+            process_turn=lambda *a, **k: None,
+            handle_command=lambda *a, **k: True,
+            slash_completions=("/help", "/save", "/theme"),
+            slash_descriptions={
+                "/help": "Help",
+                "/save": "Save",
+                "/theme": "Theme",
+            },
+            status_meta={"profile": "manual", "model": "selene"},
+        )
+
+        async def _run():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # Open via the same shortcut path as Ctrl+/.
+                app.action_open_commands()
+                await pilot.pause()
+                palette = app.query_one("#slash-palette")
+                self.assertTrue(app._slash_open or app._slash_matches)
+                self.assertTrue(palette.has_class("-visible"))
+                self.assertEqual(app.query_one("#prompt-input").value, "/")
+
+                # Escape must close palette and clear the slash draft.
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertFalse(app._slash_open)
+                self.assertFalse(app._slash_matches)
+                self.assertFalse(palette.has_class("-visible"))
+                self.assertEqual(app.query_one("#prompt-input").value, "")
+
+                # Re-open, then toggle closed with the shortcut itself.
+                app.action_open_commands()
+                await pilot.pause()
+                self.assertTrue(palette.has_class("-visible"))
+                app.action_open_commands()
+                await pilot.pause()
+                self.assertFalse(palette.has_class("-visible"))
+                self.assertEqual(app.query_one("#prompt-input").value, "")
+
+        asyncio.run(_run())
+
+
 class SessionsMenuTests(unittest.TestCase):
     def test_list_session_catalog_and_new_conversation_helpers(self):
         import json

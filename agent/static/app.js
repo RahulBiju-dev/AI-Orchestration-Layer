@@ -108,6 +108,12 @@ const state = {
     selected: 0,
     matches: []
   },
+  voice: {
+    recognition: null,
+    active: false,
+    baseText: "",
+    suppressError: false
+  },
   sky: {
     frame: null,
     resizeObserver: null,
@@ -136,6 +142,7 @@ function bindElements() {
   el.messages = document.getElementById("messages");
   el.form = document.getElementById("composer-form");
   el.input = document.getElementById("chat-input");
+  el.mic = document.getElementById("mic-btn");
   el.send = document.getElementById("send-btn");
   el.contextLabel = document.getElementById("context-label");
   el.contextFill = document.getElementById("context-fill");
@@ -154,6 +161,8 @@ function bindElements() {
 }
 
 function bindEvents() {
+  initializeVoiceInput();
+
   el.form?.addEventListener("submit", (event) => {
     event.preventDefault();
     if (state.isGenerating) stopGeneration();
@@ -189,7 +198,10 @@ function bindEvents() {
     if (event.key === "Escape" && el.settingsPanel?.classList.contains("open")) closeSettings();
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) stopWelcomeSky();
+    if (document.hidden) {
+      stopWelcomeSky();
+      stopVoiceInput({ abort: true, silent: true });
+    }
     else if (el.messages?.querySelector(".welcome")) startWelcomeSky();
   });
   window.addEventListener("resize", resizeComposer);
@@ -237,6 +249,100 @@ function bindEvents() {
     updateContextMeter();
     persistSystemPrompt();
   });
+}
+
+function initializeVoiceInput() {
+  if (!el.mic) return;
+  const Recognition = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
+  if (typeof Recognition !== "function") {
+    el.mic.disabled = true;
+    el.mic.title = "Voice input is not supported by this browser";
+    el.mic.setAttribute("aria-label", el.mic.title);
+    return;
+  }
+
+  try {
+    const recognition = new Recognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.lang = navigator.language || "en-US";
+
+    recognition.onstart = () => setVoiceInputActive(true);
+    recognition.onresult = (event) => {
+      if (!state.voice.active || !el.input) return;
+      const transcript = Array.from(event.results, (result) => result[0]?.transcript || "")
+        .join(" ")
+        .trim();
+      const base = state.voice.baseText.trimEnd();
+      el.input.value = base && transcript ? `${base} ${transcript}` : (base || transcript);
+      resizeComposer();
+      updateComposerState();
+      updateSlashMenu();
+    };
+    recognition.onerror = (event) => {
+      if (state.voice.suppressError || event.error === "aborted") return;
+      const messages = {
+        "not-allowed": "Microphone access was denied. Allow it in your browser settings to use voice input.",
+        "service-not-allowed": "Voice recognition is blocked by your browser settings.",
+        "audio-capture": "No working microphone was found.",
+        "no-speech": "I didn't hear anything. Try speaking a little closer to the microphone.",
+        network: "Voice recognition is unavailable right now. You can still type your message."
+      };
+      toast(messages[event.error] || "Voice input stopped unexpectedly. You can still type your message.");
+    };
+    recognition.onend = () => {
+      setVoiceInputActive(false);
+      state.voice.suppressError = false;
+    };
+
+    state.voice.recognition = recognition;
+    el.mic.addEventListener("click", toggleVoiceInput);
+  } catch {
+    el.mic.disabled = true;
+    el.mic.title = "Voice input could not be initialized";
+    el.mic.setAttribute("aria-label", el.mic.title);
+  }
+}
+
+function setVoiceInputActive(active) {
+  state.voice.active = active;
+  if (!el.mic) return;
+  el.mic.classList.toggle("recording", active);
+  el.mic.setAttribute("aria-pressed", String(active));
+  el.mic.setAttribute("aria-label", active ? "Stop voice input" : "Start voice input");
+  el.mic.title = active ? "Listening... click to stop" : "Start voice input";
+}
+
+function toggleVoiceInput() {
+  if (!state.voice.recognition || state.isGenerating) return;
+  if (state.voice.active) {
+    stopVoiceInput();
+    return;
+  }
+
+  state.voice.baseText = el.input?.value || "";
+  state.voice.suppressError = false;
+  setVoiceInputActive(true);
+  try {
+    state.voice.recognition.start();
+    el.input?.focus({ preventScroll: true });
+  } catch {
+    setVoiceInputActive(false);
+    toast("Voice input is already busy. Wait a moment and try again.");
+  }
+}
+
+function stopVoiceInput({ abort = false, silent = false } = {}) {
+  if (!state.voice.recognition || !state.voice.active) return;
+  state.voice.suppressError = silent;
+  setVoiceInputActive(false);
+  try {
+    if (abort) state.voice.recognition.abort();
+    else state.voice.recognition.stop();
+  } catch {
+    state.voice.suppressError = false;
+  }
 }
 
 async function loadState() {
@@ -711,6 +817,7 @@ async function sendMessage() {
   const text = el.input.value.trim();
   if (!text) return;
 
+  stopVoiceInput({ abort: true, silent: true });
   closeSlashMenu();
   appendUserMessage(text);
   if (!text.startsWith("/")) state.history.push({ role: "user", content: text });
@@ -949,6 +1056,7 @@ function finishGeneration(generation = state.generation, { interrupted = false }
 }
 
 function resetComposer({ clear = true } = {}) {
+  stopVoiceInput({ abort: true, silent: true });
   closeSlashMenu();
   if (!el.input) return;
   el.input.disabled = false;
@@ -1127,6 +1235,7 @@ async function loadSession(name) {
 
 function updateComposerState() {
   const hasText = Boolean(el.input?.value.trim());
+  if (el.mic) el.mic.disabled = !state.voice.recognition || state.isGenerating;
   if (el.send) {
     el.send.disabled = !state.isGenerating && !hasText;
     el.send.textContent = state.isGenerating ? "Stop" : "Send";

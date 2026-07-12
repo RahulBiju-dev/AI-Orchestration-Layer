@@ -815,6 +815,7 @@ def build_app_class():
             self._activity_phase = "idle"  # idle | waiting | thinking
             self._slash_matches: list[tuple[str, str]] = []
             self._slash_selected = 0
+            self._slash_open = False  # command palette visible (Ctrl+/ or typed "/")
             # Conversations menu (Ctrl+O): rows are (key, title, detail).
             self._sessions_open = False
             self._session_rows: list[tuple[str, str, str]] = []
@@ -1423,10 +1424,20 @@ def build_app_class():
             except Exception:
                 return ""
 
-        def _dismiss_slash_palette(self) -> bool:
+        def _slash_palette_visible(self) -> bool:
+            if self._slash_open or self._slash_matches:
+                return True
+            try:
+                return self.query_one("#slash-palette", SlashPalette).has_class("-visible")
+            except Exception:
+                return False
+
+        def _dismiss_slash_palette(self, *, clear_slash_draft: bool = False) -> bool:
             """Hide the command palette if open. Returns True when something closed."""
-            closed = bool(self._slash_matches)
+            closed = bool(self._slash_open or self._slash_matches)
+            self._slash_open = False
             self._slash_matches = []
+            self._slash_selected = 0
             try:
                 palette = self.query_one("#slash-palette", SlashPalette)
                 if palette.has_class("-visible"):
@@ -1434,11 +1445,21 @@ def build_app_class():
                 palette.hide_palette()
             except Exception:
                 pass
+            if clear_slash_draft and closed:
+                try:
+                    inp = self.query_one("#prompt-input", Input)
+                    value = inp.value or ""
+                    # Clear command drafts opened via Ctrl+/ or typed filters.
+                    if value.startswith("/"):
+                        inp.value = ""
+                except Exception:
+                    pass
             return closed
 
         def _refresh_slash_view(self) -> None:
             palette = self.query_one("#slash-palette", SlashPalette)
             if not self._slash_matches:
+                self._slash_open = False
                 palette.hide_palette()
                 return
             self._slash_selected = max(
@@ -1450,6 +1471,7 @@ def build_app_class():
                 query=self._slash_query() or "/",
                 total=len(self.slash_completions),
             )
+            self._slash_open = True
 
         def _update_slash_palette(self, value: str, *, reset_selection: bool = True) -> None:
             if self._sessions_open:
@@ -1458,6 +1480,7 @@ def build_app_class():
             palette = self.query_one("#slash-palette", SlashPalette)
             if not value.startswith("/") or "\n" in value:
                 self._slash_matches = []
+                self._slash_open = False
                 palette.hide_palette()
                 return
             matches = _filter_slash_commands(
@@ -1468,6 +1491,7 @@ def build_app_class():
             )
             self._slash_matches = matches
             if not self._slash_matches:
+                self._slash_open = False
                 palette.hide_palette()
                 return
             if reset_selection:
@@ -1738,6 +1762,17 @@ def build_app_class():
                 self._submit(value)
 
         def on_key(self, event) -> None:
+            key = event.key
+
+            # Esc must close menus even if focus left the composer (e.g. after
+            # opening the palette with Ctrl+/). Handle before the focus gate.
+            if key == "escape":
+                if self._sessions_open or self._slash_palette_visible():
+                    event.prevent_default()
+                    event.stop()
+                    self.action_blur_or_clear()
+                    return
+
             # Intercept palette / conversations navigation while the input is focused.
             try:
                 focused = self.focused
@@ -1746,7 +1781,6 @@ def build_app_class():
             if focused is None or getattr(focused, "id", None) != "prompt-input":
                 return
 
-            key = event.key
             # Conversations menu navigation takes priority while open.
             if self._sessions_open:
                 if key in ("ctrl+n", "down"):
@@ -2053,16 +2087,25 @@ def build_app_class():
             self._dismiss_sessions_menu()
 
         def action_open_commands(self) -> None:
-            """Ctrl+/ — open the slash command palette."""
+            """Ctrl+/ — open (or toggle closed) the slash command palette."""
             inp = self.query_one("#prompt-input", Input)
             if self._busy:
                 return
             self._dismiss_sessions_menu()
+            # Second Ctrl+/ closes the palette cleanly (same as Esc).
+            if self._slash_palette_visible():
+                self._dismiss_slash_palette(clear_slash_draft=True)
+                try:
+                    inp.focus()
+                except Exception:
+                    pass
+                return
             if not (inp.value or "").startswith("/"):
                 inp.value = "/"
             inp.focus()
             inp.cursor_position = len(inp.value or "")
             self._update_slash_palette(inp.value or "/", reset_selection=True)
+            self._slash_open = bool(self._slash_matches)
 
         def action_open_sessions(self) -> None:
             """Ctrl+O — open the saved conversations menu."""
@@ -2131,15 +2174,20 @@ def build_app_class():
             self._submit_from_input()
 
         def action_blur_or_clear(self) -> None:
-            """Esc — dismiss menus first (chats, then palette), then clear input."""
+            """Esc — dismiss menus first (chats, then palette), then clear input.
+
+            One Esc always exits the open menu (including palette opened via
+            Ctrl+/). A further Esc clears leftover composer text.
+            """
             if self._dismiss_sessions_menu():
-                return
-            if self._dismiss_slash_palette():
-                # If the composer only held the slash filter, clear it too.
                 try:
-                    inp = self.query_one("#prompt-input", Input)
-                    if (inp.value or "").strip() in {"", "/"}:
-                        inp.value = ""
+                    self.query_one("#prompt-input", Input).focus()
+                except Exception:
+                    pass
+                return
+            if self._dismiss_slash_palette(clear_slash_draft=True):
+                try:
+                    self.query_one("#prompt-input", Input).focus()
                 except Exception:
                     pass
                 return

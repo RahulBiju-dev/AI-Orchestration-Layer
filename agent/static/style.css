@@ -919,6 +919,59 @@ textarea::placeholder {
   background: var(--danger);
 }
 
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mic-btn {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+
+.mic-btn svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mic-btn:hover:not(:disabled) {
+  border-color: rgba(184, 199, 255, 0.42);
+  background: rgba(184, 199, 255, 0.1);
+  color: var(--text);
+}
+
+.mic-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mic-btn.recording {
+  border-color: rgba(255, 107, 129, 0.7);
+  background: rgba(255, 107, 129, 0.14);
+  color: #ff8ea1;
+  box-shadow: 0 0 0 4px rgba(255, 107, 129, 0.08);
+}
+
+.mic-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
 .send-btn {
   min-width: 76px;
   padding: 10px 16px;
@@ -1088,7 +1141,16 @@ textarea::placeholder {
   }
 
   .composer-footer {
+    gap: 8px;
     padding: 6px 8px 8px 12px;
+  }
+
+  .context-meter {
+    gap: 6px;
+  }
+
+  .meter-track {
+    width: 64px;
   }
 
   .send-btn {
