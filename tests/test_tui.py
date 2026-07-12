@@ -511,5 +511,202 @@ class SlashFilterTests(unittest.TestCase):
         self.assertIn("/vault search", cmds)
 
 
+class SessionsMenuTests(unittest.TestCase):
+    def test_list_session_catalog_and_new_conversation_helpers(self):
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from agent.core import (
+            apply_saved_session_file,
+            list_session_catalog,
+            start_new_conversation,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions_dir = Path(tmp)
+            payload = {
+                "saved_at": "2026-07-12T00:00:00+00:00",
+                "model": "selene",
+                "session": {
+                    "options": {},
+                    "verbose": True,
+                    "wordwrap": True,
+                    "system": "",
+                    "history": True,
+                    "format": "",
+                    "think": True,
+                    "runtime_profile": "manual",
+                    "tui_theme": "tokyo",
+                },
+                "history": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi there"},
+                ],
+            }
+            path = sessions_dir / "Demo_chat.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with patch("agent.core._SESSIONS_DIR", str(sessions_dir)), patch(
+                "agent.core._LEGACY_SESSIONS_DIR", str(sessions_dir / "legacy-missing")
+            ):
+                catalog = list_session_catalog()
+            self.assertEqual(len(catalog), 1)
+            self.assertEqual(catalog[0]["title"], "Demo_chat")
+            self.assertIn("1 msg", catalog[0]["detail"])
+
+            session = {
+                "options": {},
+                "verbose": True,
+                "wordwrap": True,
+                "system": "old",
+                "history": True,
+                "format": "",
+                "think": True,
+                "runtime_profile": "manual",
+                "tui_theme": "oslo",
+            }
+            history = [{"role": "user", "content": "stale"}]
+            name, count, warnings = apply_saved_session_file(str(path), session, history)
+            self.assertEqual(name, "Demo_chat")
+            self.assertEqual(count, 1)
+            self.assertEqual(session.get("tui_theme"), "tokyo")
+            self.assertEqual(len(history), 3)
+
+            start_new_conversation(session, history)
+            self.assertEqual(history, [])
+            self.assertEqual(session.get("system"), "")
+
+    def test_sessions_menu_opens_with_new_conversation_and_escape_closes(self):
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            self.skipTest("textual not installed")
+
+        import asyncio
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from agent.tui import build_app_class
+
+        AppCls = build_app_class()
+        session = {
+            "history": True,
+            "system": "",
+            "options": {},
+            "verbose": True,
+            "wordwrap": True,
+            "format": "",
+            "think": True,
+            "runtime_profile": "manual",
+            "tui_theme": "oslo",
+        }
+        app = AppCls(
+            session=session,
+            history=[{"role": "user", "content": "keep me"}],
+            default_system_prompt="sys",
+            process_turn=lambda *a, **k: None,
+            handle_command=lambda *a, **k: True,
+            slash_completions=("/help", "/save"),
+            slash_descriptions={"/help": "Help", "/save": "Save"},
+            status_meta={"profile": "manual", "model": "selene"},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions_dir = Path(tmp)
+            payload = {
+                "saved_at": "2026-07-12T00:00:00+00:00",
+                "model": "selene",
+                "session": {
+                    "options": {},
+                    "verbose": True,
+                    "wordwrap": True,
+                    "system": "",
+                    "history": True,
+                    "format": "",
+                    "think": True,
+                    "runtime_profile": "manual",
+                    "tui_theme": "oslo",
+                },
+                "history": [
+                    {"role": "user", "content": "old question"},
+                    {"role": "assistant", "content": "old answer"},
+                ],
+            }
+            path = sessions_dir / "Old_talk.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            async def _run():
+                with patch("agent.core._SESSIONS_DIR", str(sessions_dir)), patch(
+                    "agent.core._LEGACY_SESSIONS_DIR", str(sessions_dir / "nope")
+                ):
+                    async with app.run_test() as pilot:
+                        await pilot.pause()
+                        app.action_open_sessions()
+                        await pilot.pause()
+                        self.assertTrue(app._sessions_open)
+                        self.assertGreaterEqual(len(app._session_rows), 2)
+                        self.assertEqual(app._session_rows[0][0], "__new__")
+                        self.assertEqual(app._session_rows[0][1], "New Conversation")
+                        menu = app.query_one("#sessions-menu")
+                        self.assertTrue(menu.has_class("-visible"))
+                        plain = str(menu.renderable) if hasattr(menu, "renderable") else ""
+                        content = getattr(menu, "content", None) or getattr(menu, "_content", "")
+                        body = content.plain if hasattr(content, "plain") else str(content)
+                        self.assertIn("New Conversation", body)
+                        self.assertIn("Old_talk", body)
+
+                        # Escape closes conversations menu without quitting.
+                        app.action_blur_or_clear()
+                        await pilot.pause()
+                        self.assertFalse(app._sessions_open)
+                        self.assertFalse(menu.has_class("-visible"))
+
+                        # Slash palette opens; escape closes it too.
+                        app.action_open_commands()
+                        await pilot.pause()
+                        self.assertTrue(app._slash_matches)
+                        palette = app.query_one("#slash-palette")
+                        self.assertTrue(palette.has_class("-visible"))
+                        app.action_blur_or_clear()
+                        await pilot.pause()
+                        self.assertFalse(app._slash_matches)
+                        self.assertFalse(palette.has_class("-visible"))
+
+                        # Open chats again and choose New Conversation.
+                        app.history[:] = [{"role": "user", "content": "stale"}]
+                        app.action_open_sessions()
+                        await pilot.pause()
+                        app._session_selected = 0
+                        app._accept_session_selection()
+                        await pilot.pause()
+                        self.assertEqual(app.history, [])
+                        self.assertFalse(app._sessions_open)
+
+                        # Load the saved conversation via the menu.
+                        app.action_open_sessions()
+                        await pilot.pause()
+                        # Find Old_talk row
+                        idx = next(
+                            i
+                            for i, row in enumerate(app._session_rows)
+                            if row[1] == "Old_talk"
+                        )
+                        app._session_selected = idx
+                        app._accept_session_selection()
+                        await pilot.pause()
+                        self.assertEqual(
+                            [m.get("role") for m in app.history],
+                            ["user", "assistant"],
+                        )
+
+            asyncio.run(_run())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -492,13 +492,101 @@ def build_app_class():
                 body.append("\n")
 
             body.append(
-                "↑↓ / ^N ^P  move  ·  tab complete  ·  enter run  ·  esc dismiss",
+                "↑↓ / ^N ^P  move  ·  tab complete  ·  enter run  ·  esc close",
                 style=faint,
             )
             self.update(body)
             self.add_class("-visible")
 
         def hide_palette(self) -> None:
+            self.remove_class("-visible")
+            self.update("")
+
+    class SessionsMenu(Static):
+        """Saved-conversation picker above the composer (Ctrl+O)."""
+
+        DEFAULT_CSS = """
+        SessionsMenu {
+            display: none;
+            height: auto;
+            max-height: 18;
+            padding: 1 1;
+            background: $boost;
+            color: $secondary;
+            border: round $primary 20%;
+            margin: 0 1 1 1;
+        }
+        SessionsMenu.-visible {
+            display: block;
+        }
+        """
+
+        NEW_KEY = "__new__"
+
+        def _palette(self) -> dict[str, str]:
+            from agent.tui_themes import DEFAULT_THEME, rich_palette
+
+            app = self.app
+            return getattr(app, "_selene_palette", None) or rich_palette(DEFAULT_THEME)
+
+        def show_rows(
+            self,
+            rows: list[tuple[str, str, str]],
+            selected: int,
+            *,
+            query: str = "",
+            total: int | None = None,
+        ) -> None:
+            """Render ``(key, title, detail)`` rows; key ``__new__`` is New Conversation."""
+            if not rows:
+                self.remove_class("-visible")
+                self.update("")
+                return
+
+            pal = self._palette()
+            muted = pal["muted"]
+            faint = pal["faint"]
+            select_fg = pal["select_fg"]
+            select_bg = pal["select_bg"]
+            soft = pal["text_soft"]
+
+            title_width = min(40, max(len(title) for _, title, _ in rows))
+            total = total if total is not None else len(rows)
+            count = f"{len(rows)}" + (f"/{total}" if total > len(rows) else "")
+
+            body = Text()
+            body.append("conversations  ", style=f"bold {muted}")
+            body.append(f"{count}", style=faint)
+            if query:
+                body.append(f"  ·  filter {query}", style=faint)
+            body.append("\n")
+            body.append("─" * min(60, title_width + 28), style=faint)
+            body.append("\n")
+
+            for index, (key, title, detail) in enumerate(rows):
+                padded = title.ljust(title_width)
+                desc = (detail or "").strip()
+                if len(desc) > 36:
+                    desc = desc[:35] + "…"
+                if index == selected:
+                    body.append(
+                        f" ▐ {padded}  {desc} ",
+                        style=f"bold {select_fg} on {select_bg}",
+                    )
+                else:
+                    style = soft if key == self.NEW_KEY else muted
+                    body.append(f"   {padded}", style=style)
+                    body.append(f"  {desc}", style=faint)
+                body.append("\n")
+
+            body.append(
+                "↑↓ / ^N ^P  move  ·  enter open  ·  esc close",
+                style=faint,
+            )
+            self.update(body)
+            self.add_class("-visible")
+
+        def hide_menu(self) -> None:
             self.remove_class("-visible")
             self.update("")
 
@@ -598,6 +686,7 @@ def build_app_class():
             items = (
                 ("↵", "send"),
                 ("/", "palette"),
+                ("^O", "chats"),
                 ("⇥", "complete"),
                 ("^C", "stop"),
                 ("^C^C", "quit"),
@@ -680,6 +769,7 @@ def build_app_class():
             Binding("ctrl+l", "clear_chat", "Clear chat", show=True),
             Binding("ctrl+k", "clear_input", "Clear input", show=True),
             Binding("ctrl+slash", "open_commands", "Commands", show=True),
+            Binding("ctrl+o", "open_sessions", "Conversations", show=True, priority=True),
             Binding("f1", "show_help", "Help", show=True),
             Binding("ctrl+j", "submit_input", "Send", show=False, priority=True),
             Binding("escape", "blur_or_clear", "Esc", show=False, priority=True),
@@ -725,6 +815,11 @@ def build_app_class():
             self._activity_phase = "idle"  # idle | waiting | thinking
             self._slash_matches: list[tuple[str, str]] = []
             self._slash_selected = 0
+            # Conversations menu (Ctrl+O): rows are (key, title, detail).
+            self._sessions_open = False
+            self._session_rows: list[tuple[str, str, str]] = []
+            self._session_selected = 0
+            self._session_catalog_total = 0
             self._sink: TuiDisplaySink | None = None
             self._saved_console = None
             self._capture_file = None
@@ -737,6 +832,7 @@ def build_app_class():
             with Vertical(id="body"):
                 yield ChatView(id="chat")
                 yield SlashPalette(id="slash-palette")
+                yield SessionsMenu(id="sessions-menu")
                 yield Composer(meta_text=self._composer_meta())
 
         def on_mount(self) -> None:
@@ -1327,6 +1423,19 @@ def build_app_class():
             except Exception:
                 return ""
 
+        def _dismiss_slash_palette(self) -> bool:
+            """Hide the command palette if open. Returns True when something closed."""
+            closed = bool(self._slash_matches)
+            self._slash_matches = []
+            try:
+                palette = self.query_one("#slash-palette", SlashPalette)
+                if palette.has_class("-visible"):
+                    closed = True
+                palette.hide_palette()
+            except Exception:
+                pass
+            return closed
+
         def _refresh_slash_view(self) -> None:
             palette = self.query_one("#slash-palette", SlashPalette)
             if not self._slash_matches:
@@ -1343,6 +1452,9 @@ def build_app_class():
             )
 
         def _update_slash_palette(self, value: str, *, reset_selection: bool = True) -> None:
+            if self._sessions_open:
+                # Conversations menu owns the overlay while open.
+                return
             palette = self.query_one("#slash-palette", SlashPalette)
             if not value.startswith("/") or "\n" in value:
                 self._slash_matches = []
@@ -1382,8 +1494,211 @@ def build_app_class():
             if run:
                 self._submit_from_input()
 
+        # ── Conversations menu ────────────────────────────────────────
+
+        def _dismiss_sessions_menu(self) -> bool:
+            """Hide the conversations menu if open. Returns True when closed."""
+            closed = bool(self._sessions_open or self._session_rows)
+            self._sessions_open = False
+            self._session_rows = []
+            self._session_selected = 0
+            self._session_catalog_total = 0
+            try:
+                menu = self.query_one("#sessions-menu", SessionsMenu)
+                if menu.has_class("-visible"):
+                    closed = True
+                menu.hide_menu()
+            except Exception:
+                pass
+            return closed
+
+        def _session_filter_query(self) -> str:
+            try:
+                return (self.query_one("#prompt-input", Input).value or "").strip()
+            except Exception:
+                return ""
+
+        def _build_session_rows(self, query: str = "") -> list[tuple[str, str, str]]:
+            """Top row is always New Conversation; then saved sessions (filterable)."""
+            from agent.core import list_session_catalog
+
+            catalog = list_session_catalog(limit=80)
+            self._session_catalog_total = len(catalog) + 1  # include New Conversation
+            needle = (query or "").strip().casefold()
+            rows: list[tuple[str, str, str]] = [
+                (SessionsMenu.NEW_KEY, "New Conversation", "start fresh"),
+            ]
+            for entry in catalog:
+                title = str(entry.get("title") or "")
+                detail = str(entry.get("detail") or "")
+                path = str(entry.get("path") or "")
+                if needle and needle not in title.casefold() and needle not in detail.casefold():
+                    continue
+                rows.append((path, title, detail))
+            # Keep New Conversation even when filtering — unless the filter
+            # clearly targets a saved name and user wants only matches? Spec says
+            # top option always New Conversation.
+            if needle and "new conversation".find(needle) < 0 and needle not in "new":
+                # Still keep it first always.
+                pass
+            return rows
+
+        def _refresh_sessions_view(self) -> None:
+            menu = self.query_one("#sessions-menu", SessionsMenu)
+            if not self._sessions_open or not self._session_rows:
+                menu.hide_menu()
+                return
+            self._session_selected = max(
+                0, min(self._session_selected, len(self._session_rows) - 1)
+            )
+            menu.show_rows(
+                self._session_rows,
+                self._session_selected,
+                query=self._session_filter_query(),
+                total=self._session_catalog_total,
+            )
+
+        def _open_sessions_menu(self, *, reset_selection: bool = True) -> None:
+            self._dismiss_slash_palette()
+            self._sessions_open = True
+            query = self._session_filter_query()
+            # Opening with a slash filter leftover is confusing — clear leading '/'.
+            if query.startswith("/"):
+                try:
+                    inp = self.query_one("#prompt-input", Input)
+                    inp.value = ""
+                    query = ""
+                except Exception:
+                    query = ""
+            self._session_rows = self._build_session_rows(query)
+            if reset_selection:
+                self._session_selected = 0
+            self._refresh_sessions_view()
+
+        def _update_sessions_filter(self, value: str, *, reset_selection: bool = True) -> None:
+            if not self._sessions_open:
+                return
+            self._session_rows = self._build_session_rows(value)
+            if not self._session_rows:
+                # Always at least New Conversation.
+                self._session_rows = [
+                    (SessionsMenu.NEW_KEY, "New Conversation", "start fresh"),
+                ]
+            if reset_selection:
+                self._session_selected = 0
+            self._refresh_sessions_view()
+
+        def _move_session(self, delta: int) -> None:
+            if not self._sessions_open or not self._session_rows:
+                return
+            self._session_selected = (self._session_selected + int(delta)) % len(
+                self._session_rows
+            )
+            self._refresh_sessions_view()
+
+        def _history_message_text(self, message: dict) -> str:
+            content = message.get("content")
+            if content is None:
+                return ""
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts: list[str] = []
+                for part in content:
+                    if isinstance(part, dict):
+                        text = part.get("text")
+                        if text:
+                            parts.append(str(text))
+                    elif part:
+                        parts.append(str(part))
+                return "\n".join(parts)
+            return str(content)
+
+        def _rebuild_transcript_from_history(self) -> None:
+            """Replay loaded history into the chat view (user + assistant only)."""
+            self._reset_transcript()
+            for message in list(self.history or []):
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get("role") or "")
+                text = self._history_message_text(message).strip()
+                if not text:
+                    continue
+                if role == "user":
+                    header = Text()
+                    header.append(f"{GLYPH_MARK} ", style="bold #f2f2f2")
+                    header.append("you\n", style="bold #ffffff")
+                    header.append(text, style="#f2f2f2")
+                    self._mount_block(header, "user")
+                elif role == "assistant":
+                    rendered = Markdown(_render_terminal_markdown(text or " "))
+                    title = Text()
+                    title.append(f"{GLYPH_SECTION} ", style="bold #ffffff")
+                    title.append("response\n", style="bold #f2f2f2")
+                    self._mount_block(Group(title, rendered), "assistant")
+            self.refresh_context_usage()
+
+        def _accept_session_selection(self) -> None:
+            if not self._sessions_open or not self._session_rows:
+                return
+            if self._busy:
+                self.ui_status("Still generating — wait for the current turn", kind="warn")
+                return
+            key, title, _detail = self._session_rows[self._session_selected]
+            # Clear filter text from the composer.
+            try:
+                inp = self.query_one("#prompt-input", Input)
+                inp.value = ""
+            except Exception:
+                pass
+            self._dismiss_sessions_menu()
+
+            if key == SessionsMenu.NEW_KEY:
+                from agent.core import start_new_conversation
+
+                start_new_conversation(self.session, self.history)
+                self._reset_transcript()
+                self.ui_status("New conversation", kind="ok")
+                self.refresh_context_usage()
+                return
+
+            from agent.core import apply_saved_session_file
+            from agent.runtime_config import RuntimeConfigurationError
+
+            try:
+                display_name, msg_count, warnings = apply_saved_session_file(
+                    key, self.session, self.history
+                )
+            except RuntimeConfigurationError as exc:
+                self.ui_status(f"Load failed · {exc}", kind="error")
+                return
+            except Exception as exc:
+                self.ui_status(f"Load failed · {exc}", kind="error")
+                return
+
+            # Theme may have changed with the saved session.
+            try:
+                theme = str(self.session.get("tui_theme") or "oslo")
+                self._apply_selene_theme(theme, announce=False)
+            except Exception:
+                pass
+
+            self._rebuild_transcript_from_history()
+            label = "message" if msg_count == 1 else "messages"
+            self.ui_status(
+                f"Loaded · {display_name}",
+                kind="ok",
+                detail=f"{msg_count} user {label}",
+            )
+            for warning in warnings:
+                self.ui_status(str(warning), kind="warn")
+
         def on_input_changed(self, event: Input.Changed) -> None:
             if event.input.id != "prompt-input":
+                return
+            if self._sessions_open:
+                self._update_sessions_filter(event.value, reset_selection=True)
+                self.refresh_context_usage()
                 return
             self._update_slash_palette(event.value, reset_selection=True)
             self.refresh_context_usage()
@@ -1391,9 +1706,15 @@ def build_app_class():
         def on_input_submitted(self, event: Input.Submitted) -> None:
             if event.input.id != "prompt-input":
                 return
+            if self._sessions_open:
+                self._accept_session_selection()
+                return
             self._submit_from_input()
 
         def _submit_from_input(self) -> None:
+            if self._sessions_open:
+                self._accept_session_selection()
+                return
             inp = self.query_one("#prompt-input", Input)
             value = (inp.value or "").strip()
             # Accept highlighted slash command when the buffer is a prefix/filter.
@@ -1412,13 +1733,12 @@ def build_app_class():
                 ):
                     value = preferred
             inp.value = ""
-            self.query_one("#slash-palette", SlashPalette).hide_palette()
-            self._slash_matches = []
+            self._dismiss_slash_palette()
             if value:
                 self._submit(value)
 
         def on_key(self, event) -> None:
-            # Intercept palette navigation while the input is focused.
+            # Intercept palette / conversations navigation while the input is focused.
             try:
                 focused = self.focused
             except Exception:
@@ -1427,6 +1747,47 @@ def build_app_class():
                 return
 
             key = event.key
+            # Conversations menu navigation takes priority while open.
+            if self._sessions_open:
+                if key in ("ctrl+n", "down"):
+                    event.prevent_default()
+                    event.stop()
+                    self._move_session(1)
+                    return
+                if key in ("ctrl+p", "up"):
+                    event.prevent_default()
+                    event.stop()
+                    self._move_session(-1)
+                    return
+                if key in ("pageup",):
+                    event.prevent_default()
+                    event.stop()
+                    self._move_session(-5)
+                    return
+                if key in ("pagedown",):
+                    event.prevent_default()
+                    event.stop()
+                    self._move_session(5)
+                    return
+                if key in ("home",):
+                    event.prevent_default()
+                    event.stop()
+                    self._session_selected = 0
+                    self._refresh_sessions_view()
+                    return
+                if key in ("end",):
+                    event.prevent_default()
+                    event.stop()
+                    self._session_selected = max(0, len(self._session_rows) - 1)
+                    self._refresh_sessions_view()
+                    return
+                if key == "tab":
+                    # Tab does not complete sessions; Enter opens.
+                    event.prevent_default()
+                    event.stop()
+                    return
+                return
+
             # Normalize a few aliases Textual may emit.
             if key in ("ctrl+n", "down"):
                 if self._slash_matches or (self._slash_query().startswith("/")):
@@ -1550,6 +1911,9 @@ def build_app_class():
                         if base == "/clear":
                             # Reset UI after core clears history; show one confirmation.
                             self.call_from_thread(self._clear_conversation_ui)
+                        elif base == "/load" and len(user_input.strip().split(None, 1)) > 1:
+                            # Rebuild transcript after a successful /load <target>.
+                            self.call_from_thread(self._rebuild_transcript_from_history)
                     else:
                         self._process_turn(
                             user_input,
@@ -1681,28 +2045,46 @@ def build_app_class():
             self._clear_conversation_ui()
 
         def action_clear_input(self) -> None:
-            """Ctrl+K — clear the composer (and dismiss the palette)."""
+            """Ctrl+K — clear the composer (and dismiss menus)."""
             inp = self.query_one("#prompt-input", Input)
             inp.value = ""
             inp.focus()
-            self._slash_matches = []
-            self.query_one("#slash-palette", SlashPalette).hide_palette()
+            self._dismiss_slash_palette()
+            self._dismiss_sessions_menu()
 
         def action_open_commands(self) -> None:
             """Ctrl+/ — open the slash command palette."""
             inp = self.query_one("#prompt-input", Input)
             if self._busy:
                 return
+            self._dismiss_sessions_menu()
             if not (inp.value or "").startswith("/"):
                 inp.value = "/"
             inp.focus()
             inp.cursor_position = len(inp.value or "")
             self._update_slash_palette(inp.value or "/", reset_selection=True)
 
+        def action_open_sessions(self) -> None:
+            """Ctrl+O — open the saved conversations menu."""
+            if self._busy:
+                return
+            try:
+                inp = self.query_one("#prompt-input", Input)
+                inp.focus()
+            except Exception:
+                pass
+            # Toggle: second Ctrl+O closes gracefully.
+            if self._sessions_open:
+                self._dismiss_sessions_menu()
+                return
+            self._open_sessions_menu(reset_selection=True)
+
         def action_show_help(self) -> None:
             """F1 — show command help in the transcript."""
             if self._busy:
                 return
+            self._dismiss_sessions_menu()
+            self._dismiss_slash_palette()
             entries = [
                 (cmd, self.slash_descriptions.get(cmd, ""))
                 for cmd in self.slash_completions
@@ -1719,7 +2101,7 @@ def build_app_class():
             self.ui_help(
                 unique,
                 "commands",
-                "ctrl+/ palette  ·  tab complete  ·  enter run",
+                "ctrl+/ palette  ·  ctrl+o conversations  ·  tab complete  ·  enter run",
             )
             shortcuts = Text()
             shortcuts.append(f"{GLYPH_SECTION} ", style="#6b6b6b")
@@ -1729,11 +2111,12 @@ def build_app_class():
                 ("Ctrl+C", "Stop generation"),
                 ("Ctrl+C twice", "Quit application"),
                 ("Ctrl+/", "Open command palette"),
+                ("Ctrl+O", "Open conversations menu"),
                 ("Tab / →", "Autofill highlighted command"),
-                ("↑↓  Ctrl+N/P", "Move palette selection"),
-                ("PgUp / PgDn", "Jump palette selection"),
-                ("Esc", "Dismiss palette / clear input"),
-                ("Ctrl+K", "Clear input"),
+                ("↑↓  Ctrl+N/P", "Move menu selection"),
+                ("PgUp / PgDn", "Jump menu selection"),
+                ("Esc", "Dismiss menu (palette or chats)"),
+                ("Ctrl+K", "Clear input + dismiss menus"),
                 ("Ctrl+L", "Clear conversation"),
                 ("F1", "Show this help"),
             ):
@@ -1742,19 +2125,28 @@ def build_app_class():
             self._mount_block(shortcuts, "system")
 
         def action_submit_input(self) -> None:
-            """Ctrl+J — send the current composer text."""
+            """Ctrl+J — send the current composer text (or open selected chat)."""
             if self._busy:
                 return
             self._submit_from_input()
 
         def action_blur_or_clear(self) -> None:
-            """Esc — dismiss palette first, then clear the input."""
-            palette = self.query_one("#slash-palette", SlashPalette)
-            if self._slash_matches:
-                self._slash_matches = []
-                palette.hide_palette()
+            """Esc — dismiss menus first (chats, then palette), then clear input."""
+            if self._dismiss_sessions_menu():
                 return
-            inp = self.query_one("#prompt-input", Input)
+            if self._dismiss_slash_palette():
+                # If the composer only held the slash filter, clear it too.
+                try:
+                    inp = self.query_one("#prompt-input", Input)
+                    if (inp.value or "").strip() in {"", "/"}:
+                        inp.value = ""
+                except Exception:
+                    pass
+                return
+            try:
+                inp = self.query_one("#prompt-input", Input)
+            except Exception:
+                return
             if inp.value:
                 inp.value = ""
                 return

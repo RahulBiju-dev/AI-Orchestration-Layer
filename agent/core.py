@@ -2021,6 +2021,110 @@ def _list_saved_sessions() -> list[str]:
     return files
 
 
+def list_session_catalog(*, limit: int = 80) -> list[dict[str, str]]:
+    """Return saved conversation rows for menus (newest first).
+
+    Each entry::
+        {"path": abs_path, "title": display_title, "detail": "date · N msgs"}
+    """
+    rows: list[dict[str, str]] = []
+    for filepath in _list_saved_sessions():
+        if limit > 0 and len(rows) >= limit:
+            break
+        title = os.path.basename(filepath).replace(".json", "")
+        # Drop trailing machine suffixes when present (timestamp / uuid).
+        # Keep a readable stem for the menu.
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
+            when = mtime.strftime("%Y-%m-%d %H:%M")
+        except OSError:
+            when = "?"
+        msg_count = 0
+        try:
+            with open(filepath, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            history = data.get("history", [])
+            if isinstance(history, list):
+                msg_count = sum(
+                    1 for message in history if isinstance(message, dict) and message.get("role") == "user"
+                )
+        except Exception:
+            msg_count = 0
+        label = "msg" if msg_count == 1 else "msgs"
+        rows.append(
+            {
+                "path": filepath,
+                "title": title,
+                "detail": f"{when} · {msg_count} {label}",
+            }
+        )
+    return rows
+
+
+def apply_saved_session_file(
+    filepath: str,
+    session: dict,
+    history: list[dict],
+) -> tuple[str, int, tuple[str, ...]]:
+    """Load a saved session JSON into ``session`` / ``history`` in place.
+
+    Returns:
+        (display_name, user_message_count, warnings)
+
+    Raises:
+        OSError, ValueError, json.JSONDecodeError, RuntimeConfigurationError
+    """
+    path = os.path.abspath(str(filepath or "").strip())
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"Session file not found: {filepath}")
+
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    saved_history = data.get("history", [])
+    saved_session = data.get("session", {})
+    if (
+        not isinstance(saved_history, list)
+        or any(not isinstance(message, dict) for message in saved_history)
+        or not isinstance(saved_session, dict)
+    ):
+        raise ValueError("invalid session structure")
+
+    restored_options, warnings = validate_session_options(saved_session.get("options", {}))
+    runtime_profile = saved_session.get("runtime_profile", "manual")
+    restored_runtime = get_runtime_config(
+        {
+            "runtime_profile": runtime_profile,
+            "options": restored_options,
+        }
+    )
+    warnings = tuple(dict.fromkeys((*warnings, *restored_runtime.warnings)))
+
+    # Validate before replacing live state so a malformed restore cannot erase
+    # the current conversation.
+    history.clear()
+    history.extend(saved_history)
+    session["options"] = restored_options
+    session["verbose"] = saved_session.get("verbose", True)
+    session["wordwrap"] = saved_session.get("wordwrap", True)
+    session["system"] = saved_session.get("system", "")
+    session["history"] = saved_session.get("history", True)
+    session["format"] = saved_session.get("format", "")
+    session["think"] = saved_session.get("think", True)
+    session["runtime_profile"] = runtime_profile
+    session["tui_theme"] = saved_session.get("tui_theme", "oslo")
+
+    display_name = os.path.basename(path).replace(".json", "")
+    msg_count = sum(1 for message in history if message.get("role") == "user")
+    return display_name, msg_count, warnings
+
+
+def start_new_conversation(session: dict, history: list[dict]) -> None:
+    """Clear history and system override for a fresh conversation."""
+    history.clear()
+    session["system"] = ""
+
+
 def _handle_save(args: str, session: dict, history: list[dict]) -> None:
     """Handle /save [name] — persist current session to a JSON file.
     
@@ -2087,24 +2191,17 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
 
     # No argument: list available sessions
     if not arg:
-        if not saved:
+        catalog = list_session_catalog()
+        if not catalog:
             print_info("No saved sessions found")
             _console.print()
             return
         _console.print()
         print_info("Saved sessions")
-        for i, fp in enumerate(saved, 1):
-            name = os.path.basename(fp).replace(".json", "")
-            mtime = datetime.fromtimestamp(os.path.getmtime(fp)).strftime("%Y-%m-%d %H:%M")
-            # Peek at message count
-            try:
-                with open(fp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                msg_count = sum(1 for m in data.get("history", []) if m.get("role") == "user")
-                info = f"{msg_count} msg{'s' if msg_count != 1 else ''}"
-            except Exception:
-                info = "?"
-            _console.print(f"    [green]{i}.[/] {name}  [dim]({mtime} · {info})[/]")
+        for i, row in enumerate(catalog, 1):
+            _console.print(
+                f"    [green]{i}.[/] {row['title']}  [dim]({row['detail']})[/]"
+            )
         print_info("Use /load <number> or /load <name> to restore")
         _console.print()
         return
@@ -2134,55 +2231,17 @@ def _handle_load(args: str, session: dict, history: list[dict]) -> None:
         _console.print(f"[red]No session found matching '{arg}'.[/]  [dim](type /load to list available sessions)[/]\n")
         return
 
-    # Load the session
     try:
-        with open(target_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+        display_name, msg_count, warnings = apply_saved_session_file(
+            target_path, session, history
+        )
+    except RuntimeConfigurationError as exc:
+        _console.print(f"[red]Failed to load session: invalid settings: {exc}[/]\n")
+        return
+    except (OSError, json.JSONDecodeError, ValueError, FileNotFoundError) as exc:
         _console.print(f"[red]Failed to load session: {exc}[/]\n")
         return
 
-    saved_history = data.get("history", [])
-    saved_session = data.get("session", {})
-    if (
-        not isinstance(saved_history, list)
-        or any(not isinstance(message, dict) for message in saved_history)
-        or not isinstance(saved_session, dict)
-    ):
-        _console.print("[red]Failed to load session: invalid session structure.[/]\n")
-        return
-    try:
-        restored_options, warnings = validate_session_options(saved_session.get("options", {}))
-    except RuntimeConfigurationError as exc:
-        _console.print(f"[red]Failed to load session: invalid model settings: {exc}[/]\n")
-        return
-    runtime_profile = saved_session.get("runtime_profile", "manual")
-    try:
-        restored_runtime = get_runtime_config({
-            "runtime_profile": runtime_profile,
-            "options": restored_options,
-        })
-    except RuntimeConfigurationError as exc:
-        _console.print(f"[red]Failed to load session: invalid runtime profile: {exc}[/]\n")
-        return
-    warnings = tuple(dict.fromkeys((*warnings, *restored_runtime.warnings)))
-
-    # Validate before replacing live state so a malformed restore cannot erase
-    # the current conversation.
-    history.clear()
-    history.extend(saved_history)
-    session["options"] = restored_options
-    session["verbose"] = saved_session.get("verbose", True)
-    session["wordwrap"] = saved_session.get("wordwrap", True)
-    session["system"] = saved_session.get("system", "")
-    session["history"] = saved_session.get("history", True)
-    session["format"] = saved_session.get("format", "")
-    session["think"] = saved_session.get("think", True)
-    session["runtime_profile"] = runtime_profile
-    session["tui_theme"] = saved_session.get("tui_theme", "oslo")
-
-    display_name = os.path.basename(target_path).replace(".json", "")
-    msg_count = sum(1 for m in history if m.get("role") == "user")
     print_ok(
         f"Session loaded · {display_name}",
         detail=f"{msg_count} user message{'s' if msg_count != 1 else ''}",
