@@ -855,8 +855,24 @@ class PromptQueueTests(unittest.TestCase):
                 # Queue up to 3 follow-ups.
                 app._submit("q1")
                 app._submit("q2")
-                app._submit("q3")
-                self.assertEqual(app._prompt_queue, ["q1", "q2", "q3"])
+                long_prompt = "word " * 40
+                app._submit(long_prompt)
+                self.assertEqual(app._prompt_queue, ["q1", "q2", long_prompt.strip()])
+
+                # Popup above the composer shows numbered one-line previews.
+                panel = app.query_one("#prompt-queue")
+                await pilot.pause()
+                self.assertTrue(panel.has_class("-visible"))
+                renderable = panel.renderable if hasattr(panel, "renderable") else panel.content
+                preview_text = str(renderable)
+                self.assertIn("1.", preview_text)
+                self.assertIn("q1", preview_text)
+                self.assertIn("2.", preview_text)
+                self.assertIn("q2", preview_text)
+                self.assertIn("3.", preview_text)
+                # Long prompts are truncated with an ellipsis (no "Queued N/3" label).
+                self.assertIn("…", preview_text)
+                self.assertNotIn("queued", preview_text.casefold())
 
                 # Fourth is rejected (queue full).
                 before = list(app._prompt_queue)
@@ -869,13 +885,60 @@ class PromptQueueTests(unittest.TestCase):
                     if len(turns) >= 4 and not app._busy and not app._prompt_queue:
                         break
                     await pilot.pause(0.05)
-                self.assertEqual(turns, ["first", "q1", "q2", "q3"])
+                self.assertEqual(turns, ["first", "q1", "q2", long_prompt.strip()])
                 self.assertEqual(app._prompt_queue, [])
                 self.assertFalse(app._busy)
                 self.assertFalse(inp.disabled)
+                self.assertFalse(panel.has_class("-visible"))
 
         asyncio.run(_run())
         release.set()
+
+    def test_queue_preview_truncates_to_one_line(self):
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            self.skipTest("textual not installed")
+
+        import asyncio
+
+        from agent.tui import build_app_class
+
+        AppCls = build_app_class()
+        app = AppCls(
+            session={
+                "history": True,
+                "system": "",
+                "options": {},
+                "verbose": False,
+                "wordwrap": True,
+                "format": "",
+                "think": True,
+                "runtime_profile": "manual",
+            },
+            history=[],
+            default_system_prompt="sys",
+            process_turn=lambda *a, **k: None,
+            handle_command=lambda *a, **k: True,
+            slash_completions=("/help",),
+            slash_descriptions={"/help": "Help"},
+            status_meta={},
+        )
+
+        async def _run():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                panel = app.query_one("#prompt-queue")
+                preview = type(panel).preview_line
+                self.assertEqual(preview("hello world"), "hello world")
+                self.assertEqual(preview("a\n\tb  c"), "a b c")
+                long = "x" * 80
+                out = preview(long, max_len=20)
+                self.assertEqual(len(out), 20)
+                self.assertTrue(out.endswith("…"))
+                self.assertEqual(out, "x" * 19 + "…")
+
+        asyncio.run(_run())
 
 
 if __name__ == "__main__":

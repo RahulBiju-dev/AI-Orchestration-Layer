@@ -594,6 +594,73 @@ def build_app_class():
             self.remove_class("-visible")
             self.update("")
 
+    class PromptQueuePanel(Static):
+        """Compact numbered previews of prompts waiting above the composer."""
+
+        DEFAULT_CSS = """
+        PromptQueuePanel {
+            display: none;
+            height: auto;
+            max-height: 5;
+            padding: 0 1;
+            background: $boost;
+            color: $secondary;
+            border: round $primary 20%;
+            /* Flush against the composer so the panel bottom meets the chatbox top. */
+            margin: 0 1 0 1;
+        }
+        PromptQueuePanel.-visible {
+            display: block;
+        }
+        """
+
+        # Soft ellipsis character used when truncating long one-line previews.
+        _ELLIPSIS = "…"
+        _PREVIEW_MAX = 56
+
+        def _palette(self) -> dict[str, str]:
+            from agent.tui_themes import DEFAULT_THEME, rich_palette
+
+            app = self.app
+            return getattr(app, "_selene_palette", None) or rich_palette(DEFAULT_THEME)
+
+        @classmethod
+        def preview_line(cls, text: str, *, max_len: int | None = None) -> str:
+            """Collapse whitespace and truncate to a single preview line."""
+            flat = " ".join(str(text or "").split()).strip()
+            limit = max_len if max_len is not None else cls._PREVIEW_MAX
+            if limit < 1:
+                return ""
+            if len(flat) <= limit:
+                return flat
+            # Leave room for the ellipsis character.
+            keep = max(1, limit - 1)
+            return flat[:keep].rstrip() + cls._ELLIPSIS
+
+        def show_queue(self, items: list[str]) -> None:
+            if not items:
+                self.hide_queue()
+                return
+
+            pal = self._palette()
+            muted = pal["muted"]
+            faint = pal["faint"]
+            soft = pal["text_soft"]
+
+            body = Text()
+            for index, raw in enumerate(items, start=1):
+                if index > 1:
+                    body.append("\n")
+                preview = self.preview_line(raw)
+                body.append(f" {index}. ", style=f"bold {soft}")
+                body.append(preview or "·", style=muted if preview else faint)
+            self.update(body)
+            self.add_class("-visible")
+
+        def hide_queue(self) -> None:
+            self.remove_class("-visible")
+            self.update("")
+
     class SpeechMenu(Vertical):
         """Centered voice popup: animated mic + editable transcript.
 
@@ -1102,6 +1169,7 @@ def build_app_class():
                 yield ChatView(id="chat")
                 yield SlashPalette(id="slash-palette")
                 yield SessionsMenu(id="sessions-menu")
+                yield PromptQueuePanel(id="prompt-queue")
                 yield Composer(meta_text=self._composer_meta())
             yield SpeechMenu(id="speech-menu")
 
@@ -1378,6 +1446,27 @@ def build_app_class():
             line.append(dots.ljust(3), style="#555555")
             return line
 
+        def _thinking_line_width(self) -> int:
+            """Usable character width for a full thinking preview line."""
+            width = 0
+            try:
+                if self._thinking_widget is not None:
+                    width = int(self._thinking_widget.size.width or 0)
+            except Exception:
+                width = 0
+            if width <= 0:
+                try:
+                    width = int(self.query_one("#chat").size.width or 0)
+                except Exception:
+                    width = 0
+            if width <= 0:
+                try:
+                    width = int(self.size.width or 0)
+                except Exception:
+                    width = 80
+            # MessageBlock.thinking has left padding/border; keep a small gutter.
+            return max(24, width - 4)
+
         def _thinking_renderable(self) -> Text:
             frame = self._spinner_frames[
                 self._activity_frame % len(self._spinner_frames)
@@ -1395,9 +1484,11 @@ def build_app_class():
                 body.append("  ·  collecting", style="#555555")
             preview = self._thinking_buf.strip().replace("\n", " ")
             if preview:
-                if len(preview) > 72:
-                    preview = "…" + preview[-72:]
-                body.append("\n  ", style="")
+                # Fill the full chat width (was hard-capped at 72 chars ≈ half line).
+                budget = self._thinking_line_width()
+                if len(preview) > budget:
+                    preview = "…" + preview[-(budget - 1) :]
+                body.append("\n", style="")
                 body.append(preview, style="#555555")
             return body
 
@@ -2212,36 +2303,21 @@ def build_app_class():
             with self._busy_lock:
                 return len(self._prompt_queue)
 
-        def _refresh_queue_ui(self) -> None:
-            """Show queue depth in the composer shortcut strip while pending."""
-            try:
-                hint = self.query_one("#composer-hint", Static)
-                composer = self.query_one(Composer)
-            except Exception:
-                return
-            n = self._queue_depth()
-            if n <= 0:
-                try:
-                    hint.update(composer._shortcut_strip())
-                except Exception:
-                    pass
-                return
-            from agent.tui_themes import DEFAULT_THEME, rich_palette
+        def _queue_snapshot(self) -> list[str]:
+            with self._busy_lock:
+                return list(self._prompt_queue)
 
-            pal = getattr(self, "_selene_palette", None) or rich_palette(DEFAULT_THEME)
-            soft = pal["text_soft"]
-            faint = pal["faint"]
-            line = Text()
-            line.append(f"queued {n}/{self._PROMPT_QUEUE_MAX}", style=f"bold {soft}")
-            line.append("  ·  ", style=faint)
-            line.append("enter queues next", style=faint)
-            if n >= self._PROMPT_QUEUE_MAX:
-                line.append("  ·  ", style=faint)
-                line.append("full", style=faint)
+        def _refresh_queue_ui(self) -> None:
+            """Render numbered one-line previews above the composer."""
             try:
-                hint.update(line)
+                panel = self.query_one("#prompt-queue", PromptQueuePanel)
             except Exception:
-                pass
+                return
+            items = self._queue_snapshot()
+            if not items:
+                panel.hide_queue()
+                return
+            panel.show_queue(items)
 
         def _submit(self, user_input: str) -> None:
             stripped = str(user_input or "").strip()
