@@ -26,9 +26,9 @@ _DIFFICULTY_MAP: dict[str, int] = {
 
 
 _SCRAPE_DEPTH_MAP: dict[str, int] = {
-    "easy": 1,
-    "medium": 2,
-    "hard": 3,
+    "easy": 2,
+    "medium": 4,
+    "hard": 7,
 }
 
 
