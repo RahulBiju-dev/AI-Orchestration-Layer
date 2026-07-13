@@ -100,6 +100,54 @@ class TuiSelectionTests(unittest.TestCase):
 
 
 class TuiAppSmokeTests(unittest.TestCase):
+    def test_context_meter_counts_active_system_prompt_once(self):
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            self.skipTest("textual not installed")
+
+        from agent.core import _estimate_message_tokens, _estimate_messages_tokens
+        from agent.tui import build_app_class
+
+        AppCls = build_app_class()
+        history = [
+            {"role": "system", "content": "saved policy"},
+            {"role": "user", "content": "hello"},
+        ]
+        session = {
+            "history": True,
+            "system": "",
+            "options": {},
+            "verbose": False,
+            "wordwrap": True,
+            "format": "",
+            "think": True,
+            "runtime_profile": "manual",
+        }
+        app = AppCls(
+            session=session,
+            history=history,
+            default_system_prompt="default policy",
+            process_turn=lambda *a, **k: None,
+            handle_command=lambda *a, **k: True,
+            slash_completions=("/help",),
+            slash_descriptions={"/help": "Help"},
+            status_meta={"profile": "manual"},
+        )
+
+        expected_saved = (
+            _estimate_message_tokens({"role": "system", "content": "saved policy"})
+            + _estimate_messages_tokens([{"role": "user", "content": "hello"}])
+        )
+        self.assertEqual(app._estimate_context_used(), expected_saved)
+
+        session["system"] = "override policy"
+        expected_override = (
+            _estimate_message_tokens({"role": "system", "content": "override policy"})
+            + _estimate_messages_tokens([{"role": "user", "content": "hello"}])
+        )
+        self.assertEqual(app._estimate_context_used(), expected_override)
+
     def test_build_app_class_and_compose(self):
         try:
             import textual  # noqa: F401

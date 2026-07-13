@@ -1248,16 +1248,39 @@ def build_app_class():
                 except Exception:
                     return 8192
 
+        def _active_system_prompt_for_meter(self) -> str:
+            """System prompt counted by the visible context meter."""
+            override = str((self.session or {}).get("system") or "").strip()
+            if override:
+                return override
+            for message in self.history or []:
+                if isinstance(message, dict) and message.get("role") == "system":
+                    return str(message.get("content") or "").strip()
+            return str(self.default_system_prompt or "").strip()
+
         def _estimate_context_used(self) -> int:
             """Match web UI / core heuristics: history + draft input tokens."""
             from agent.core import _estimate_message_tokens, _estimate_messages_tokens
 
-            history = list(self.history or [])
+            history = [
+                message
+                for message in list(self.history or [])
+                if not (isinstance(message, dict) and message.get("role") == "system")
+            ]
             used = 0
             try:
                 used = int(_estimate_messages_tokens(history))
             except Exception:
                 used = 0
+            system_prompt = self._active_system_prompt_for_meter()
+            if system_prompt:
+                try:
+                    used += int(_estimate_message_tokens({
+                        "role": "system",
+                        "content": system_prompt,
+                    }))
+                except Exception:
+                    used += max(1, len(system_prompt) // 4)
 
             # Draft text in the composer (mirrors web estimatedContextTokens).
             try:

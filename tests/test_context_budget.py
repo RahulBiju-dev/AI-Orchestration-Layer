@@ -5,6 +5,7 @@ from agent.core import (
     CONTEXT_TOOL_LOOP_RESERVE,
     ContextWindowError,
     OUTPUT_CONTINUATION_PROMPT,
+    SYSTEM_PROMPT_ANCHOR_THRESHOLD,
     TOOL_CONTINUATION_PROMPT,
     _output_limit_reached,
     _stream_complete_response,
@@ -98,6 +99,46 @@ class TestContextBudget(unittest.TestCase):
     def test_unicode_token_estimate_is_not_ascii_underweighted(self):
         self.assertGreaterEqual(_estimate_tokens("漢" * 100), 100)
 
+    def test_full_context_repeats_exact_system_prompt_near_latest_turn(self):
+        system_prompt = "CUSTOM POLICY: always preserve this exact instruction."
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "old context " * 2_000},
+            {"role": "assistant", "content": "old answer " * 2_000},
+            {"role": "user", "content": "What policy are you following?"},
+        ]
+
+        prepared = prepare_messages_for_model(
+            messages,
+            {"options": {"num_ctx": 2048, "num_predict": 256}},
+            tools=None,
+        )
+
+        system_messages = [message for message in prepared if message["role"] == "system"]
+        self.assertEqual(
+            [message["content"] for message in system_messages],
+            [system_prompt, system_prompt],
+        )
+        self.assertEqual(prepared[-2], {"role": "system", "content": system_prompt})
+        self.assertEqual(prepared[-1], messages[-1])
+
+    def test_short_context_does_not_duplicate_system_prompt(self):
+        messages = [
+            {"role": "system", "content": "system policy"},
+            {"role": "user", "content": "hello"},
+        ]
+        session = {"options": {"num_ctx": 4096, "num_predict": 256}}
+
+        prepared = prepare_messages_for_model(messages, session, tools=None)
+        projected = (
+            _estimate_messages_tokens(messages)
+            + _context_safety_margin(4096)
+            + 256
+        )
+
+        self.assertLess(projected, int(4096 * SYSTEM_PROMPT_ANCHOR_THRESHOLD))
+        self.assertEqual(prepared, messages)
+
     def test_tool_continuation_tail_remains_atomic_when_trimming(self):
         tool_call = {
             "role": "assistant",
@@ -134,6 +175,11 @@ class TestContextBudget(unittest.TestCase):
         self.assertEqual(prepared[-3]["content"], "")
         self.assertEqual(prepared[-2], tool_result)
         self.assertEqual(prepared[-1], reminder)
+        self.assertEqual(prepared[-4], {"role": "system", "content": "system policy"})
+        self.assertEqual(
+            [message["content"] for message in prepared if message["role"] == "system"],
+            ["system policy", "system policy"],
+        )
 
     def test_output_continuation_keeps_latest_partial_answer_suffix(self):
         partial = "opening " + ("middle " * 3000) + "exact final sentence fragment"
@@ -154,6 +200,7 @@ class TestContextBudget(unittest.TestCase):
 
         self.assertEqual(prepared[-1], reminder)
         self.assertEqual(prepared[-2]["role"], "assistant")
+        self.assertEqual(prepared[-3], {"role": "system", "content": "system policy"})
         self.assertTrue(partial.endswith(prepared[-2]["content"]))
         self.assertIn("exact final sentence fragment", prepared[-2]["content"])
         self.assertLess(len(prepared[-2]["content"]), len(partial))
@@ -202,6 +249,10 @@ class TestContextBudget(unittest.TestCase):
         self.assertIn("Tool result truncated", prepared[-2]["content"])
         self.assertEqual(tool_result["content"], "result " * 4_000)
         self.assertGreaterEqual(options["num_predict"], 96)
+        system_messages = [message for message in prepared if message["role"] == "system"]
+        self.assertEqual(len(system_messages), 1)
+        self.assertEqual(system_messages[0]["content"], load_default_system_prompt())
+        self.assertEqual(prepared[-4], system_messages[0])
 
     def test_tool_continuation_selection_uses_original_request_not_boilerplate(self):
         messages = [

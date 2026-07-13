@@ -87,11 +87,7 @@ CONTEXT_SAFETY_MARGIN_RATIO = 0.08
 CONTEXT_TOOL_LOOP_RESERVE = 512
 MAX_TOOL_CALL_ROUNDS = 8
 MAX_OUTPUT_CONTINUATION_ROUNDS = 8
-SYSTEM_PERSISTENCE_REMINDER = (
-    "Runtime system reminder: Follow the active system prompt exactly. "
-    "Use tools over memory for verifiable state, preserve the vault > web > internal knowledge hierarchy, "
-    "do not invent facts or tool results, and answer the latest user request directly."
-)
+SYSTEM_PROMPT_ANCHOR_THRESHOLD = 0.75
 TOOL_CONTINUATION_PROMPT = (
     "Continue the current user request using the tool result messages already present in this conversation. "
     "Do not repeat an identical tool call to rediscover the same information. "
@@ -868,21 +864,38 @@ def _trim_history(
     return system_msgs + kept + preserved_tail
 
 
-def _insert_system_persistence_reminder(messages: list[dict]) -> list[dict]:
-    """Keep a compact system-policy anchor near the active turn in long prompts."""
+def _system_prompt_anchor_index(conv_msgs: list[dict]) -> int:
+    """Return an insertion point that does not split an atomic continuation tail."""
+    output_tail_start = _output_continuation_tail_start(conv_msgs)
+    if output_tail_start is not None:
+        return output_tail_start
+
+    tool_tail_start = _tool_continuation_tail_start(conv_msgs)
+    if tool_tail_start is not None:
+        return tool_tail_start
+
+    for index in range(len(conv_msgs) - 1, -1, -1):
+        if conv_msgs[index].get("role") == "user":
+            return index
+    return len(conv_msgs)
+
+
+def _anchor_system_prompt(messages: list[dict], *, keep_leading_copy: bool) -> list[dict]:
+    """Place the exact active system prompt beside the current turn.
+
+    A full-window request can make a head-only system message ineffective even
+    when it remains technically present. Repeating the authoritative message is
+    preferred; constrained windows relocate that same message so policy is not
+    replaced by a lossy summary.
+    """
     system_msgs, conv_msgs = _split_system_and_conversation(messages)
     if not system_msgs or not conv_msgs:
         return messages
-    if _is_tool_continuation_prompt(conv_msgs[-1]) or _is_output_continuation_prompt(conv_msgs[-1]):
-        return [*system_msgs, *conv_msgs]
 
-    reminder = {"role": "system", "content": SYSTEM_PERSISTENCE_REMINDER}
-    insert_at = len(conv_msgs)
-    for index in range(len(conv_msgs) - 1, -1, -1):
-        if conv_msgs[index].get("role") == "user":
-            insert_at = index
-            break
-    return [*system_msgs, *conv_msgs[:insert_at], reminder, *conv_msgs[insert_at:]]
+    anchor = dict(system_msgs[0])
+    insert_at = _system_prompt_anchor_index(conv_msgs)
+    leading = system_msgs if keep_leading_copy else []
+    return [*leading, *conv_msgs[:insert_at], anchor, *conv_msgs[insert_at:]]
 
 
 def prepare_messages_for_model(
@@ -900,27 +913,48 @@ def prepare_messages_for_model(
     tool_tokens = _estimate_tool_schema_tokens(runtime_tools)
     reserved = requested_response + max(0, int(extra_reserved_tokens))
 
+    margin = _context_safety_margin(num_ctx)
+    projected_untrimmed = (
+        _estimate_messages_tokens(messages) + tool_tokens + reserved + margin
+    )
+    system_msgs, _conv_msgs = _split_system_and_conversation(messages)
+    should_anchor = (
+        bool(system_msgs)
+        and projected_untrimmed >= int(num_ctx * SYSTEM_PROMPT_ANCHOR_THRESHOLD)
+    )
+
+    if not should_anchor:
+        return _trim_history(
+            messages,
+            num_ctx,
+            reserved_tokens=reserved,
+            tool_schema_tokens=tool_tokens,
+        )
+
+    # Reserve the exact prompt's cost before adding a recent duplicate. This
+    # drops older conversation first instead of silently crowding response space.
+    anchor_tokens = _estimate_message_tokens(system_msgs[0])
+    trimmed = _trim_history(
+        messages,
+        num_ctx,
+        reserved_tokens=reserved + anchor_tokens,
+        tool_schema_tokens=tool_tokens,
+    )
+    prepared = _anchor_system_prompt(trimmed, keep_leading_copy=True)
+    projected = _estimate_messages_tokens(prepared) + tool_tokens + reserved + margin
+    if projected <= num_ctx:
+        return prepared
+
+    # A low-context tool/output continuation may not fit two full copies. Keep
+    # one exact prompt immediately before its atomic tail rather than substituting
+    # a shortened policy or failing solely because of the duplicate.
     trimmed = _trim_history(
         messages,
         num_ctx,
         reserved_tokens=reserved,
         tool_schema_tokens=tool_tokens,
     )
-    prepared = _insert_system_persistence_reminder(trimmed)
-
-    # If the tail reminder pushes the prompt too close to the edge, trim once
-    # more with the reminder overhead included, then reinsert it.
-    projected = _estimate_messages_tokens(prepared) + tool_tokens + reserved + _context_safety_margin(num_ctx)
-    if projected > num_ctx:
-        reminder_tokens = _estimate_message_tokens({"role": "system", "content": SYSTEM_PERSISTENCE_REMINDER})
-        trimmed = _trim_history(
-            messages,
-            num_ctx,
-            reserved_tokens=reserved + reminder_tokens,
-            tool_schema_tokens=tool_tokens,
-        )
-        prepared = _insert_system_persistence_reminder(trimmed)
-    return prepared
+    return _anchor_system_prompt(trimmed, keep_leading_copy=False)
 
 
 def guarded_options_for_call(
