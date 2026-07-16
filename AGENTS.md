@@ -1,6 +1,8 @@
 # Selene Agent Guide
 
-Concise guidance for contributors and coding agents working in this repository.
+Concise guidance for contributors and coding agents working in this repository (**AI Orchestration Layer**).
+
+Selene is a multi-interface orchestration product: Web UI, Terminal CLI, and Electron desktop share one agent core (tools, Ollama coordinator, model lifecycle, vault/RAG, sessions). Prefer changes that strengthen the shared orchestration layer over interface-specific one-offs unless the work is genuinely UI-only.
 
 ## Platform policy
 
@@ -26,13 +28,13 @@ Concise guidance for contributors and coding agents working in this repository.
 | Runtime profiles | `agent/runtime_config.py` |
 | Ollama API + coordinator | `agent/ollama_runtime.py` |
 | Managed model lifecycle | `agent/model_lifecycle.py` |
-| CLI agent loop | `agent/core.py` |
+| Terminal CLI loop | `agent/core.py` |
 | Web/SSE runtime | `agent/web.py`, `agent/web_runtime.py` |
+| Desktop packaging | `electron/`, `selene-backend.spec` |
 | Tool execution | `agent/tool_runner.py` |
 | Tool registry | `tools/registry.py` |
 | Platform contracts | `agent/platform_runtime.py` |
 | Atomic persistence | `agent/persistence.py` |
-| Desktop packaging | `electron/`, `selene-backend.spec` |
 
 ## Configuration hierarchy
 

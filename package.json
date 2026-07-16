@@ -1,7 +1,7 @@
 {
   "name": "selene-agent",
   "version": "1.0.0",
-  "description": "Selene AI Agent",
+  "description": "Selene — local multi-interface AI orchestration layer",
   "author": "Rahul Biju <rahulbiju@example.com>",
   "main": "electron/main.js",
   "scripts": {

@@ -1,10 +1,20 @@
-# Selene (AI CLI Agent)
+# Selene (AI Orchestration Layer)
 
-A modular, tool-augmented local AI agent built with Python and [Ollama](https://ollama.com/). Inference, conversation storage, and document memory stay local; optional integrations such as Google Calendar and Google Tasks contact their provider only after user-authorized OAuth. The agent wraps a customised [Gemma 4](https://ai.google.dev/gemma) model with an autonomous tool-calling loop, real-time streaming output, and a persistent RAG (Retrieval-Augmented Generation) vault for long-term document memory.
+A modular, tool-augmented **local AI orchestration layer** built with Python and [Ollama](https://ollama.com/). Selene sits between you and a local model: it owns the agentic loop, tool registry, context management, RAG vault, and session lifecycle, then surfaces the same capabilities through multiple interfaces.
+
+Inference, conversation storage, and document memory stay local; optional integrations such as Google Calendar and Google Tasks contact their provider only after user-authorized OAuth. The orchestration core wraps a customised [Gemma 4](https://ai.google.dev/gemma) model with autonomous tool-calling, real-time streaming, and a persistent RAG (Retrieval-Augmented Generation) vault for long-term document memory.
 
 **Fedora Linux is the primary development and reference platform.** Windows 10/11 are supported natively (no WSL or Unix compatibility layer). See [docs/platform-support.md](docs/platform-support.md) for the full tool and backend matrix.
 
-By default the agent launches a **modern browser-based Web UI** with live streaming, collapsible thinking panels, and an interactive sidebar. The classic terminal interface is still available via `--cli`.
+### Interfaces (same orchestration core)
+
+| Interface | How to launch | Role |
+|-----------|---------------|------|
+| **Web UI** (default) | `python main.py` | Browser chat with SSE streaming, thinking panels, tool cards, and sidebar controls |
+| **Terminal CLI** | `python main.py --cli` | Rich terminal loop with slash commands and Markdown streaming |
+| **Desktop app** | Electron build (`package.json`) | Packaged Web UI + PyInstaller backend for installable distribution |
+
+All interfaces share `tool_runner`, the Ollama coordinator, managed model lifecycle, vault/RAG, and generation ownership rules — the product is the orchestration layer, not a single UI.
 
 ---
 
@@ -158,7 +168,7 @@ The agent manages this automatically:
 - **Fully local:** All inference runs through Ollama on your machine. No cloud dependencies for core functionality.
 - **Custom model:** Uses a `Modelfile` to wrap Gemma 4 (8B, Q4_K_M quantisation) with a tailored system prompt and optimised sampling parameters.
 - **Thinking visibility:** Streams the model's internal chain-of-thought reasoning before the final answer.
-- **Dual interface:** Launches the Web UI by default; pass `--cli` for the classic terminal experience.
+- **Multi-interface orchestration:** One agent core powering Web UI (default), Terminal CLI (`--cli`), and optional Electron desktop packaging.
 
 ### Web UI
 
@@ -351,25 +361,26 @@ Example routine definition:
 
 ## Architecture
 
+Selene is an **orchestration layer**: thin UI shells (terminal, web, desktop) sit on a shared agent runtime that owns tools, model lifecycle, context, and memory.
+
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  main.py  ·  --doctor | profile select | managed model | CLI/Web │
+│  Interfaces                                                      │
+│  Web UI (default)  ·  Terminal CLI (--cli)  ·  Electron desktop  │
 └───────────────┬──────────────────────────────┬───────────────────┘
-                │ --cli                        │ default
-                ▼                              ▼
-     ┌──────────────────┐           ┌──────────────────────────────┐
-     │  agent/core.py   │           │ agent/web.py + web_runtime   │
-     │  Terminal loop   │           │ Threaded HTTP + SSE          │
-     │  /commands       │           │ generation ownership         │
-     │  session save    │           │ /api/chat · /api/session/*   │
-     └────────┬─────────┘           └──────────────┬───────────────┘
-              │                                    │
-              └────────────────┬───────────────────┘
-                               ▼
+                │                              │
+     agent/core.py                    agent/web.py + web_runtime
+     Terminal loop · /commands        Threaded HTTP + SSE
+     session save                     generation ownership · APIs
+                │                              │
+                └────────────────┬─────────────┘
+                                 ▼
               ┌────────────────────────────────────┐
-              │ agent/ollama_runtime.py            │
-              │ shared coordinator (chat/title/    │
-              │ summary/embed/vision) + keep-alive │
+              │  Orchestration core (main.py entry)│
+              │  doctor · profiles · managed model │
+              │  agent/ollama_runtime.py           │
+              │  shared coordinator (chat/title/   │
+              │  summary/embed/vision) + keep-alive│
               └────────────────┬───────────────────┘
                                │
               ┌────────────────┼────────────────────┐
@@ -460,8 +471,8 @@ Critical JSON (sessions, aliases, routines metadata, and similar) is written wit
 
 ```bash
 # Clone the repository
-git clone https://github.com/RahulBiju-dev/AI-CLI-Agent.git
-cd AI-CLI-Agent
+git clone https://github.com/RahulBiju-dev/AI-Orchestration-Layer.git
+cd AI-Orchestration-Layer
 
 # Optional: PDF page images (text extraction works without this)
 sudo dnf install poppler-utils -y
@@ -484,8 +495,8 @@ python main.py
 ### Windows (native)
 
 ```powershell
-git clone https://github.com/RahulBiju-dev/AI-CLI-Agent.git
-cd AI-CLI-Agent
+git clone https://github.com/RahulBiju-dev/AI-Orchestration-Layer.git
+cd AI-Orchestration-Layer
 python -m pip install -r requirements.txt
 # dbus-python is skipped automatically via environment markers
 python main.py --doctor
@@ -605,7 +616,7 @@ You'll see the chat prompt:
 
 ```
 ╭───────────────────────────────────────╮
-│   Gemma CLI Agent  ·  type /help      │
+│   Selene  ·  type /help               │
 ╰───────────────────────────────────────╯
 
 >>>
@@ -767,8 +778,8 @@ Exact VRAM use depends on model weights, quantization, and concurrent workloads.
 ## Project Structure
 
 ```
-AI-CLI-Agent/
-├── main.py                    # Entry — doctor, profile, managed model, CLI/Web routing
+AI-Orchestration-Layer/
+├── main.py                    # Entry — doctor, profile, managed model, multi-interface routing
 ├── Modelfile                  # Ollama model definition (system prompt, parameters)
 ├── package.json               # Electron packaging; version drives artifact names
 ├── selene-backend.spec        # PyInstaller backend bundle
@@ -817,7 +828,7 @@ Runtime data is kept outside the checkout (see [Runtime data paths](#runtime-dat
 
 ### Key Design Decisions
 
-- **Web UI is the default** — `python main.py` starts the browser interface; the terminal CLI is opt-in via `--cli`.
+- **Multi-interface by design** — Web UI is the default (`python main.py`); Terminal CLI is opt-in via `--cli`; Electron packages the same orchestration backend for desktop distribution.
 - **Shared Ollama coordinator** — chat, titles, summaries, embeddings, and vision share one queue/slot policy so low-VRAM hosts stay stable.
 - **Managed model lifecycle** — rebuilds stage under a temporary alias, inspect, then publish to `selene`; the live alias is never pre-deleted.
 - **SSE over WebSockets** — token streaming uses standard HTTP with automatic reconnect behaviour and no upgrade handshake.

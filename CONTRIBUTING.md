@@ -1,6 +1,6 @@
-# Contributing to AI CLI Agent
+# Contributing to Selene (AI Orchestration Layer)
 
-Thank you for your interest in contributing to AI CLI Agent! We welcome contributions of all forms, including bug fixes, feature requests, documentation improvements, and new tool integrations.
+Thank you for your interest in contributing to Selene! We welcome contributions of all forms, including bug fixes, feature requests, documentation improvements, new tool integrations, and interface work across Web UI, Terminal CLI, and desktop packaging.
 
 The following guide outlines the process for proposing changes to this codebase.
 
@@ -55,7 +55,7 @@ See [AGENTS.md](AGENTS.md) for architecture ownership rules and [docs/platform-s
 
 ## Adding New Tools
 
-AI CLI Agent is designed to be highly modular. You can easily add a new tool by following these steps:
+Selene's orchestration core is designed to be highly modular. Tools registered once are available to every interface (Web, CLI, and desktop). You can add a new tool by following these steps:
 
 ### 1. Implement the Tool Function
 Create or edit a python file under the `tools/` directory (e.g., `tools/my_new_tool.py`).
