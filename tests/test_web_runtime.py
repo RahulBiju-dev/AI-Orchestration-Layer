@@ -650,6 +650,254 @@ class TestChatEventTerminalState(unittest.TestCase):
         self.assertFalse(service.chat.call_args_list[1].kwargs["think"])
         self.assertNotIn("tools", service.chat.call_args_list[1].kwargs)
 
+    def test_ultra_mode_exceeds_generic_tool_cap_forces_hard_search_and_reviews_draft(self):
+        from agent import web
+
+        call_number = 0
+
+        def chunk(content="", *, tool_call=None):
+            calls = [tool_call] if tool_call is not None else []
+            return SimpleNamespace(
+                message=SimpleNamespace(tool_calls=calls, thinking="", content=content),
+                prompt_eval_count=20,
+                eval_count=40,
+                done_reason="stop",
+            )
+
+        def chat(**kwargs):
+            nonlocal call_number
+            call_number += 1
+            if call_number <= 9:
+                tool_call = SimpleNamespace(
+                    function=SimpleNamespace(
+                        name="web_search",
+                        arguments={
+                            "query": f"distinct research query {call_number}",
+                            "difficulty": "easy",
+                        },
+                    )
+                )
+                return iter([chunk(tool_call=tool_call)])
+            if call_number == 10:
+                return iter([chunk("Unreviewed first draft")])
+            return iter([chunk("Reviewed final answer")])
+
+        service = MagicMock()
+        service.chat.side_effect = chat
+        executed_arguments = []
+
+        def execute(calls, **kwargs):
+            spec = web.normalize_tool_calls(calls)[0]
+            executed_arguments.append(dict(spec.arguments))
+            return [ToolCallResult(spec, json.dumps({"results": [spec.arguments["query"]]}))]
+
+        session = {
+            "runtime_profile": "manual",
+            "agent_mode": "ultra",
+            "options": {},
+            "history": True,
+            "system": "",
+            "think": False,
+            "format": "",
+        }
+        history = []
+        with (
+            patch.object(web, "TOOL_DISPATCH", {}),
+            patch.object(web, "OllamaService", return_value=service),
+            patch.object(web, "execute_tool_calls", side_effect=execute),
+            patch.object(web, "load_default_system_prompt", return_value=""),
+            patch.object(web, "prepare_messages_for_model", side_effect=lambda messages, *args, **kwargs: list(messages)),
+            patch.object(web, "tool_schemas_for_model", return_value=[]),
+            patch.object(web, "guarded_options_for_call", return_value={"num_ctx": 8192, "num_predict": 2048}),
+            patch.object(
+                web,
+                "effective_session_model_options",
+                return_value=(SimpleNamespace(num_ctx=8192), {"num_ctx": 8192, "num_predict": 2048}),
+            ),
+            patch.object(web, "title_temporary_session", return_value=None),
+            patch.object(web, "save_session_snapshot", return_value="conversation.json"),
+            patch.object(web, "list_saved_sessions", return_value=["conversation.json"]),
+        ):
+            events = list(web._generate_chat_events_impl(
+                "Investigate this carefully",
+                session,
+                history,
+                "conversation.json",
+                cancellation_token=CancellationToken(),
+                publish_global=False,
+                client_id="client-one",
+            ))
+
+        visible = "".join(
+            str(event.get("text") or event.get("content") or "")
+            for event in events
+            if event.get("type") == "content_chunk"
+        )
+        terminal = next(event for event in reversed(events) if event.get("type") == "done")
+        self.assertEqual(len(executed_arguments), 9)
+        self.assertTrue(all(args["difficulty"] == "hard" for args in executed_arguments))
+        self.assertEqual(visible, "Reviewed final answer")
+        self.assertNotIn("Unreviewed first draft", visible)
+        self.assertEqual(terminal["state"], "completed")
+        self.assertEqual(terminal["history"][-1]["content"], "Reviewed final answer")
+        self.assertEqual(service.chat.call_count, 11)
+        self.assertTrue(service.chat.call_args_list[-1].kwargs["think"])
+        self.assertNotIn("tools", service.chat.call_args_list[-1].kwargs)
+        review_status = next(
+            event for event in events
+            if event.get("message") == "Running Ultra's second independent review…"
+        )
+        self.assertEqual(review_status["activity_mode"], "ultra")
+
+    def test_deep_research_exceeds_tool_cap_after_context_scaled_search_plan(self):
+        from agent import web
+
+        call_number = 0
+
+        def chunk(content="", *, tool_call=None):
+            return SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[tool_call] if tool_call is not None else [],
+                    thinking="",
+                    content=content,
+                ),
+                prompt_eval_count=20,
+                eval_count=40,
+                done_reason="stop",
+            )
+
+        def chat(**kwargs):
+            nonlocal call_number
+            call_number += 1
+            if call_number == 1:
+                return iter([chunk(
+                    '{"intent":"compare evidence","queries":['
+                    '"topic overview","topic latest","topic primary sources","topic limitations"]}'
+                )])
+            if call_number <= 10:
+                tool_call = SimpleNamespace(
+                    function=SimpleNamespace(
+                        name="web_search",
+                        arguments={
+                            "query": f"distinct follow-up query {call_number - 1}",
+                            "difficulty": "easy",
+                        },
+                    )
+                )
+                return iter([chunk(tool_call=tool_call)])
+            return iter([chunk("Evidence-backed synthesis")])
+
+        service = MagicMock()
+        service.chat.side_effect = chat
+        executed_calls = []
+
+        def execute(calls, **kwargs):
+            executed_calls.extend(calls)
+            return [
+                ToolCallResult(
+                    spec,
+                    json.dumps({"results": [{"url": f"https://example.com/{spec.index}"}]}),
+                )
+                for spec in web.normalize_tool_calls(calls)
+            ]
+
+        runtime = SimpleNamespace(num_ctx=8192, chat_timeout_seconds=180.0)
+        session = {
+            "runtime_profile": "manual",
+            "agent_mode": "deep-research",
+            "options": {},
+            "history": True,
+            "system": "",
+            "think": False,
+            "format": "",
+        }
+        history = []
+        with (
+            patch.object(web, "TOOL_DISPATCH", {}),
+            patch.object(web, "get_runtime_config", return_value=runtime),
+            patch.object(web, "OllamaService", return_value=service),
+            patch.object(web, "execute_tool_calls", side_effect=execute),
+            patch.object(web, "load_default_system_prompt", return_value=""),
+            patch.object(web, "prepare_messages_for_model", side_effect=lambda messages, *args, **kwargs: list(messages)),
+            patch.object(web, "tool_schemas_for_model", return_value=[]),
+            patch.object(web, "guarded_options_for_call", return_value={"num_ctx": 8192, "num_predict": 2048}),
+            patch.object(
+                web,
+                "effective_session_model_options",
+                return_value=(runtime, {"num_ctx": 8192, "num_predict": 2048}),
+            ),
+            patch.object(web, "title_temporary_session", return_value=None),
+            patch.object(web, "save_session_snapshot", return_value="conversation.json"),
+            patch.object(web, "list_saved_sessions", return_value=["conversation.json"]),
+        ):
+            events = list(web._generate_chat_events_impl(
+                "Research this topic",
+                session,
+                history,
+                "conversation.json",
+                cancellation_token=CancellationToken(),
+                publish_global=False,
+                client_id="client-one",
+            ))
+
+        visible = "".join(
+            str(event.get("text") or event.get("content") or "")
+            for event in events
+            if event.get("type") == "content_chunk"
+        )
+        self.assertEqual(len(executed_calls), 13)
+        self.assertTrue(all(
+            call["function"]["arguments"]["difficulty"] == "hard"
+            for call in executed_calls
+        ))
+        self.assertEqual(visible, "Evidence-backed synthesis")
+        self.assertEqual(service.chat.call_count, 11)
+        self.assertEqual(service.chat.call_args_list[0].kwargs["format"], "json")
+        self.assertTrue(service.chat.call_args_list[1].kwargs["think"])
+        first_research_prompt = service.chat.call_args_list[1].kwargs["messages"]
+        self.assertTrue(any(
+            "[Deep Research auto-compaction checkpoint]" in str(message.get("content") or "")
+            for message in first_research_prompt
+        ))
+        self.assertTrue(any(
+            message.get("role") == "user" and message.get("content") == "Research this topic"
+            for message in first_research_prompt
+        ))
+        self.assertFalse(any(message.get("role") == "tool" for message in first_research_prompt))
+        compaction_messages = [
+            event.get("message", "")
+            for event in events
+            if event.get("type") == "status"
+            and "Auto-compacted Deep Research context" in event.get("message", "")
+        ]
+        self.assertEqual(compaction_messages, [
+            "Auto-compacted Deep Research context after 4 web searches.",
+            "Auto-compacted Deep Research context after 6 web searches.",
+            "Auto-compacted Deep Research context after 9 web searches.",
+            "Auto-compacted Deep Research context after 12 web searches.",
+        ])
+        enhanced_statuses = [
+            event for event in events
+            if event.get("activity_mode") == "deep-research"
+        ]
+        self.assertEqual(len(enhanced_statuses), 2)
+        self.assertEqual(
+            enhanced_statuses[0]["message"],
+            "Deep Research is planning a multi-query research pass…",
+        )
+        self.assertEqual(
+            enhanced_statuses[1]["message"],
+            "Deep Research is running 4 complementary web searches…",
+        )
+        self.assertEqual(
+            sum(message.get("role") == "tool" for message in history),
+            13,
+        )
+        self.assertFalse(any(
+            "[Deep Research auto-compaction checkpoint]" in str(message.get("content") or "")
+            for message in history
+        ))
+
 
 class TestHTTPGenerationLifecycle(unittest.TestCase):
     @staticmethod

@@ -10,26 +10,14 @@ const DEFAULT_SETTINGS = {
   system: "",
   history: true,
   format: "",
-  think: true
+  think: true,
+  agent_mode: "normal"
 };
 
-const RUNTIME_PROFILES = {
-  manual: {
-    label: "Manual",
-    description: "Use the bundled Modelfile defaults and preserve your explicit settings."
-  },
-  auto: {
-    label: "Auto",
-    description: "Inspect this device and choose a conservative hardware profile automatically."
-  },
-  "low-vram": {
-    label: "Low VRAM",
-    description: "Use conservative settings intended for GPUs with about 4 GiB of VRAM."
-  },
-  balanced: {
-    label: "Balanced",
-    description: "Use a larger batch and more concurrency on systems with additional headroom."
-  }
+const AGENT_MODES = {
+  normal: { label: "Fast", icon: "○" },
+  ultra: { label: "Ultra thinking", icon: "✦" },
+  "deep-research": { label: "Deep research", icon: "◎" }
 };
 
 const FALLBACK_MODEL_OPTIONS = {
@@ -153,6 +141,7 @@ const state = {
     thinkingBlock: null,
     thinkingContent: null,
     thinkingText: "",
+    modeStatusLine: null,
     activeToolBlocks: new Map()
   },
   slash: {
@@ -214,16 +203,12 @@ function bindElements() {
   el.settingsPanel = document.getElementById("settings-panel");
   el.settingsBackdrop = document.getElementById("settings-backdrop");
   el.slashMenu = document.getElementById("slash-menu");
-  el.themeBackdrop = document.getElementById("theme-backdrop");
-  el.themeDialog = document.getElementById("theme-dialog");
-  el.themeOptions = document.getElementById("theme-options");
-  el.themeButton = document.getElementById("theme-btn");
-  el.profileBackdrop = document.getElementById("profile-backdrop");
-  el.profileDialog = document.getElementById("profile-dialog");
-  el.profileChoice = document.getElementById("profile-choice");
-  el.profileChoiceDescription = document.getElementById("profile-choice-description");
-  el.profileRuntimeSummary = document.getElementById("profile-runtime-summary");
-  el.profileApply = document.getElementById("profile-apply");
+  el.modePicker = document.getElementById("mode-picker");
+  el.modeTrigger = document.getElementById("mode-trigger");
+  el.modeMenu = document.getElementById("mode-menu");
+  el.modeLabel = document.getElementById("mode-label");
+  el.modeIcon = document.getElementById("mode-icon");
+  el.modeClear = document.getElementById("mode-clear");
 }
 
 function bindEvents() {
@@ -254,6 +239,24 @@ function bindEvents() {
     if (!el.slashMenu?.contains(event.target) && event.target !== el.input) {
       closeSlashMenu();
     }
+    if (!el.modePicker?.contains(event.target)) closeModeMenu();
+  });
+
+  el.modeTrigger?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (state.isGenerating) return;
+    if (el.modeMenu?.hidden) openModeMenu();
+    else closeModeMenu();
+  });
+  el.modeTrigger?.addEventListener("keydown", handleModeTriggerKeydown);
+  el.modeMenu?.addEventListener("keydown", handleModeMenuKeydown);
+  el.modeMenu?.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-agent-mode]");
+    if (option) setAgentMode(option.dataset.agentMode);
+  });
+  el.modeClear?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setAgentMode("normal");
   });
 
   document.getElementById("new-chat-btn")?.addEventListener("click", newConversation);
@@ -475,9 +478,7 @@ function syncSettingsUI() {
   if (el.history) el.history.checked = state.settings.history !== false;
   if (el.think) el.think.checked = state.settings.think !== false;
   if (el.system) el.system.value = state.settings.system || "";
-  if (el.profileSetting && RUNTIME_PROFILES[state.settings.runtime_profile]) {
-    el.profileSetting.value = state.settings.runtime_profile;
-  }
+  updateModeUI();
 
   const temp = Number(
     state.settings.options?.temperature
@@ -529,82 +530,84 @@ function persistSettings() {
   return settingsWriteChain;
 }
 
-function showStartupProfileDialog() {
-  if (!el.profileBackdrop || !el.profileDialog || !el.profileChoice) return;
-  const requested = RUNTIME_PROFILES[state.settings.runtime_profile]
-    ? state.settings.runtime_profile
-    : "manual";
-  el.profileChoice.value = requested;
-  updateStartupProfileCopy();
-  updateStartupProfileRuntimeSummary();
-  el.profileBackdrop.hidden = false;
-  requestAnimationFrame(() => {
-    el.profileBackdrop.classList.add("open");
-    el.profileDialog.setAttribute("aria-hidden", "false");
-    el.profileChoice.focus();
+function activeAgentMode() {
+  return AGENT_MODES[state.settings.agent_mode] ? state.settings.agent_mode : "normal";
+}
+
+function updateModeUI() {
+  const mode = activeAgentMode();
+  const config = AGENT_MODES[mode];
+  const active = mode !== "normal";
+  if (el.modeLabel) el.modeLabel.textContent = config.label;
+  if (el.modeIcon) el.modeIcon.textContent = config.icon;
+  if (el.modePicker) {
+    el.modePicker.dataset.mode = mode;
+    el.modePicker.classList.toggle("active", active);
+    el.modePicker.classList.toggle("running", active && state.isGenerating);
+  }
+  if (el.modeClear) el.modeClear.hidden = !active;
+  el.modeMenu?.querySelectorAll("[data-agent-mode]").forEach((option) => {
+    const selected = option.dataset.agentMode === mode;
+    option.classList.toggle("selected", selected);
+    option.setAttribute("aria-checked", String(selected));
   });
 }
 
-function updateStartupProfileCopy() {
-  const profile = RUNTIME_PROFILES[el.profileChoice?.value] || RUNTIME_PROFILES.manual;
-  if (el.profileChoiceDescription) el.profileChoiceDescription.textContent = profile.description;
+function openModeMenu(focus = false) {
+  if (!el.modeMenu || !el.modeTrigger || state.isGenerating) return;
+  el.modeMenu.hidden = false;
+  el.modeTrigger.setAttribute("aria-expanded", "true");
+  requestAnimationFrame(() => el.modeMenu?.classList.add("open"));
+  if (focus) {
+    const selected = el.modeMenu.querySelector(".selected") || el.modeMenu.querySelector("[data-agent-mode]");
+    selected?.focus();
+  }
 }
 
-function updateStartupProfileRuntimeSummary() {
-  if (!el.profileRuntimeSummary) return;
-  const requested = RUNTIME_PROFILES[state.runtime?.requested_profile]?.label
-    || RUNTIME_PROFILES[state.settings.runtime_profile]?.label
-    || RUNTIME_PROFILES.manual.label;
-  const effective = RUNTIME_PROFILES[state.runtime?.profile]?.label || requested;
-  el.profileRuntimeSummary.textContent = requested === effective
-    ? `Current profile: ${effective}.`
-    : `Current profile: ${requested} selected ${effective} for this device.`;
+function closeModeMenu({ restoreFocus = false } = {}) {
+  if (!el.modeMenu || el.modeMenu.hidden) return;
+  el.modeMenu.classList.remove("open");
+  el.modeMenu.hidden = true;
+  el.modeTrigger?.setAttribute("aria-expanded", "false");
+  if (restoreFocus) el.modeTrigger?.focus();
 }
 
-async function applyStartupProfile() {
-  const selected = el.profileChoice?.value;
-  if (!RUNTIME_PROFILES[selected] || !el.profileApply || el.profileApply.disabled) return;
-
-  el.profileChoice.disabled = true;
-  el.profileApply.disabled = true;
-  el.profileApply.textContent = "Applying…";
-  state.settings.runtime_profile = selected;
-  const saved = await persistSettings();
-
-  el.profileChoice.disabled = false;
-  el.profileApply.disabled = false;
-  el.profileApply.textContent = "Continue";
-  if (!saved) return;
-
-  updateStartupProfileRuntimeSummary();
-  el.profileBackdrop.classList.remove("open");
-  el.profileDialog.setAttribute("aria-hidden", "true");
-  setTimeout(() => {
-    if (el.profileBackdrop) el.profileBackdrop.hidden = true;
-  }, 160);
-  el.input?.focus({ preventScroll: true });
+function setAgentMode(mode) {
+  if (!AGENT_MODES[mode] || state.isGenerating) return;
+  state.settings.agent_mode = mode;
+  updateModeUI();
+  closeModeMenu({ restoreFocus: true });
+  persistSettings();
 }
 
-function handleStartupProfileKeydown(event) {
+function handleModeTriggerKeydown(event) {
+  if (event.key === "Escape" && !el.modeMenu?.hidden) {
+    event.preventDefault();
+    closeModeMenu({ restoreFocus: true });
+    return;
+  }
+  if (!["Enter", " ", "ArrowDown", "ArrowUp"].includes(event.key)) return;
+  event.preventDefault();
+  openModeMenu(true);
+}
+
+function handleModeMenuKeydown(event) {
+  const options = [...el.modeMenu.querySelectorAll("[data-agent-mode]")];
+  if (!options.length) return;
   if (event.key === "Escape") {
     event.preventDefault();
+    closeModeMenu({ restoreFocus: true });
     return;
   }
-  if (event.key === "Enter" && event.target !== el.profileApply) {
-    event.preventDefault();
-    applyStartupProfile();
-    return;
-  }
-  if (event.key !== "Tab") return;
-
-  const focusable = [el.profileChoice, el.profileApply].filter((element) => element && !element.disabled);
-  if (!focusable.length) return;
-  const current = focusable.indexOf(document.activeElement);
-  const next = event.shiftKey
-    ? (current <= 0 ? focusable.length - 1 : current - 1)
-    : (current === focusable.length - 1 ? 0 : current + 1);
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
   event.preventDefault();
-  focusable[next].focus();
+  const current = Math.max(0, options.indexOf(document.activeElement));
+  let next = current;
+  if (event.key === "ArrowDown") next = (current + 1) % options.length;
+  if (event.key === "ArrowUp") next = (current - 1 + options.length) % options.length;
+  if (event.key === "Home") next = 0;
+  if (event.key === "End") next = options.length - 1;
+  options[next].focus();
 }
 
 function renderSessions() {
@@ -1048,12 +1051,7 @@ async function sendMessage() {
 
   stopVoiceInput({ abort: true, silent: true });
   closeSlashMenu();
-  if (handleThemeCommand(text)) {
-    el.input.value = "";
-    resizeComposer();
-    updateComposerState();
-    return;
-  }
+  closeModeMenu();
   appendUserMessage(text);
   if (!text.startsWith("/")) state.history.push({ role: "user", content: text });
   el.input.value = "";
@@ -1131,7 +1129,7 @@ function handleStreamEvent(event, generation) {
       break;
     case "status":
       if (!visible) break;
-      appendStatus(event.message || "");
+      appendStatus(event.message || "", event.activity_mode || "");
       break;
     case "thinking_start":
       if (!visible) break;
@@ -1204,6 +1202,7 @@ function handleStreamEvent(event, generation) {
       break;
     case "content_chunk":
       if (!visible) break;
+      settleModeStatus();
       ensureAssistantStack();
       if (!state.stream.assistantBubble) {
         state.stream.thinkingBlock?.classList.remove("open", "running");
@@ -1269,7 +1268,13 @@ function resetStream() {
   state.stream.thinkingBlock = null;
   state.stream.thinkingContent = null;
   state.stream.thinkingText = "";
+  state.stream.modeStatusLine = null;
   state.stream.activeToolBlocks.clear();
+}
+
+function settleModeStatus() {
+  state.stream.modeStatusLine?.classList.remove("running");
+  state.stream.modeStatusLine = null;
 }
 
 function settleStreamActivity(interrupted = false) {
@@ -1277,6 +1282,7 @@ function settleStreamActivity(interrupted = false) {
   // aborted or the connection fails. Settle the DOM before resetStream drops
   // the only references to these still-visible elements.
   state.stream.thinkingBlock?.classList.remove("open", "running");
+  settleModeStatus();
   for (const block of state.stream.activeToolBlocks.values()) {
     block.classList.remove("running");
     if (interrupted) {
@@ -1324,10 +1330,16 @@ function stopGeneration({ refresh = true } = {}) {
   if (refresh) refreshSessions().catch(() => {});
 }
 
-function appendStatus(text) {
+function appendStatus(text, activityMode = "") {
+  settleModeStatus();
   const status = document.createElement("div");
   status.className = "status-line";
   status.textContent = text;
+  if (activityMode === "ultra" || activityMode === "deep-research") {
+    status.classList.add("mode-activity", "running");
+    status.dataset.mode = activityMode;
+    state.stream.modeStatusLine = status;
+  }
   el.messages.appendChild(status);
   scrollToBottom();
 }
@@ -1652,6 +1664,15 @@ async function loadSession(name) {
 function updateComposerState() {
   const hasText = Boolean(el.input?.value.trim());
   if (el.mic) el.mic.disabled = !state.voice.recognition || state.isGenerating;
+  if (el.modeTrigger) el.modeTrigger.disabled = state.isGenerating;
+  if (el.modeClear) el.modeClear.disabled = state.isGenerating;
+  if (el.modePicker) {
+    el.modePicker.classList.toggle(
+      "running",
+      state.isGenerating && activeAgentMode() !== "normal"
+    );
+  }
+  if (state.isGenerating) closeModeMenu();
   if (el.send) {
     el.send.disabled = !state.isGenerating && !hasText;
     el.send.textContent = state.isGenerating ? "Stop" : "Send";
