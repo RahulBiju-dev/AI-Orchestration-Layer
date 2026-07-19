@@ -31,6 +31,7 @@ from agent.core import (
     OUTPUT_CONTINUATION_PROMPT,
     _check_and_compact_history,
     _automatic_vault_index_tool_call,
+    _is_progressing_vault_index_round,
     _new_vault_index_loop_state,
     _should_reexecute_turn_duplicate,
     _tool_loop_stop_message,
@@ -70,6 +71,22 @@ from agent.web_runtime import (
     TerminalState,
     normalize_runtime_id,
 )
+from agent.modes import (
+    AGENT_MODE_DEEP_RESEARCH,
+    AGENT_MODE_NORMAL,
+    AGENT_MODE_ULTRA,
+    DEEP_RESEARCH_COMPACT_INTERVAL,
+    DEEP_RESEARCH_PLANNER_PROMPT,
+    DEEP_RESEARCH_SYNTHESIS_PROMPT,
+    ULTRA_MODE_PROMPT,
+    ULTRA_REVIEW_PROMPT,
+    compact_deep_research_messages,
+    force_high_tool_difficulty,
+    normalize_agent_mode,
+    parse_research_queries,
+    research_query_count,
+    tool_call_round_signature,
+)
 from tools.registry import TOOL_DISPATCH, TOOL_SCHEMAS, get_tool_metadata
 
 # Setup directories
@@ -89,6 +106,7 @@ def _session_from_runtime(runtime: RuntimeConfig) -> dict:
         "history": True,
         "format": "",
         "think": True,
+        "agent_mode": AGENT_MODE_NORMAL,
     }
 
 
@@ -149,6 +167,10 @@ def _normalize_session_settings(session: dict, *, fallback: dict | None = None) 
     runtime = get_runtime_config({**merged, "options": options})
     merged["options"] = deepcopy(options)
     merged["runtime_profile"] = runtime.requested_profile.value
+    try:
+        merged["agent_mode"] = normalize_agent_mode(merged.get("agent_mode"))
+    except ValueError as exc:
+        raise RuntimeConfigurationError(str(exc)) from exc
     for field in ("verbose", "wordwrap", "history", "think"):
         if not isinstance(merged.get(field), bool):
             raise RuntimeConfigurationError(f"{field} must be true or false")
@@ -1091,6 +1113,228 @@ def execute_command_web(
 
 # ── Chat Stream Generator ─────────────────────────────────────────────
 
+def _deep_research_plan_events(
+    user_input: str,
+    session_data: dict,
+    runtime: RuntimeConfig,
+    operation_owner: str,
+    cancellation_token: CancellationToken,
+):
+    """Stream the intent-planning pass and return context-scaled search queries."""
+    query_count = research_query_count(runtime.num_ctx)
+    planning_messages = [{
+        "role": "user",
+        "content": DEEP_RESEARCH_PLANNER_PROMPT.format(
+            query_count=query_count,
+            user_input=user_input,
+        ),
+    }]
+    options = dict(effective_session_model_options(session_data)[1])
+    options["num_predict"] = min(512, int(options.get("num_predict", 512)))
+    try:
+        guarded_options = guarded_options_for_call(
+            planning_messages,
+            options,
+            tools=None,
+        )
+        stream = OllamaService(runtime).chat(
+            kind=OperationKind.CHAT,
+            owner=f"{operation_owner}:research-plan",
+            cancellation_token=cancellation_token,
+            operation_timeout=runtime.chat_timeout_seconds,
+            model=MODEL_NAME,
+            messages=planning_messages,
+            stream=True,
+            think=True,
+            format="json",
+            options=guarded_options,
+        )
+    except Exception as exc:
+        yield {
+            "type": "status",
+            "message": f"Research planning used fallback queries: {exc}",
+            "color": "yellow",
+        }
+        return parse_research_queries("", user_input, query_count)
+
+    content = ""
+    thinking_open = False
+    planning_error: Exception | None = None
+    try:
+        for chunk in stream:
+            cancellation_token.raise_if_cancelled()
+            msg = getattr(chunk, "message", None)
+            if msg is None:
+                continue
+            thinking = getattr(msg, "thinking", None) or ""
+            if thinking:
+                if not thinking_open:
+                    thinking_open = True
+                    yield {"type": "thinking_start"}
+                yield {"type": "thinking_chunk", "text": thinking}
+            content += getattr(msg, "content", None) or ""
+    except OperationCancelled:
+        raise
+    except Exception as exc:
+        planning_error = exc
+    finally:
+        if hasattr(stream, "close"):
+            try:
+                stream.close()
+            except Exception:
+                pass
+    if thinking_open:
+        yield {"type": "thinking_end"}
+    if planning_error is not None:
+        yield {
+            "type": "status",
+            "message": f"Research planning used fallback queries: {planning_error}",
+            "color": "yellow",
+        }
+        return parse_research_queries("", user_input, query_count)
+    return parse_research_queries(content, user_input, query_count)
+
+
+def _deep_research_search_events(
+    queries: list[str],
+    cancellation_token: CancellationToken,
+):
+    """Execute the planned hard-difficulty searches and return transcript messages."""
+    calls = [
+        {
+            "function": {
+                "name": "web_search",
+                "arguments": {
+                    "query": query,
+                    "difficulty": "hard",
+                    # Deep Research reads the top page for every query instead
+                    # of relying only on result snippets. Context trimming
+                    # truthfully bounds the combined evidence afterward.
+                    "include_content": True,
+                    "max_pages": 1,
+                    "max_chars_per_page": 4000,
+                },
+            }
+        }
+        for query in queries
+    ]
+    yield {"type": "tool_calls_start", "calls": calls}
+    specs = normalize_tool_calls(calls)
+    for index, spec in enumerate(specs):
+        yield {
+            "type": "tool_start",
+            "id": f"research-{index}",
+            "name": spec.name,
+            "arguments": spec.arguments,
+        }
+
+    results_by_raw_id = {
+        id(result.spec.raw): result
+        for result in execute_tool_calls(
+            calls,
+            cancellation_token=cancellation_token,
+        )
+    }
+    tool_messages: list[dict] = []
+    for index, spec in enumerate(specs):
+        result = results_by_raw_id[id(spec.raw)]
+        yield {
+            "type": "tool_end",
+            "id": f"research-{index}",
+            "name": result.spec.name,
+            "result": result.content,
+        }
+        tool_messages.append(result.as_tool_message())
+    return calls, tool_messages
+
+
+def _ultra_review_events(
+    user_input: str,
+    draft_content: str,
+    base_messages: list[dict],
+    session_data: dict,
+    runtime: RuntimeConfig,
+    operation_owner: str,
+    cancellation_token: CancellationToken,
+):
+    """Run Ultra's independent second reasoning pass and stream only its answer."""
+    review_messages = prepare_messages_for_model(
+        [
+            *base_messages,
+            {"role": "assistant", "content": draft_content},
+            {
+                "role": "user",
+                "content": ULTRA_REVIEW_PROMPT.format(user_input=user_input),
+            },
+        ],
+        session_data,
+        tools=None,
+    )
+    try:
+        guarded_options = guarded_options_for_call(
+            review_messages,
+            effective_session_model_options(session_data)[1],
+            tools=None,
+        )
+        kwargs = {
+            "model": MODEL_NAME,
+            "messages": review_messages,
+            "stream": True,
+            "think": True,
+            "options": guarded_options,
+        }
+        if session_data.get("format"):
+            kwargs["format"] = session_data["format"]
+        stream = OllamaService(runtime).chat(
+            kind=OperationKind.CHAT,
+            owner=f"{operation_owner}:ultra-review",
+            cancellation_token=cancellation_token,
+            operation_timeout=runtime.chat_timeout_seconds,
+            **kwargs,
+        )
+    except Exception as exc:
+        yield {
+            "type": "status",
+            "message": f"Second review was unavailable; returning the complete first draft: {exc}",
+            "color": "yellow",
+        }
+        return "", ""
+
+    content = ""
+    thinking = ""
+    thinking_open = False
+    try:
+        for chunk in stream:
+            cancellation_token.raise_if_cancelled()
+            msg = getattr(chunk, "message", None)
+            if msg is None:
+                continue
+            thinking_chunk = getattr(msg, "thinking", None) or ""
+            if thinking_chunk:
+                if not thinking_open:
+                    thinking_open = True
+                    yield {"type": "thinking_start"}
+                thinking += thinking_chunk
+                yield {"type": "thinking_chunk", "text": thinking_chunk}
+                continue
+            content_chunk = getattr(msg, "content", None) or ""
+            if content_chunk:
+                if thinking_open:
+                    thinking_open = False
+                    yield {"type": "thinking_end"}
+                content += content_chunk
+                yield {"type": "content_chunk", "text": content_chunk}
+    finally:
+        if hasattr(stream, "close"):
+            try:
+                stream.close()
+            except Exception:
+                pass
+    if thinking_open:
+        yield {"type": "thinking_end"}
+    return content, thinking
+
+
 def _generate_chat_events_impl(
     user_input: str,
     session_data: dict,
@@ -1120,6 +1364,7 @@ def _generate_chat_events_impl(
     cancellation_token = cancellation_token or CancellationToken()
     cancellation_token.raise_if_cancelled()
     runtime = get_runtime_config(session_data)
+    agent_mode = normalize_agent_mode(session_data.get("agent_mode"))
     generation_start_session = deepcopy(session_data)
     operation_owner = f"web:{generation_id or threading.get_ident()}"
     origin_name = session_name or GLOBAL_STATE.get("active_session_name", "Active Session")
@@ -1346,11 +1591,121 @@ def _generate_chat_events_impl(
             messages_to_send.append(pre_tool_message)
         messages_to_send.append({"role": "user", "content": user_input})
         messages_to_send = prepare_messages_for_model(messages_to_send, session_data, tools=TOOL_SCHEMAS)
+
+    initial_research_calls: list[dict] = []
+    initial_research_results: list[dict] = []
+    deep_research_search_count = 0
+    deep_research_next_compaction = DEEP_RESEARCH_COMPACT_INTERVAL
+    deep_research_compacted_prefix: list[dict] | None = None
+    deep_research_history_checkpoint_index = 0
+    deep_research_checkpoint_chars = max(3000, min(16000, int(runtime.num_ctx)))
+    if agent_mode == AGENT_MODE_ULTRA:
+        messages_to_send = prepare_messages_for_model(
+            [
+                *messages_to_send,
+                {
+                    "role": "user",
+                    "content": ULTRA_MODE_PROMPT.format(user_input=user_input),
+                },
+            ],
+            session_data,
+            tools=TOOL_SCHEMAS,
+        )
+    elif agent_mode == AGENT_MODE_DEEP_RESEARCH:
+        yield {
+            "type": "status",
+            "message": "Deep Research is planning a multi-query research pass…",
+            "color": "blue",
+            "activity_mode": AGENT_MODE_DEEP_RESEARCH,
+        }
+        queries = yield from _deep_research_plan_events(
+            user_input,
+            session_data,
+            runtime,
+            operation_owner,
+            cancellation_token,
+        )
+        cancellation_token.raise_if_cancelled()
+        yield {
+            "type": "status",
+            "message": f"Deep Research is running {len(queries)} complementary web searches…",
+            "color": "blue",
+            "activity_mode": AGENT_MODE_DEEP_RESEARCH,
+        }
+        initial_research_calls, initial_research_results = yield from _deep_research_search_events(
+            queries,
+            cancellation_token,
+        )
+        research_assistant = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": initial_research_calls,
+        }
+        if session_data.get("history", True):
+            history_data.append(research_assistant)
+            history_data.extend(initial_research_results)
+            save_session_snapshot(
+                origin_name,
+                session_data,
+                history_data,
+                generation_start_session=generation_start_session,
+            )
+            research_base = list(history_data)
+        else:
+            research_base = [
+                *messages_to_send,
+                research_assistant,
+                *initial_research_results,
+            ]
+        deep_research_search_count = len(initial_research_results)
+        if deep_research_search_count >= deep_research_next_compaction:
+            deep_research_compacted_prefix, _ = compact_deep_research_messages(
+                research_base,
+                user_input,
+                max_checkpoint_chars=deep_research_checkpoint_chars,
+            )
+            research_base = deep_research_compacted_prefix
+            if session_data.get("history", True):
+                deep_research_history_checkpoint_index = len(history_data)
+            while deep_research_next_compaction <= deep_research_search_count:
+                deep_research_next_compaction += DEEP_RESEARCH_COMPACT_INTERVAL
+            yield {
+                "type": "status",
+                "message": (
+                    "Auto-compacted Deep Research context after "
+                    f"{deep_research_search_count} web searches."
+                ),
+                "color": "blue",
+            }
+        messages_to_send = prepare_messages_for_model(
+            [
+                *research_base,
+                {
+                    "role": "user",
+                    "content": (
+                        build_tool_continuation_prompt(user_input)
+                        + "\n\n"
+                        + DEEP_RESEARCH_SYNTHESIS_PROMPT.format(
+                            user_input=user_input,
+                        )
+                    ),
+                },
+            ],
+            session_data,
+            tools=TOOL_SCHEMAS,
+            extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
+        )
         
     # 4. Stream response loop (supports tool execution and model chain-calling)
     executed_tool_calls: dict[str, dict] = {}
+    for call, result in zip(initial_research_calls, initial_research_results):
+        turn_key = _tool_call_turn_key(call)
+        if turn_key:
+            executed_tool_calls[turn_key] = dict(result)
     vault_index_loop_state = _new_vault_index_loop_state()
-    tool_rounds = 0
+    tool_rounds = 1 if initial_research_calls else 0
+    unbounded_last_tool_signature = ""
+    unbounded_repeated_tool_rounds = 0
     output_continuation_rounds = 0
     output_continuation_base: list[dict] | None = None
     accumulated_content = ""
@@ -1400,7 +1755,15 @@ def _generate_chat_events_impl(
             "model": MODEL_NAME,
             "messages": messages_to_send,
             "stream": True,
-            "think": False if continuing_output else session_data.get("think", True),
+            "think": (
+                False
+                if continuing_output
+                else (
+                    True
+                    if agent_mode in {AGENT_MODE_ULTRA, AGENT_MODE_DEEP_RESEARCH}
+                    else session_data.get("think", True)
+                )
+            ),
         }
         if session_data.get("format"):
             kwargs["format"] = session_data["format"]
@@ -1476,7 +1839,10 @@ def _generate_chat_events_impl(
                         in_thinking = False
                         yield {"type": "thinking_end"}
                     content_buf += content_chunk
-                    if not suppress_vault_completion_claim:
+                    if (
+                        not suppress_vault_completion_claim
+                        and agent_mode != AGENT_MODE_ULTRA
+                    ):
                         yield {"type": "content_chunk", "text": content_chunk}
         finally:
             if hasattr(stream, "close"):
@@ -1487,6 +1853,12 @@ def _generate_chat_events_impl(
                 
         if in_thinking:
             yield {"type": "thinking_end"}
+
+        if (
+            tool_calls
+            and agent_mode in {AGENT_MODE_ULTRA, AGENT_MODE_DEEP_RESEARCH}
+        ):
+            tool_calls = force_high_tool_difficulty(tool_calls)
 
         if (
             not tool_calls
@@ -1605,6 +1977,36 @@ def _generate_chat_events_impl(
                 "saved_sessions": list_saved_sessions(),
             }
             break
+
+        if not tool_calls and agent_mode == AGENT_MODE_ULTRA and content_buf:
+            cancellation_token.raise_if_cancelled()
+            yield {
+                "type": "status",
+                "message": "Running Ultra's second independent review…",
+                "color": "blue",
+                "activity_mode": AGENT_MODE_ULTRA,
+            }
+            reviewed_content, reviewed_thinking = yield from _ultra_review_events(
+                user_input,
+                content_buf,
+                output_continuation_base or messages_to_send,
+                session_data,
+                runtime,
+                operation_owner,
+                cancellation_token,
+            )
+            if reviewed_content:
+                content_buf = reviewed_content
+                assistant_msg["content"] = reviewed_content
+                if reviewed_thinking:
+                    thinking_buf = "\n\n".join(
+                        part for part in (thinking_buf, reviewed_thinking) if part
+                    )
+                    assistant_msg["thinking"] = thinking_buf
+            else:
+                # The first draft was intentionally withheld while the review
+                # ran. Never finish the turn without showing the usable draft.
+                yield {"type": "content_chunk", "text": content_buf}
             
         # If there are no tool calls, this turn is completed
         if not tool_calls:
@@ -1641,11 +2043,35 @@ def _generate_chat_events_impl(
             }
             break
 
-        message = _tool_loop_stop_message(
-            tool_rounds,
-            tool_calls,
-            vault_index_loop_state,
-        )
+        if agent_mode in {AGENT_MODE_ULTRA, AGENT_MODE_DEEP_RESEARCH}:
+            signature = tool_call_round_signature(tool_calls)
+            progressing_vault = _is_progressing_vault_index_round(
+                tool_calls,
+                vault_index_loop_state,
+            )
+            if signature == unbounded_last_tool_signature and not progressing_vault:
+                unbounded_repeated_tool_rounds += 1
+            else:
+                unbounded_repeated_tool_rounds = 0
+            unbounded_last_tool_signature = signature
+            mode_label = (
+                "Ultra Thinking"
+                if agent_mode == AGENT_MODE_ULTRA
+                else "Deep Research"
+            )
+            message = (
+                f"{mode_label} stopped a repeated no-progress tool loop. "
+                "The ordinary tool-round limit was suspended, but the model requested "
+                "the same tool batch three times without new evidence."
+                if unbounded_repeated_tool_rounds >= 2
+                else None
+            )
+        else:
+            message = _tool_loop_stop_message(
+                tool_rounds,
+                tool_calls,
+                vault_index_loop_state,
+            )
         if message:
             yield {"type": "status", "message": message, "color": "yellow"}
             yield {"type": "content_chunk", "text": message}
@@ -1766,6 +2192,40 @@ def _generate_chat_events_impl(
             messages_to_send.append(assistant_msg)
             messages_to_send.extend(tool_results)
 
+        research_compaction_due = False
+        if agent_mode == AGENT_MODE_DEEP_RESEARCH:
+            deep_research_search_count += sum(
+                spec.name == "web_search" for spec in execution_specs
+            )
+            research_compaction_due = (
+                deep_research_search_count >= deep_research_next_compaction
+            )
+            if research_compaction_due:
+                compaction_source = (
+                    history_data
+                    if session_data.get("history", True)
+                    else messages_to_send
+                )
+                deep_research_compacted_prefix, _ = compact_deep_research_messages(
+                    compaction_source,
+                    user_input,
+                    max_checkpoint_chars=deep_research_checkpoint_chars,
+                )
+                if session_data.get("history", True):
+                    deep_research_history_checkpoint_index = len(history_data)
+                else:
+                    messages_to_send = list(deep_research_compacted_prefix)
+                while deep_research_next_compaction <= deep_research_search_count:
+                    deep_research_next_compaction += DEEP_RESEARCH_COMPACT_INTERVAL
+                yield {
+                    "type": "status",
+                    "message": (
+                        "Auto-compacted Deep Research context after "
+                        f"{deep_research_search_count} web searches."
+                    ),
+                    "color": "blue",
+                }
+
         if vault_index_loop_state.get("blocked_reason"):
             message = str(vault_index_loop_state["blocked_reason"])
             if session_data.get("history", True):
@@ -1788,16 +2248,35 @@ def _generate_chat_events_impl(
             }
             break
 
+        continuation_prompt = build_tool_continuation_prompt(
+            user_input,
+            vault_index_loop_state,
+        )
+        if agent_mode == AGENT_MODE_ULTRA:
+            continuation_prompt += "\n\n" + ULTRA_MODE_PROMPT.format(
+                user_input=user_input,
+            )
+        elif agent_mode == AGENT_MODE_DEEP_RESEARCH:
+            continuation_prompt += "\n\n" + DEEP_RESEARCH_SYNTHESIS_PROMPT.format(
+                user_input=user_input,
+            )
+
         if session_data.get("history", True):
             reminder = {
                 "role": "user",
-                "content": build_tool_continuation_prompt(
-                    user_input,
-                    vault_index_loop_state,
-                ),
+                "content": continuation_prompt,
             }
+            research_history = history_data
+            if (
+                agent_mode == AGENT_MODE_DEEP_RESEARCH
+                and deep_research_compacted_prefix is not None
+            ):
+                research_history = [
+                    *deep_research_compacted_prefix,
+                    *history_data[deep_research_history_checkpoint_index:],
+                ]
             messages_to_send = prepare_messages_for_model(
-                [*history_data, reminder],
+                [*research_history, reminder],
                 session_data,
                 tools=TOOL_SCHEMAS,
                 extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
@@ -1805,10 +2284,7 @@ def _generate_chat_events_impl(
         else:
             messages_to_send.append({
                 "role": "user",
-                "content": build_tool_continuation_prompt(
-                    user_input,
-                    vault_index_loop_state,
-                ),
+                "content": continuation_prompt,
             })
             messages_to_send = prepare_messages_for_model(
                 messages_to_send,

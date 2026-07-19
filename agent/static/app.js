@@ -4,13 +4,20 @@ const DEFAULT_SETTINGS = {
   // Explicit per-session overrides only. Effective values come from the
   // backend-selected hardware profile.
   options: {},
-  runtime_profile: "auto",
+  runtime_profile: "manual",
   verbose: true,
   wordwrap: true,
   system: "",
   history: true,
   format: "",
-  think: true
+  think: true,
+  agent_mode: "normal"
+};
+
+const AGENT_MODES = {
+  normal: { label: "Fast", icon: "○" },
+  ultra: { label: "Ultra thinking", icon: "✦" },
+  "deep-research": { label: "Deep research", icon: "◎" }
 };
 
 const FALLBACK_MODEL_OPTIONS = {
@@ -18,7 +25,7 @@ const FALLBACK_MODEL_OPTIONS = {
   top_p: 0.85,
   top_k: 40,
   repeat_penalty: 1.08,
-  num_predict: 768,
+  num_predict: 2048,
   num_batch: 128
 };
 
@@ -100,6 +107,7 @@ const state = {
     thinkingBlock: null,
     thinkingContent: null,
     thinkingText: "",
+    modeStatusLine: null,
     activeToolBlocks: new Map()
   },
   slash: {
@@ -157,6 +165,12 @@ function bindElements() {
   el.settingsPanel = document.getElementById("settings-panel");
   el.settingsBackdrop = document.getElementById("settings-backdrop");
   el.slashMenu = document.getElementById("slash-menu");
+  el.modePicker = document.getElementById("mode-picker");
+  el.modeTrigger = document.getElementById("mode-trigger");
+  el.modeMenu = document.getElementById("mode-menu");
+  el.modeLabel = document.getElementById("mode-label");
+  el.modeIcon = document.getElementById("mode-icon");
+  el.modeClear = document.getElementById("mode-clear");
 }
 
 function bindEvents() {
@@ -187,6 +201,24 @@ function bindEvents() {
     if (!el.slashMenu?.contains(event.target) && event.target !== el.input) {
       closeSlashMenu();
     }
+    if (!el.modePicker?.contains(event.target)) closeModeMenu();
+  });
+
+  el.modeTrigger?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (state.isGenerating) return;
+    if (el.modeMenu?.hidden) openModeMenu();
+    else closeModeMenu();
+  });
+  el.modeTrigger?.addEventListener("keydown", handleModeTriggerKeydown);
+  el.modeMenu?.addEventListener("keydown", handleModeMenuKeydown);
+  el.modeMenu?.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-agent-mode]");
+    if (option) setAgentMode(option.dataset.agentMode);
+  });
+  el.modeClear?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setAgentMode("normal");
   });
 
   document.getElementById("new-chat-btn")?.addEventListener("click", newConversation);
@@ -387,6 +419,7 @@ function syncSettingsUI() {
   if (el.history) el.history.checked = state.settings.history !== false;
   if (el.think) el.think.checked = state.settings.think !== false;
   if (el.system) el.system.value = state.settings.system || "";
+  updateModeUI();
 
   const temp = Number(
     state.settings.options?.temperature
@@ -434,6 +467,86 @@ function persistSettings() {
     }
   });
   return settingsWriteChain;
+}
+
+function activeAgentMode() {
+  return AGENT_MODES[state.settings.agent_mode] ? state.settings.agent_mode : "normal";
+}
+
+function updateModeUI() {
+  const mode = activeAgentMode();
+  const config = AGENT_MODES[mode];
+  const active = mode !== "normal";
+  if (el.modeLabel) el.modeLabel.textContent = config.label;
+  if (el.modeIcon) el.modeIcon.textContent = config.icon;
+  if (el.modePicker) {
+    el.modePicker.dataset.mode = mode;
+    el.modePicker.classList.toggle("active", active);
+    el.modePicker.classList.toggle("running", active && state.isGenerating);
+  }
+  if (el.modeClear) el.modeClear.hidden = !active;
+  el.modeMenu?.querySelectorAll("[data-agent-mode]").forEach((option) => {
+    const selected = option.dataset.agentMode === mode;
+    option.classList.toggle("selected", selected);
+    option.setAttribute("aria-checked", String(selected));
+  });
+}
+
+function openModeMenu(focus = false) {
+  if (!el.modeMenu || !el.modeTrigger || state.isGenerating) return;
+  el.modeMenu.hidden = false;
+  el.modeTrigger.setAttribute("aria-expanded", "true");
+  requestAnimationFrame(() => el.modeMenu?.classList.add("open"));
+  if (focus) {
+    const selected = el.modeMenu.querySelector(".selected") || el.modeMenu.querySelector("[data-agent-mode]");
+    selected?.focus();
+  }
+}
+
+function closeModeMenu({ restoreFocus = false } = {}) {
+  if (!el.modeMenu || el.modeMenu.hidden) return;
+  el.modeMenu.classList.remove("open");
+  el.modeMenu.hidden = true;
+  el.modeTrigger?.setAttribute("aria-expanded", "false");
+  if (restoreFocus) el.modeTrigger?.focus();
+}
+
+function setAgentMode(mode) {
+  if (!AGENT_MODES[mode] || state.isGenerating) return;
+  state.settings.agent_mode = mode;
+  updateModeUI();
+  closeModeMenu({ restoreFocus: true });
+  persistSettings();
+}
+
+function handleModeTriggerKeydown(event) {
+  if (event.key === "Escape" && !el.modeMenu?.hidden) {
+    event.preventDefault();
+    closeModeMenu({ restoreFocus: true });
+    return;
+  }
+  if (!["Enter", " ", "ArrowDown", "ArrowUp"].includes(event.key)) return;
+  event.preventDefault();
+  openModeMenu(true);
+}
+
+function handleModeMenuKeydown(event) {
+  const options = [...el.modeMenu.querySelectorAll("[data-agent-mode]")];
+  if (!options.length) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeModeMenu({ restoreFocus: true });
+    return;
+  }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const current = Math.max(0, options.indexOf(document.activeElement));
+  let next = current;
+  if (event.key === "ArrowDown") next = (current + 1) % options.length;
+  if (event.key === "ArrowUp") next = (current - 1 + options.length) % options.length;
+  if (event.key === "Home") next = 0;
+  if (event.key === "End") next = options.length - 1;
+  options[next].focus();
 }
 
 function renderSessions() {
@@ -823,6 +936,7 @@ async function sendMessage() {
 
   stopVoiceInput({ abort: true, silent: true });
   closeSlashMenu();
+  closeModeMenu();
   appendUserMessage(text);
   if (!text.startsWith("/")) state.history.push({ role: "user", content: text });
   el.input.value = "";
@@ -900,7 +1014,7 @@ function handleStreamEvent(event, generation) {
       break;
     case "status":
       if (!visible) break;
-      appendStatus(event.message || "");
+      appendStatus(event.message || "", event.activity_mode || "");
       break;
     case "thinking_start":
       if (!visible) break;
@@ -973,6 +1087,7 @@ function handleStreamEvent(event, generation) {
       break;
     case "content_chunk":
       if (!visible) break;
+      settleModeStatus();
       ensureAssistantStack();
       if (!state.stream.assistantBubble) {
         state.stream.thinkingBlock?.classList.remove("open", "running");
@@ -1038,7 +1153,13 @@ function resetStream() {
   state.stream.thinkingBlock = null;
   state.stream.thinkingContent = null;
   state.stream.thinkingText = "";
+  state.stream.modeStatusLine = null;
   state.stream.activeToolBlocks.clear();
+}
+
+function settleModeStatus() {
+  state.stream.modeStatusLine?.classList.remove("running");
+  state.stream.modeStatusLine = null;
 }
 
 function settleStreamActivity(interrupted = false) {
@@ -1046,6 +1167,7 @@ function settleStreamActivity(interrupted = false) {
   // aborted or the connection fails. Settle the DOM before resetStream drops
   // the only references to these still-visible elements.
   state.stream.thinkingBlock?.classList.remove("open", "running");
+  settleModeStatus();
   for (const block of state.stream.activeToolBlocks.values()) {
     block.classList.remove("running");
     if (interrupted) {
@@ -1093,10 +1215,16 @@ function stopGeneration({ refresh = true } = {}) {
   if (refresh) refreshSessions().catch(() => {});
 }
 
-function appendStatus(text) {
+function appendStatus(text, activityMode = "") {
+  settleModeStatus();
   const status = document.createElement("div");
   status.className = "status-line";
   status.textContent = text;
+  if (activityMode === "ultra" || activityMode === "deep-research") {
+    status.classList.add("mode-activity", "running");
+    status.dataset.mode = activityMode;
+    state.stream.modeStatusLine = status;
+  }
   el.messages.appendChild(status);
   scrollToBottom();
 }
@@ -1246,6 +1374,15 @@ async function loadSession(name) {
 function updateComposerState() {
   const hasText = Boolean(el.input?.value.trim());
   if (el.mic) el.mic.disabled = !state.voice.recognition || state.isGenerating;
+  if (el.modeTrigger) el.modeTrigger.disabled = state.isGenerating;
+  if (el.modeClear) el.modeClear.disabled = state.isGenerating;
+  if (el.modePicker) {
+    el.modePicker.classList.toggle(
+      "running",
+      state.isGenerating && activeAgentMode() !== "normal"
+    );
+  }
+  if (state.isGenerating) closeModeMenu();
   if (el.send) {
     el.send.disabled = !state.isGenerating && !hasText;
     el.send.textContent = state.isGenerating ? "Stop" : "Send";
