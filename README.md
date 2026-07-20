@@ -183,7 +183,7 @@ The default interface — launch with `python main.py` and the agent opens in yo
 - **Smart generation states** — dynamic site behaviour that intelligently adapts while a response is actively generating.
 - **Composer mode picker** — switch between Fast (the default), Ultra Thinking, and Deep Research beside the context meter; enhanced modes use a restrained live text shine while running, and the compact `×` returns the conversation to Fast.
 - **Ultra Thinking** — forces difficulty-aware tools to their highest level, suspends the ordinary eight-round tool cap, and runs an independent second reasoning/review pass before exposing the final answer. Cancellation, context guards, confirmations, timeouts, and repeated-no-progress protection remain active.
-- **Deep Research** — plans three to eight initial hard-difficulty searches according to the active context window, gathers the web evidence in parallel, and continues with as many distinct follow-up search rounds as the evidence requires before synthesizing a source-linked response. After each three-search checkpoint, raw search transcripts are compacted into bounded evidence memory while the exact original request is re-anchored. The ordinary eight-round cap is suspended while cancellation, context, timeout, and repeated-no-progress protections remain active.
+- **Deep Research** — plans three to eight initial hard-difficulty searches according to the active context window, gathers the web evidence in parallel, and continues with as many distinct follow-up search rounds as the evidence requires before synthesizing a source-linked response. Raw research transcripts are compacted silently after every three searches or two page scrapes, while the exact original request is re-anchored. The ordinary eight-round cap is suspended while cancellation, context, timeout, and repeated-no-progress protections remain active.
 - **Collapsible thinking panel** — while the model reasons, a dedicated magenta panel shows the chain-of-thought with animated dots. After completion it collapses into a togglable bar (DeepSeek/Gemini style).
 - **Interactive tool cards** — each tool invocation renders a visual card: `⟳ Running [tool]` → `✓ Executed [tool]`. Click the header to expand raw JSON parameters and output.
 - **Sidebar control panel:**
@@ -703,6 +703,9 @@ Settings resolve in this order (highest wins):
 2. Environment variables (`SELENE_*`)
 3. Selected hardware profile (`auto`, `low-vram`, `balanced`, `manual`)
 4. Bundled Modelfile defaults (`manual`)
+4. Bundled Modelfile defaults (`manual`)
+
+The desktop app and browser UI ask which runtime profile to use when they open. **Manual** is preselected and keeps the bundled Modelfile values; choose **Auto** to inspect the device, or explicitly select **Low VRAM** or **Balanced**. The same choice remains available under Settings → Model.
 
 All model parameters can be adjusted without restarting:
 
@@ -736,7 +739,9 @@ Common environment overrides (see `agent/runtime_config.py` for the full list):
 ## Performance Tuning
 
 Selene defaults to the **manual** profile and bundled Modelfile parameters. Hardware inspection only selects a profile when **auto** is explicitly chosen; in Auto mode, unmeasurable VRAM or a ~4 GiB class GPU selects the conservative **low-vram** profile. All chat, title, summary, embedding, and vision work shares one Ollama coordinator; low-VRAM mode serializes model-heavy work without serializing ordinary tools.
+Selene defaults to the **manual** profile and the bundled Modelfile parameters. Hardware inspection only selects a profile when you choose **auto**; in Auto mode, unmeasurable VRAM or a ~4 GiB class GPU selects the conservative **low-vram** profile. All chat, title, summary, embedding, and vision work shares one Ollama coordinator; low-VRAM mode serializes model-heavy work without serializing ordinary tools.
 
+| Setting | low-vram (Auto safeguard) | balanced (larger GPU) | Purpose |
 | Setting | low-vram (Auto safeguard) | balanced (larger GPU) | Purpose |
 |---------|------------------------------|------------------------|---------|
 | `num_ctx` | 4096 | 8192 | Context window |

@@ -57,6 +57,7 @@ function apiHeaders(json = false) {
 
 const SLASH_COMMANDS = [
   { command: "/help", description: "Show available commands" },
+  { command: "/theme", description: "Choose a place color theme" },
   { command: "/clear", description: "Clear conversation history" },
   { command: "/save ", description: "Save current session with an optional name" },
   { command: "/load ", description: "Load a saved session by name or index" },
@@ -88,6 +89,38 @@ const SLASH_COMMANDS = [
   { command: "/q", description: "Exit the agent" }
 ];
 
+const THEME_STORAGE_KEY = "selene-web-theme";
+const PLACE_THEMES = [
+  { id: "oslo", name: "Oslo", description: "Monochrome grey & white", background: "#101010", surface: "#171717", primary: "#cfcfcf", accent: "#e8e8e8" },
+  { id: "tokyo", name: "Tokyo", description: "Futuristic hollow blue", background: "#070b14", surface: "#0c1220", primary: "#5ec8ff", accent: "#7dcfff" },
+  { id: "rome", name: "Rome", description: "Royal gold & marble", background: "#120e18", surface: "#1a1424", primary: "#d4af37", accent: "#f0d78c" },
+  { id: "amazon", name: "Amazon", description: "Deep rainforest", background: "#0a120c", surface: "#101a12", primary: "#6dbf6d", accent: "#a8d4a0" },
+  { id: "cairo", name: "Cairo", description: "Sand & desert brown", background: "#14100c", surface: "#1c1610", primary: "#c4a574", accent: "#e0c898" },
+  { id: "kyoto", name: "Kyoto", description: "Soft sakura dusk", background: "#141018", surface: "#1c1620", primary: "#d4a0c0", accent: "#ebbcba" },
+  { id: "bergen", name: "Bergen", description: "Fjord frost", background: "#121820", surface: "#1a222c", primary: "#88c0d0", accent: "#a3d4e0" },
+  { id: "marrakech", name: "Marrakech", description: "Terracotta sunset", background: "#140e0c", surface: "#1c1410", primary: "#e08860", accent: "#f0b090" },
+  { id: "shanghai", name: "Shanghai", description: "Neon night market", background: "#0a0814", surface: "#12101c", primary: "#e060c0", accent: "#60d0f0" },
+  { id: "reykjavik", name: "Reykjavik", description: "Aurora ice", background: "#080e12", surface: "#0e161c", primary: "#60e0b8", accent: "#a080e0" },
+  { id: "venice", name: "Venice", description: "Lagoon teal & rose", background: "#0c1214", surface: "#141c1e", primary: "#50b0b8", accent: "#e0a0a8" },
+  { id: "seoul", name: "Seoul", description: "Electric violet night", background: "#0c0a14", surface: "#14101e", primary: "#a070f0", accent: "#c0a0ff" },
+  { id: "santorini", name: "Santorini", description: "Aegean blue & white", background: "#0a1018", surface: "#121a24", primary: "#60b0e8", accent: "#e8f0f8" },
+  { id: "havana", name: "Havana", description: "Tropical coral & mint", background: "#120c0c", surface: "#1a1212", primary: "#e07070", accent: "#70d0b0" }
+];
+const PLACE_THEME_IDS = new Set(PLACE_THEMES.map((theme) => theme.id));
+
+function storedTheme() {
+  try {
+    const stored = String(localStorage.getItem(THEME_STORAGE_KEY) || "").trim().toLowerCase();
+    if (PLACE_THEME_IDS.has(stored)) return stored;
+  } catch {
+    // Storage can be unavailable in privacy-restricted browser contexts.
+  }
+  return "oslo";
+}
+
+const INITIAL_THEME = storedTheme();
+document.documentElement.dataset.theme = INITIAL_THEME;
+
 const state = {
   history: [],
   settings: cloneSettings(DEFAULT_SETTINGS),
@@ -95,6 +128,7 @@ const state = {
   savedSessions: [],
   activeSessionName: "New conversation",
   modelName: "selene",
+  theme: INITIAL_THEME,
   isGenerating: false,
   followOutput: true,
   controller: null,
@@ -123,12 +157,16 @@ const state = {
   },
   sky: {
     frame: null,
+    watchdog: null,
     resizeObserver: null,
     scene: null
   }
 };
 let settingsWriteChain = Promise.resolve();
 let lastRuntimeWarning = "";
+let themeCloseTimer = null;
+let themeTriggerElement = null;
+let startupProfilePromptShown = false;
 
 function reportRuntimeWarnings(runtime) {
   const warnings = Array.isArray(runtime?.warnings) ? runtime.warnings : [];
@@ -161,6 +199,13 @@ function bindElements() {
   el.temperature = document.getElementById("setting-temperature");
   el.temperatureValue = document.getElementById("temperature-value");
   el.context = document.getElementById("setting-context");
+  el.profileSetting = document.getElementById("setting-profile");
+  el.profileBackdrop = document.getElementById("profile-backdrop");
+  el.profileDialog = document.getElementById("profile-dialog");
+  el.profileChoice = document.getElementById("profile-choice");
+  el.profileDescription = document.getElementById("profile-choice-description");
+  el.profileRuntimeSummary = document.getElementById("profile-runtime-summary");
+  el.profileApply = document.getElementById("profile-apply");
   el.system = document.getElementById("setting-system");
   el.settingsPanel = document.getElementById("settings-panel");
   el.settingsBackdrop = document.getElementById("settings-backdrop");
@@ -225,7 +270,22 @@ function bindEvents() {
   document.getElementById("settings-btn")?.addEventListener("click", openSettings);
   document.getElementById("settings-close")?.addEventListener("click", closeSettings);
   el.settingsBackdrop?.addEventListener("click", closeSettings);
+  el.themeButton?.addEventListener("click", () => openThemeDialog(el.themeButton));
+  document.getElementById("theme-close")?.addEventListener("click", closeThemeDialog);
+  el.themeBackdrop?.addEventListener("click", (event) => {
+    if (event.target === el.themeBackdrop) closeThemeDialog();
+  });
+  el.profileChoice?.addEventListener("change", updateStartupProfileCopy);
+  el.profileApply?.addEventListener("click", applyStartupProfile);
   document.addEventListener("keydown", (event) => {
+    if (el.profileBackdrop?.classList.contains("open")) {
+      handleStartupProfileKeydown(event);
+      return;
+    }
+    if (el.themeBackdrop?.classList.contains("open")) {
+      handleThemeDialogKeydown(event);
+      return;
+    }
     if (event.key === "Escape" && el.settingsPanel?.classList.contains("open")) closeSettings();
   });
   document.addEventListener("visibilitychange", () => {
@@ -272,6 +332,11 @@ function bindEvents() {
     state.settings.options.num_ctx = Number(el.context.value);
     persistSettings();
     updateContextMeter();
+  });
+
+  el.profileSetting?.addEventListener("change", () => {
+    state.settings.runtime_profile = el.profileSetting.value;
+    persistSettings();
   });
 
   const persistSystemPrompt = debounce(persistSettings, 350);
@@ -397,10 +462,77 @@ async function loadState() {
     renderSessions();
     renderMessages();
     updateComposerState();
+    showStartupProfileDialog();
   } catch (error) {
     toast("Could not reach Selene. Make sure the backend and Ollama are running.");
     renderWelcome();
   }
+}
+
+function updateStartupProfileCopy() {
+  const selected = el.profileChoice?.value || "manual";
+  const descriptions = {
+    manual: "Use the Modelfile and your explicit session settings without hardware-based overrides.",
+    auto: "Inspect this device and choose a conservative hardware profile automatically.",
+    "low-vram": "Use smaller context and batch defaults for GPUs with about 4 GiB of VRAM.",
+    balanced: "Use larger context and batch defaults when the device has more headroom."
+  };
+  if (el.profileDescription) {
+    el.profileDescription.textContent = descriptions[selected] || descriptions.manual;
+  }
+  if (el.profileRuntimeSummary) {
+    const effective = state.runtime?.profile || state.settings.runtime_profile || "manual";
+    const reason = state.runtime?.selection_reason || "Manual is the startup default.";
+    el.profileRuntimeSummary.textContent = `Currently active: ${effective}. ${reason}`;
+  }
+}
+
+function showStartupProfileDialog() {
+  if (startupProfilePromptShown || !el.profileBackdrop || !el.profileDialog) return;
+  startupProfilePromptShown = true;
+  const selected = ["manual", "auto", "low-vram", "balanced"].includes(
+    state.settings.runtime_profile
+  ) ? state.settings.runtime_profile : "manual";
+  if (el.profileChoice) el.profileChoice.value = selected;
+  updateStartupProfileCopy();
+  el.profileBackdrop.hidden = false;
+  el.profileDialog.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => {
+    el.profileBackdrop?.classList.add("open");
+    el.profileChoice?.focus();
+  });
+}
+
+async function applyStartupProfile() {
+  const selected = el.profileChoice?.value || "manual";
+  if (!el.profileBackdrop || !el.profileDialog) return;
+  state.settings.runtime_profile = selected;
+  if (el.profileApply) el.profileApply.disabled = true;
+  await persistSettings();
+  el.profileBackdrop.classList.remove("open");
+  el.profileDialog.setAttribute("aria-hidden", "true");
+  if (el.profileApply) el.profileApply.disabled = false;
+  setTimeout(() => {
+    if (el.profileBackdrop) el.profileBackdrop.hidden = true;
+    el.input?.focus();
+  }, 180);
+}
+
+function handleStartupProfileKeydown(event) {
+  if (event.key === "Enter" && event.target !== el.profileChoice) {
+    event.preventDefault();
+    applyStartupProfile();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = [el.profileChoice, el.profileApply].filter(Boolean);
+  if (!focusable.length) return;
+  const current = focusable.indexOf(document.activeElement);
+  const next = event.shiftKey
+    ? (current <= 0 ? focusable.length - 1 : current - 1)
+    : (current + 1) % focusable.length;
+  event.preventDefault();
+  focusable[next].focus();
 }
 
 function mergeSettings(settings) {
@@ -462,8 +594,10 @@ function persistSettings() {
       syncSettingsUI();
       // Refresh after the server resolves profile defaults and session overrides.
       updateContextMeter();
+      return true;
     } catch {
       toast("Settings could not be saved.");
+      return false;
     }
   });
   return settingsWriteChain;
@@ -643,19 +777,18 @@ function renderWelcome() {
     <div class="welcome">
       <canvas class="welcome-sky" aria-hidden="true"></canvas>
       <h3 data-text="Selene">Selene</h3>
-      <p>A clean local AI chat interface for thinking, tools, and answers in one dark workspace.</p>
       <div class="suggestions">
         <button class="suggestion" type="button" data-prompt="Summarize this project and identify the most important files.">
-          Project summary <span>Understand the workspace</span>
+          <span class="suggestion-index">01</span><span class="suggestion-copy"><strong>Project summary</strong><small>Understand the workspace</small></span>
         </button>
         <button class="suggestion" type="button" data-prompt="Search the web for the latest AI developer tooling news.">
-          Web research <span>Use tools when needed</span>
+          <span class="suggestion-index">02</span><span class="suggestion-copy"><strong>Web research</strong><small>Use tools when needed</small></span>
         </button>
         <button class="suggestion" type="button" data-prompt="Help me debug a Python error step by step.">
-          Debug with me <span>Reason through a problem</span>
+          <span class="suggestion-index">03</span><span class="suggestion-copy"><strong>Debug with me</strong><small>Reason through a problem</small></span>
         </button>
         <button class="suggestion" type="button" data-prompt="/help">
-          Commands <span>Show slash commands</span>
+          <span class="suggestion-index">04</span><span class="suggestion-copy"><strong>Commands</strong><small>Show slash commands</small></span>
         </button>
       </div>
     </div>
@@ -686,9 +819,10 @@ function startWelcomeSky() {
     height: 0,
     lastFrame: now,
     shootingStar: null,
-    nextShootingStar: now + randomBetween(14000, 30000),
-    stars: Array.from({ length: 28 }, () => newCanvasStar(now, true))
+    nextShootingStar: now + randomBetween(6000, 12000),
+    stars: Array.from({ length: 36 }, () => newCanvasStar(now, true))
   };
+  refreshWelcomeSkyPalette(scene);
   state.sky.scene = scene;
 
   const resize = () => {
@@ -705,19 +839,37 @@ function startWelcomeSky() {
   state.sky.resizeObserver.observe(canvas);
 
   const drawFrame = (timestamp) => {
-    if (!canvas.isConnected || document.hidden || state.sky.scene !== scene) return;
+    if (!canvas.isConnected || state.sky.scene !== scene) return;
+    if (document.hidden) {
+      scene.lastFrame = timestamp;
+      state.sky.frame = requestAnimationFrame(drawFrame);
+      return;
+    }
     const delta = Math.min(34, Math.max(0, timestamp - scene.lastFrame));
     scene.lastFrame = timestamp;
     drawWelcomeSky(scene, timestamp, delta);
     state.sky.frame = requestAnimationFrame(drawFrame);
   };
   state.sky.frame = requestAnimationFrame(drawFrame);
+
+  // Visible tabs normally receive a continuous animation frame loop. This
+  // watchdog restarts it after aggressive browser or power-saving throttling.
+  state.sky.watchdog = window.setInterval(() => {
+    if (document.hidden || !canvas.isConnected || state.sky.scene !== scene) return;
+    const now = performance.now();
+    if (now - scene.lastFrame < 1500) return;
+    if (state.sky.frame !== null) cancelAnimationFrame(state.sky.frame);
+    scene.lastFrame = now;
+    state.sky.frame = requestAnimationFrame(drawFrame);
+  }, 2000);
 }
 
 function stopWelcomeSky() {
   if (state.sky.frame !== null) cancelAnimationFrame(state.sky.frame);
+  if (state.sky.watchdog !== null) clearInterval(state.sky.watchdog);
   state.sky.resizeObserver?.disconnect();
   state.sky.frame = null;
+  state.sky.watchdog = null;
   state.sky.resizeObserver = null;
   state.sky.scene = null;
 }
@@ -726,15 +878,36 @@ function newCanvasStar(now, initial = false) {
   return {
     x: Math.random(),
     y: Math.random(),
-    radius: randomBetween(.45, 1.25),
-    brightness: randomBetween(.28, .72),
-    born: now + (initial ? randomBetween(-5000, 1200) : randomBetween(350, 2600)),
-    duration: randomBetween(4500, 10000)
+    radius: randomBetween(.5, 1.28),
+    brightness: randomBetween(.24, .62),
+    born: now + (initial ? randomBetween(-5000, 900) : randomBetween(350, 1800)),
+    duration: randomBetween(5000, 10000)
   };
+}
+
+function cssVariableRgb(name, fallback) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const short = value.match(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/i);
+  if (short) return short.slice(1).map((part) => Number.parseInt(part + part, 16));
+  const full = value.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  if (full) return full.slice(1).map((part) => Number.parseInt(part, 16));
+  return fallback;
+}
+
+function refreshWelcomeSkyPalette(scene) {
+  if (!scene) return;
+  scene.starRgb = cssVariableRgb("--accent", [232, 232, 232]);
+  scene.shineRgb = cssVariableRgb("--text", [242, 242, 242]);
+}
+
+function rgba(rgb, opacity) {
+  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${opacity})`;
 }
 
 function drawWelcomeSky(scene, now, delta) {
   const { context, width, height, stars } = scene;
+  const starRgb = scene.starRgb || [232, 232, 232];
+  const shineRgb = scene.shineRgb || [242, 242, 242];
   context.clearRect(0, 0, width, height);
 
   stars.forEach((star, index) => {
@@ -744,24 +917,29 @@ function drawWelcomeSky(scene, now, delta) {
       return;
     }
     if (progress < 0) return;
-    const opacity = Math.pow(Math.sin(Math.PI * progress), 1.7) * star.brightness;
+    const x = star.x * width;
+    const y = star.y * height;
+    const opacity = Math.pow(Math.sin(Math.PI * progress), 1.55)
+      * star.brightness
+      * welcomeSkyVignette(x, y, width, height);
+    if (opacity <= .01) return;
     context.beginPath();
-    context.arc(star.x * width, star.y * height, star.radius, 0, Math.PI * 2);
-    context.fillStyle = `rgba(240, 244, 255, ${opacity})`;
+    context.arc(x, y, star.radius, 0, Math.PI * 2);
+    context.fillStyle = rgba(starRgb, opacity);
     context.fill();
   });
 
   if (!scene.shootingStar && now >= scene.nextShootingStar) {
-    const angle = randomBetween(14, 27) * Math.PI / 180;
-    const speed = randomBetween(250, 350);
+    const angle = randomBetween(14, 24) * Math.PI / 180;
+    const speed = randomBetween(210, 285);
     scene.shootingStar = {
-      x: randomBetween(width * .02, width * .52),
-      y: randomBetween(height * .04, height * .45),
+      x: randomBetween(width * .04, width * .48),
+      y: randomBetween(height * .06, height * .38),
       vx: Math.cos(angle) * speed,
       vy: Math.sin(angle) * speed,
       age: 0,
-      duration: randomBetween(1.8, 2.5),
-      trail: randomBetween(72, 118)
+      duration: randomBetween(2.1, 2.8),
+      trail: randomBetween(60, 90)
     };
   }
 
@@ -773,30 +951,40 @@ function drawWelcomeSky(scene, now, delta) {
   const speed = Math.hypot(shot.vx, shot.vy);
   const ux = shot.vx / speed;
   const uy = shot.vy / speed;
-  const fadeIn = Math.min(1, shot.age / .24);
-  const fadeOut = Math.min(1, Math.max(0, (shot.duration - shot.age) / .9));
-  const opacity = Math.min(fadeIn, fadeOut) * .82;
+  const fadeIn = Math.min(1, shot.age / .32);
+  const fadeOut = Math.min(1, Math.max(0, (shot.duration - shot.age) / 1.1));
+  const opacity = Math.min(fadeIn, fadeOut)
+    * .5
+    * welcomeSkyVignette(shot.x, shot.y, width, height);
   const tailX = shot.x - ux * shot.trail;
   const tailY = shot.y - uy * shot.trail;
   const streak = context.createLinearGradient(tailX, tailY, shot.x, shot.y);
-  streak.addColorStop(0, "rgba(255,255,255,0)");
-  streak.addColorStop(.55, `rgba(238,243,255,${opacity * .22})`);
-  streak.addColorStop(1, `rgba(255,255,255,${opacity})`);
+  streak.addColorStop(0, rgba(starRgb, 0));
+  streak.addColorStop(.62, rgba(starRgb, opacity * .18));
+  streak.addColorStop(1, rgba(shineRgb, opacity));
   context.beginPath();
   context.moveTo(tailX, tailY);
   context.lineTo(shot.x, shot.y);
-  context.lineWidth = .9;
+  context.lineWidth = .8;
   context.strokeStyle = streak;
   context.stroke();
   context.beginPath();
-  context.arc(shot.x, shot.y, 1.15, 0, Math.PI * 2);
-  context.fillStyle = `rgba(255,255,255,${opacity})`;
+  context.arc(shot.x, shot.y, .9, 0, Math.PI * 2);
+  context.fillStyle = rgba(shineRgb, opacity);
   context.fill();
 
   if (shot.age >= shot.duration || shot.x > width + shot.trail || shot.y > height + shot.trail) {
     scene.shootingStar = null;
-    scene.nextShootingStar = now + randomBetween(24000, 52000);
+    scene.nextShootingStar = now + randomBetween(12000, 24000);
   }
+}
+
+function welcomeSkyVignette(x, y, width, height) {
+  const normalizedX = (x - width / 2) / Math.max(1, width * .56);
+  const normalizedY = (y - height / 2) / Math.max(1, height * .58);
+  const distance = Math.hypot(normalizedX, normalizedY);
+  const edgeFade = Math.max(0, Math.min(1, (1 - distance) / .24));
+  return edgeFade * edgeFade * (3 - 2 * edgeFade);
 }
 
 function randomBetween(min, max) {
@@ -1161,7 +1349,7 @@ function resetStream() {
 }
 
 function settleModeStatus() {
-  state.stream.modeStatusLine?.classList.remove("running");
+  state.stream.modeStatusLine?.remove();
   state.stream.modeStatusLine = null;
 }
 
@@ -1219,16 +1407,34 @@ function stopGeneration({ refresh = true } = {}) {
 }
 
 function appendStatus(text, activityMode = "") {
+  if (activityMode === "ultra" || activityMode === "deep-research") {
+    appendModeActivity(text, activityMode);
+    return;
+  }
   settleModeStatus();
   const status = document.createElement("div");
   status.className = "status-line";
   status.textContent = text;
-  if (activityMode === "ultra" || activityMode === "deep-research") {
-    status.classList.add("mode-activity", "running");
-    status.dataset.mode = activityMode;
-    state.stream.modeStatusLine = status;
-  }
   el.messages.appendChild(status);
+  scrollToBottom();
+}
+
+function appendModeActivity(text, activityMode) {
+  settleModeStatus();
+  ensureAssistantStack();
+  if (!state.stream.thinkingBlock) {
+    state.stream.thinkingBlock = detailBlock("Thinking", "reasoning", "", false);
+    state.stream.thinkingContent = state.stream.thinkingBlock.querySelector(".block-content");
+    state.stream.assistantStack.appendChild(state.stream.thinkingBlock);
+  }
+
+  state.stream.thinkingBlock.classList.add("running");
+  const activity = document.createElement("span");
+  activity.className = "mode-activity-inline running";
+  activity.dataset.mode = activityMode;
+  activity.textContent = text;
+  state.stream.thinkingBlock.querySelector(".block-title")?.appendChild(activity);
+  state.stream.modeStatusLine = activity;
   scrollToBottom();
 }
 
@@ -1339,6 +1545,181 @@ function closeSettings() {
   el.settingsPanel?.setAttribute("aria-hidden", "true");
   setTimeout(() => { if (el.settingsBackdrop) el.settingsBackdrop.hidden = true; }, 180);
   document.getElementById("settings-btn")?.focus();
+}
+
+function renderThemeOptions() {
+  if (!el.themeOptions) return;
+  el.themeOptions.innerHTML = "";
+
+  PLACE_THEMES.forEach((theme) => {
+    const button = document.createElement("button");
+    const active = theme.id === state.theme;
+    button.type = "button";
+    button.className = `theme-option${active ? " active" : ""}`;
+    button.dataset.theme = theme.id;
+    button.setAttribute("role", "radio");
+    button.setAttribute("aria-checked", String(active));
+    button.style.setProperty("--preview-bg", theme.background);
+    button.style.setProperty("--preview-surface", theme.surface);
+    button.style.setProperty("--preview-primary", theme.primary);
+    button.style.setProperty("--preview-accent", theme.accent);
+    button.innerHTML = `
+      <span class="theme-swatches" aria-hidden="true"></span>
+      <span class="theme-option-copy">
+        <strong>${escapeHTML(theme.name)}${theme.id === "oslo" ? " · Default" : ""}</strong>
+        <small>${escapeHTML(theme.description)}</small>
+      </span>
+      <span class="theme-option-check" aria-hidden="true">✓</span>
+    `;
+    button.addEventListener("click", () => {
+      applyTheme(theme.id, { announce: true });
+      closeThemeDialog();
+    });
+    el.themeOptions.appendChild(button);
+  });
+}
+
+function openThemeDialog(trigger = document.activeElement) {
+  if (!el.themeBackdrop || !el.themeDialog) return;
+  if (themeCloseTimer !== null) {
+    clearTimeout(themeCloseTimer);
+    themeCloseTimer = null;
+  }
+  themeTriggerElement = trigger instanceof HTMLElement ? trigger : el.input;
+  if (el.settingsPanel?.classList.contains("open")) closeSettings();
+  renderThemeOptions();
+  el.themeBackdrop.hidden = false;
+  el.themeDialog.setAttribute("aria-hidden", "false");
+  el.themeButton?.setAttribute("aria-expanded", "true");
+  requestAnimationFrame(() => {
+    el.themeBackdrop.classList.add("open");
+    const active = el.themeOptions?.querySelector(".theme-option.active");
+    (active || el.themeOptions?.querySelector(".theme-option"))?.focus();
+  });
+}
+
+function closeThemeDialog() {
+  if (!el.themeBackdrop || !el.themeDialog || el.themeBackdrop.hidden) return;
+  el.themeBackdrop.classList.remove("open");
+  el.themeDialog.setAttribute("aria-hidden", "true");
+  el.themeButton?.setAttribute("aria-expanded", "false");
+  themeCloseTimer = window.setTimeout(() => {
+    el.themeBackdrop.hidden = true;
+    themeCloseTimer = null;
+  }, 180);
+  const returnTarget = themeTriggerElement?.isConnected ? themeTriggerElement : el.input;
+  themeTriggerElement = null;
+  returnTarget?.focus({ preventScroll: true });
+}
+
+function themeOptionButtons() {
+  return Array.from(el.themeOptions?.querySelectorAll(".theme-option") || []);
+}
+
+function themeGridColumns() {
+  if (!el.themeOptions) return 1;
+  const template = getComputedStyle(el.themeOptions).gridTemplateColumns.trim();
+  return Math.max(1, template ? template.split(/\s+/).length : 1);
+}
+
+function focusThemeOption(index) {
+  const options = themeOptionButtons();
+  if (!options.length) return;
+  const normalized = (index + options.length) % options.length;
+  options[normalized].focus({ preventScroll: true });
+  options[normalized].scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+function cycleThemeDialogFocus(event) {
+  const focusable = [
+    document.getElementById("theme-close"),
+    ...themeOptionButtons()
+  ].filter((element) => element && !element.disabled);
+  if (!focusable.length) return;
+  const current = focusable.indexOf(document.activeElement);
+  const direction = event.shiftKey ? -1 : 1;
+  const start = current >= 0 ? current : 0;
+  focusable[(start + direction + focusable.length) % focusable.length].focus({ preventScroll: true });
+}
+
+function handleThemeDialogKeydown(event) {
+  const options = themeOptionButtons();
+  const current = options.indexOf(document.activeElement);
+  const fallback = Math.max(0, options.findIndex((option) => option.classList.contains("active")));
+  const index = current >= 0 ? current : fallback;
+  const columns = themeGridColumns();
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeThemeDialog();
+    return;
+  }
+  if (event.key === "Tab") {
+    event.preventDefault();
+    cycleThemeDialogFocus(event);
+    return;
+  }
+  if (event.key === "Home") {
+    event.preventDefault();
+    focusThemeOption(0);
+    return;
+  }
+  if (event.key === "End") {
+    event.preventDefault();
+    focusThemeOption(options.length - 1);
+    return;
+  }
+
+  const movements = {
+    ArrowLeft: -1,
+    ArrowRight: 1,
+    ArrowUp: -columns,
+    ArrowDown: columns,
+    PageUp: -(columns * 3),
+    PageDown: columns * 3
+  };
+  if (Object.prototype.hasOwnProperty.call(movements, event.key)) {
+    event.preventDefault();
+    focusThemeOption(index + movements[event.key]);
+    return;
+  }
+  if ((event.key === "Enter" || event.key === " ") && current >= 0) {
+    event.preventDefault();
+    options[current].click();
+  }
+}
+
+function applyTheme(name, { announce = false } = {}) {
+  const normalized = String(name || "").trim().toLowerCase();
+  const theme = PLACE_THEMES.find((entry) => entry.id === normalized);
+  if (!theme) return false;
+
+  state.theme = theme.id;
+  document.documentElement.dataset.theme = theme.id;
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme.id);
+  } catch {
+    // The active page still changes even when persistence is unavailable.
+  }
+  refreshWelcomeSkyPalette(state.sky.scene);
+  renderThemeOptions();
+  if (announce) toast(`${theme.name} theme selected.`);
+  return true;
+}
+
+function handleThemeCommand(text) {
+  const match = String(text || "").match(/^\/theme(?:\s+(.+))?$/i);
+  if (!match) return false;
+  const requested = String(match[1] || "").trim().toLowerCase();
+  if (!requested) {
+    openThemeDialog(el.input);
+    return true;
+  }
+  if (!applyTheme(requested, { announce: true })) {
+    openThemeDialog(el.input);
+    toast(`Unknown theme “${requested}”. Choose a place below.`);
+  }
+  return true;
 }
 
 async function saveSession() {
@@ -1495,6 +1876,15 @@ function moveSlashSelection(delta) {
 function chooseSlashCommand(index = state.slash.selected) {
   const item = state.slash.matches[index];
   if (!item || !el.input) return;
+
+  if (item.command === "/theme") {
+    el.input.value = "";
+    closeSlashMenu();
+    resizeComposer();
+    updateComposerState();
+    openThemeDialog(el.input);
+    return;
+  }
 
   const suffix = item.command.endsWith(" ") || item.command.endsWith("\"\"") ? "" : " ";
   el.input.value = `${item.command}${suffix}`;

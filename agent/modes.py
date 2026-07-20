@@ -194,11 +194,14 @@ def tool_call_round_signature(tool_calls: list[dict]) -> str:
     return json.dumps(tool_calls, sort_keys=True, ensure_ascii=False, default=str)
 
 
-def _web_search_arguments(call: Any) -> dict[str, Any] | None:
+def _research_tool_details(call: Any) -> tuple[str, dict[str, Any]] | None:
     if not isinstance(call, dict):
         return None
     function = call.get("function")
-    if not isinstance(function, dict) or function.get("name") != "web_search":
+    if not isinstance(function, dict):
+        return None
+    name = str(function.get("name") or "")
+    if name not in {"web_search", "web_scrape"}:
         return None
     arguments = function.get("arguments", {})
     if isinstance(arguments, str):
@@ -206,7 +209,7 @@ def _web_search_arguments(call: Any) -> dict[str, Any] | None:
             arguments = json.loads(arguments)
         except (TypeError, ValueError, json.JSONDecodeError):
             arguments = {}
-    return arguments if isinstance(arguments, dict) else {}
+    return name, (arguments if isinstance(arguments, dict) else {})
 
 
 def _compact_web_search_result(content: Any, max_chars: int = 2400) -> str:
@@ -289,7 +292,7 @@ def compact_deep_research_messages(
     else:
         research_start = request_indices[-1]
     compacted: list[dict] = []
-    evidence: list[tuple[str, str]] = []
+    evidence: list[tuple[str, str, str]] = []
     insert_at: int | None = None
     index = 0
 
@@ -314,14 +317,20 @@ def compact_deep_research_messages(
         kept_calls: list[dict] = []
         kept_results: list[dict] = []
         for call_index, call in enumerate(calls):
-            arguments = _web_search_arguments(call)
+            details = _research_tool_details(call)
             result = results[call_index]
             result_name = str(result.get("tool_name") or result.get("name") or "")
-            if arguments is not None and result_name in {"", "web_search"}:
+            if details is not None and result_name in {"", details[0]}:
+                tool_name, arguments = details
                 if insert_at is None:
                     insert_at = len(compacted)
                 evidence.append((
-                    _clean_query(arguments.get("query")) or "(query unavailable)",
+                    tool_name,
+                    _clean_query(
+                        arguments.get("query")
+                        if tool_name == "web_search"
+                        else arguments.get("url")
+                    ) or "(source unavailable)",
                     _compact_web_search_result(result.get("content")),
                 ))
             else:
@@ -340,16 +349,21 @@ def compact_deep_research_messages(
         return source, 0
 
     max_chars = max(2000, int(max_checkpoint_chars))
+    search_count = sum(tool_name == "web_search" for tool_name, _, _ in evidence)
+    scrape_count = sum(tool_name == "web_scrape" for tool_name, _, _ in evidence)
     header = (
         f"{DEEP_RESEARCH_COMPACT_MARKER}\n"
         f"Original user request (verbatim):\n{exact_request}\n\n"
-        f"Completed web searches: {len(evidence)}. Compact evidence follows; included source URLs are retained."
+        "Completed web research: "
+        f"{search_count} search(es), {scrape_count} scrape(s). "
+        "Compact evidence follows; included source URLs are retained."
     )
     blocks: list[str] = []
     used = len(header)
     omitted = 0
-    for query, result in reversed(evidence):
-        block = f"Search query: {query}\nEvidence: {result}"
+    for tool_name, source, result in reversed(evidence):
+        source_label = "Search query" if tool_name == "web_search" else "Scraped URL"
+        block = f"{source_label}: {source}\nEvidence: {result}"
         if used + len(block) + 2 <= max_chars:
             blocks.append(block)
             used += len(block) + 2
@@ -358,7 +372,7 @@ def compact_deep_research_messages(
     blocks.reverse()
     if omitted:
         omission = (
-            f"{omitted} older search result(s) were reduced out of this live checkpoint "
+            f"{omitted} older web research result(s) were reduced out of this live checkpoint "
             "to protect response space; the exact original request remains authoritative."
         )
         blocks.insert(0, omission)

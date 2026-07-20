@@ -144,7 +144,7 @@ class AgentModePolicyTests(unittest.TestCase):
             if DEEP_RESEARCH_COMPACT_MARKER in str(message.get("content") or "")
         ]
         self.assertEqual(len(checkpoints), 1)
-        self.assertIn("Completed web searches: 3", checkpoints[0])
+        self.assertIn("3 search(es), 0 scrape(s)", checkpoints[0])
         self.assertIn("https://example.com/2", checkpoints[0])
         self.assertLess(len(checkpoints[0]), 3300)
         self.assertTrue(any(
@@ -178,12 +178,19 @@ class AgentModeFrontendTests(unittest.TestCase):
         self.assertIn('normal: { label: "Fast"', APP)
         self.assertIn("await settingsWriteChain;", APP)
         self.assertIn('appendStatus(event.message || "", event.activity_mode || "")', APP)
-        self.assertIn('status.classList.add("mode-activity", "running")', APP)
+        self.assertIn("function appendModeActivity(text, activityMode)", APP)
+        self.assertIn('activity.className = "mode-activity-inline running"', APP)
+        self.assertIn('querySelector(".block-title")?.appendChild(activity)', APP)
         self.assertIn('runtime_profile: "manual"', APP)
         self.assertIn(".mode-clear[hidden]", STYLE)
         self.assertIn(".mode-menu[hidden]", STYLE)
+        self.assertIn(".mode-activity-inline", STYLE)
         self.assertIn("@keyframes mode-text-shine", STYLE)
         self.assertIn("@keyframes mode-text-flash", STYLE)
+        self.assertIn("background: color-mix(in srgb, var(--elevated) 96%, var(--bg))", STYLE)
+        self.assertIn("background: color-mix(in srgb, var(--option-tone) 14%, var(--surface))", STYLE)
+        self.assertNotIn("rgba(10, 14, 27, 0.98)", STYLE)
+        self.assertNotIn("var(--accent-2)", STYLE)
 
 
 if __name__ == "__main__":

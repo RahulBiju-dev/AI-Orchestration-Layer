@@ -2210,8 +2210,9 @@ def _generate_chat_events_impl(
             deep_research_scrape_count += sum(
                 spec.name == "web_scrape" for spec in execution_specs
             )
-            search_compaction_due = (
+            research_compaction_due = (
                 deep_research_search_count >= deep_research_next_compaction
+                or deep_research_scrape_count >= deep_research_next_scrape_compaction
             )
             scrape_compaction_due = (
                 deep_research_scrape_count >= deep_research_next_scrape_compaction

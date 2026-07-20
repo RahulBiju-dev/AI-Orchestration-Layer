@@ -10,6 +10,15 @@ const BACKEND_READY_TIMEOUT_MS = 30000;
 const BACKEND_STOP_GRACE_MS = 8000;
 const MAX_DIAGNOSTIC_CHARS = 16000;
 
+// Hybrid-GPU Wayland systems can leave stale rectangular compositor tiles
+// over animated canvas and rounded UI surfaces. Selene's interface is light
+// enough to render smoothly in software; hardware acceleration remains an
+// explicit opt-in for users who need it.
+const hardwareAccelerationEnabled = /^(1|true|yes)$/i.test(
+  String(process.env.SELENE_HARDWARE_ACCELERATION || '').trim(),
+);
+if (!hardwareAccelerationEnabled) app.disableHardwareAcceleration();
+
 let mainWindow = null;
 let backendProcess = null;
 let backendPort = null;

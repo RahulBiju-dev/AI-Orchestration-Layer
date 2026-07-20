@@ -7,7 +7,7 @@
   <meta name="description" content="Selene is a local AI chatbot with thinking and tool-call visibility.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="icon" href="/favicon.png" type="image/png">
   <link rel="stylesheet" href="/style.css">
 </head>
@@ -28,7 +28,7 @@
         </div>
       </header>
 
-      <button id="new-chat-btn" class="primary-btn" type="button">New Chat</button>
+      <button id="new-chat-btn" class="primary-btn" type="button"><span aria-hidden="true">＋</span> New conversation</button>
 
       <section class="side-section">
         <div class="section-title">Sessions</div>
@@ -44,7 +44,17 @@
     <main class="chat-shell">
       <header class="chat-topbar">
         <div>
+          <p class="topbar-label">conversation</p>
           <h2 id="chat-title">New conversation</h2>
+        </div>
+        <div class="topbar-actions">
+          <button id="theme-btn" class="topbar-theme-btn" type="button" aria-label="Choose color theme" aria-haspopup="dialog" aria-controls="theme-dialog" aria-expanded="false" title="Themes">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="8" cy="8" r="2.25"/><circle cx="16" cy="8" r="2.25"/>
+              <circle cx="8" cy="16" r="2.25"/><circle cx="16" cy="16" r="2.25"/>
+            </svg>
+            <span>Themes</span>
+          </button>
         </div>
       </header>
 
@@ -106,7 +116,7 @@
   <div id="settings-backdrop" class="settings-backdrop" hidden></div>
   <aside id="settings-panel" class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-hidden="true">
     <header class="settings-header">
-      <div><p class="eyebrow">Customize Selene</p><h2 id="settings-title">Settings</h2></div>
+      <div><p class="eyebrow">configuration</p><h2 id="settings-title">Settings</h2></div>
       <button id="settings-close" class="icon-btn" type="button" aria-label="Close settings">&times;</button>
     </header>
     <div class="settings-body">
@@ -122,11 +132,54 @@
       </section>
       <section class="settings-group">
         <h3>Model</h3>
+        <label class="field-row"><span>Runtime profile</span><small>Manual is the default. Choose Auto for hardware detection or select a fixed profile.</small><select id="setting-profile"><option value="manual" selected>Manual — Modelfile defaults</option><option value="auto">Auto — detect this device</option><option value="low-vram">Low VRAM — about 4 GiB</option><option value="balanced">Balanced — more headroom</option></select></label>
         <label class="field-row"><span>Temperature <output id="temperature-value">0.25</output></span><small>Higher values produce more varied answers.</small><input id="setting-temperature" type="range" min="0" max="2" step="0.05" value="0.25"></label>
         <label class="field-row"><span>Context window</span><small>Maximum tokens available to prompts and responses.</small><select id="setting-context" disabled><option value="" selected>Loading…</option><option value="4096">4k</option><option value="8192">8k</option><option value="16384">16k</option><option value="32768">32k</option><option value="65536">64k</option><option value="131072">128k</option></select></label>
       </section>
     </div>
   </aside>
+
+  <div id="theme-backdrop" class="theme-backdrop" hidden>
+    <section id="theme-dialog" class="theme-dialog" role="dialog" aria-modal="true" aria-labelledby="theme-title" aria-hidden="true">
+      <header class="theme-header">
+        <div>
+          <p class="eyebrow">appearance</p>
+          <h2 id="theme-title">Choose a place</h2>
+        </div>
+        <button id="theme-close" class="icon-btn" type="button" aria-label="Close theme selector">&times;</button>
+      </header>
+      <div id="theme-options" class="theme-options" role="radiogroup" aria-label="Selene color theme"></div>
+      <p class="theme-hint"><span>←↑↓→</span> navigate <span>Enter</span> select <span>Tab</span> cycle <span>Esc</span> close</p>
+    </section>
+  </div>
+
+  <div id="profile-backdrop" class="profile-backdrop" hidden>
+    <section id="profile-dialog" class="profile-dialog" role="dialog" aria-modal="true" aria-labelledby="profile-title" aria-describedby="profile-intro" aria-hidden="true">
+      <header class="profile-header">
+        <div>
+          <p class="eyebrow">startup</p>
+          <h2 id="profile-title">Configure this device</h2>
+        </div>
+      </header>
+      <div class="profile-body">
+        <p id="profile-intro">Selene starts in Manual mode. You can let Auto inspect your hardware, or select the appropriate profile yourself.</p>
+        <label class="profile-field" for="profile-choice">
+          <span>Runtime profile</span>
+          <select id="profile-choice">
+            <option value="manual" selected>Manual — Modelfile defaults</option>
+            <option value="auto">Auto — detect this device</option>
+            <option value="low-vram">Low VRAM — about 4 GiB</option>
+            <option value="balanced">Balanced — more headroom</option>
+          </select>
+        </label>
+        <p id="profile-choice-description" class="profile-description"></p>
+        <p id="profile-runtime-summary" class="profile-runtime-summary"></p>
+      </div>
+      <footer class="profile-footer">
+        <button id="profile-apply" class="profile-apply-btn" type="button">Continue</button>
+      </footer>
+    </section>
+  </div>
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
   <script src="/app.js"></script>
