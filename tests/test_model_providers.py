@@ -11,7 +11,7 @@ import requests
 
 from agent.environment import load_dotenv
 from agent.model_providers import (
-    ERROR_FALLBACK_MODEL_ID,
+    ERROR_FALLBACK_MODEL_IDS,
     GEMINI_FREE_CHAT_MODELS,
     InvalidProviderKeyError,
     MalformedProviderResponse,
@@ -95,29 +95,55 @@ class EnvironmentTests(unittest.TestCase):
 
 
 class RegistryTests(unittest.TestCase):
-    def test_error_fallback_chain_prefers_flash_lite_then_local(self):
+    def test_error_fallback_chain_uses_configured_remote_tiers_then_local(self):
         environment = {
             "GEMINI_API_KEY": "google-secret",
-            "GEMINI_MODELS": "gemini-3.5-flash,gemini-3.1-flash-lite",
+            "GEMINI_MODELS": (
+                "gemini-3.5-flash,gemini-3.5-flash-lite,gemma-4-31b-it"
+            ),
+            "NVIDIA_API_KEY": "nvidia-secret",
+            "NVIDIA_MODELS": "nvidia/nemotron-3-ultra-550b-a55b",
         }
-        fallback = resolve_error_fallback(
-            "gemini:gemini-3.5-flash", runtime(), environment
+        self.assertEqual(
+            ERROR_FALLBACK_MODEL_IDS,
+            (
+                "gemini:gemini-3.5-flash-lite",
+                "nvidia:nvidia/nemotron-3-ultra-550b-a55b",
+                "gemini:gemma-4-31b-it",
+                "local:default",
+            ),
         )
-        self.assertEqual(fallback.id, ERROR_FALLBACK_MODEL_ID)
-        local = resolve_error_fallback(ERROR_FALLBACK_MODEL_ID, runtime(), environment)
-        self.assertEqual(local.id, "local:default")
-        self.assertIsNone(resolve_error_fallback(
-            "local:default",
-            runtime(),
-            environment,
-            attempted_model_ids=(ERROR_FALLBACK_MODEL_ID,),
-        ))
-        without_gemini = resolve_error_fallback(
+
+        attempted: list[str] = []
+        current = "gemini:gemini-3.5-flash"
+        for expected in ERROR_FALLBACK_MODEL_IDS:
+            fallback = resolve_error_fallback(
+                current,
+                runtime(),
+                environment,
+                attempted_model_ids=attempted,
+            )
+            self.assertIsNotNone(fallback)
+            self.assertEqual(fallback.id, expected)
+            attempted.append(fallback.id)
+            current = fallback.id
+
+        self.assertIsNone(
+            resolve_error_fallback(
+                "local:default",
+                runtime(),
+                environment,
+                attempted_model_ids=attempted,
+            )
+        )
+
+    def test_error_fallback_chain_skips_unconfigured_remote_tiers(self):
+        fallback = resolve_error_fallback(
             "gemini:gemini-3.5-flash",
             runtime(),
             {"GEMINI_API_KEY": "google-secret", "GEMINI_MODELS": "gemini-3.5-flash"},
         )
-        self.assertEqual(without_gemini.id, "local:default")
+        self.assertEqual(fallback.id, "local:default")
 
     def test_only_configured_remote_models_are_available(self):
         environment = {
@@ -489,7 +515,10 @@ class AdapterTests(unittest.TestCase):
         response = FakeResponse({"choices": [{"message": {"content": "ok"}}]})
         with patch("agent.model_providers.requests.post", return_value=response) as post:
             chat_with_model(
-                {"model_id": "openrouter:default"},
+                {
+                    "model_id": "openrouter:default",
+                    "system": "Use the active tool policy.",
+                },
                 runtime(),
                 ollama_service_factory=MagicMock(),
                 environ={
@@ -736,7 +765,10 @@ class AdapterTests(unittest.TestCase):
         })
         with patch("agent.model_providers.requests.post", return_value=response) as post:
             result = chat_with_model(
-                {"model_id": "gemini:default"},
+                {
+                    "model_id": "gemini:default",
+                    "system": "Use the active tool policy.",
+                },
                 runtime(),
                 ollama_service_factory=MagicMock(),
                 environ={
@@ -1051,16 +1083,16 @@ class ModelSelectorFrontendTests(unittest.TestCase):
         )
 
     def test_model_selector_precedes_mode_and_uses_persisted_settings(self):
-        self.assertLess(HTML.index('id="model-select"'), HTML.index('id="mode-picker"'))
+        self.assertLess(HTML.index('id="model-picker"'), HTML.index('id="mode-picker"'))
         self.assertIn('<span class="model-picker-label">Model</span>', HTML)
         self.assertIn('model_id: "local:default"', APP)
-        self.assertIn("state.settings.model_id = selectedModel", APP)
+        self.assertIn("state.settings.model_id = modelId", APP)
         self.assertIn("function updateModelUI()", APP)
-        self.assertIn("el.modelSelect.disabled = state.isGenerating", APP)
+        self.assertIn("el.modelTrigger.disabled = state.isGenerating", APP)
 
     def test_model_selector_has_mobile_layout_rules(self):
         self.assertIn(".model-picker", STYLE)
-        self.assertIn("#model-select", STYLE)
+        self.assertIn("#model-label", STYLE)
         self.assertIn("flex-wrap: wrap", STYLE)
 
     def test_provider_errors_render_inside_assistant_response_bubbles(self):
@@ -1099,7 +1131,7 @@ class ModelSelectorFrontendTests(unittest.TestCase):
         load_state = APP[APP.index("async function loadState()") : APP.index("function updateStartupProfileCopy()")]
         self.assertNotIn("showStartupProfileDialog()", load_state)
         self.assertIn('previousModel !== "local:default"', APP)
-        self.assertIn('selectedModel === "local:default"', APP)
+        self.assertIn('modelId === "local:default"', APP)
 
 
 class ModelSlashCommandTests(unittest.TestCase):
@@ -1152,6 +1184,14 @@ class ModelSlashCommandTests(unittest.TestCase):
         request_session = stream.call_args.kwargs["session"]
         self.assertEqual(request_session["model_id"], "gemini:gemini-3.1-flash-lite")
         self.assertEqual(request_session["options"]["num_ctx"], 1_048_576)
+        sent_messages = stream.call_args.kwargs["messages"]
+        external_prompt = next(
+            message["content"]
+            for message in sent_messages
+            if message["role"] == "system"
+        )
+        self.assertIn("## Reasoning discipline", external_prompt)
+        self.assertIn("## Tool selection and execution", external_prompt)
 
     def test_web_model_command_updates_session(self):
         from agent import web

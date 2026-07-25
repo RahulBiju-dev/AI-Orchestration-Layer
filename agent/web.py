@@ -73,6 +73,10 @@ from agent.runtime_config import (
     RuntimeConfig,
     get_runtime_config,
 )
+from agent.system_prompts import (
+    active_system_prompt_for_session,
+    default_system_prompt_for_model,
+)
 from agent.web_runtime import (
     ClientSessionStore,
     GenerationConflict,
@@ -203,9 +207,17 @@ def _normalize_session_settings(session: dict, *, fallback: dict | None = None) 
 
 def _active_system_prompt(session: dict | None = None) -> tuple[str, str]:
     """Return (default, active) system prompts used for model calls and UI meters."""
-    default_prompt = load_default_system_prompt() or ""
-    override = str((session or {}).get("system") or "").strip()
-    return default_prompt, (override or default_prompt)
+    source = session or {}
+    local_prompt = load_default_system_prompt() or ""
+    default_prompt = default_system_prompt_for_model(
+        source.get("model_id"),
+        local_prompt=local_prompt,
+    )
+    active_prompt = active_system_prompt_for_session(
+        source,
+        local_prompt=local_prompt,
+    )
+    return default_prompt, active_prompt
 
 
 def _runtime_payload(session: dict) -> dict:
@@ -213,7 +225,10 @@ def _runtime_payload(session: dict) -> dict:
     request_session = _session_for_selected_model(session, runtime)
     paths = get_runtime_paths()
     default_system_prompt, active_system_prompt = _active_system_prompt(session)
-    selected_model = resolve_model(session.get("model_id"), runtime)
+    try:
+        selected_model = resolve_model(session.get("model_id"), runtime)
+    except (MissingProviderConfiguration, UnsupportedModelError):
+        selected_model = resolve_model(LOCAL_MODEL_ID, runtime)
     return {
         "requested_profile": runtime.requested_profile.value,
         "profile": runtime.profile.value,
@@ -949,11 +964,13 @@ def execute_command_web(
                 ]
             )
         elif sub == "system":
-            prompt = session.get("system", "")
+            override = str(session.get("system") or "").strip()
+            _default_prompt, prompt = _active_system_prompt(session)
             if prompt:
-                return f"**System prompt:**\n{prompt}"
+                source = "conversation override" if override else "model default"
+                return f"**System prompt ({source}):**\n{prompt}"
             else:
-                return "No system prompt set (using Modelfile default)."
+                return "No system prompt is available."
         elif sub == "model":
             selected = resolve_model(session.get("model_id"), get_runtime_config(session))
             return (
@@ -1725,9 +1742,7 @@ def _generate_chat_events_impl(
             yield terminal_event
             return
     # 1. Sync system prompt override
-    default_system_prompt = load_default_system_prompt()
-        
-    active_system = session_data.get("system") or default_system_prompt
+    _default_system_prompt, active_system = _active_system_prompt(session_data)
     if active_system:
         if not history_data or history_data[0].get("role") != "system" or history_data[0].get("content") != active_system:
             history_data[:] = [m for m in history_data if m.get("role") != "system"]
@@ -2908,7 +2923,10 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             saved = list_saved_sessions()
             view = CLIENT_SESSIONS.snapshot(client_id)
             runtime = get_runtime_config(view.session)
-            selected_model = resolve_model(view.session.get("model_id"), runtime)
+            try:
+                selected_model = resolve_model(view.session.get("model_id"), runtime)
+            except (MissingProviderConfiguration, UnsupportedModelError):
+                selected_model = resolve_model(LOCAL_MODEL_ID, runtime)
             probe = OllamaService(runtime).probe(
                 model=runtime.chat_model,
                 timeout=3,

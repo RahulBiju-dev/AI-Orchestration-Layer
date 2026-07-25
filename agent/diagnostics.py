@@ -298,15 +298,31 @@ def _check_port_availability() -> dict[str, Any]:
 def _check_packaged_resources() -> dict[str, Any]:
     try:
         modelfile = resource_path("Modelfile")
+        external_prompt = resource_path("agent/prompts/external_models.md")
         static_dir = resource_path("agent/static")
     except Exception as exc:
-        return _status(False, error=str(exc), remedy="Repackage with Modelfile and agent/static included.")
-    ok = modelfile.is_file() and static_dir.is_dir()
+        return _status(
+            False,
+            error=str(exc),
+            remedy=(
+                "Repackage with Modelfile, agent/prompts, and agent/static included."
+            ),
+        )
+    ok = (
+        modelfile.is_file()
+        and external_prompt.is_file()
+        and static_dir.is_dir()
+    )
     return _status(
         ok,
         modelfile=str(modelfile),
+        external_prompt=str(external_prompt),
         static_dir=str(static_dir),
-        remedy=None if ok else "Ensure Modelfile and agent/static are present in the install tree.",
+        remedy=(
+            None
+            if ok
+            else "Ensure Modelfile, agent/prompts, and agent/static are present in the install tree."
+        ),
     )
 
 

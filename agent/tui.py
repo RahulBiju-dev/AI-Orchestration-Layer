@@ -1288,13 +1288,12 @@ def build_app_class():
 
         def _active_system_prompt_for_meter(self) -> str:
             """System prompt counted by the visible context meter."""
-            override = str((self.session or {}).get("system") or "").strip()
-            if override:
-                return override
-            for message in self.history or []:
-                if isinstance(message, dict) and message.get("role") == "system":
-                    return str(message.get("content") or "").strip()
-            return str(self.default_system_prompt or "").strip()
+            from agent.system_prompts import active_system_prompt_for_session
+
+            return active_system_prompt_for_session(
+                self.session,
+                local_prompt=str(self.default_system_prompt or ""),
+            )
 
         def _estimate_context_used(self) -> int:
             """Match web UI / core heuristics: history + draft input tokens."""

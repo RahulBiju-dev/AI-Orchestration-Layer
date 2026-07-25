@@ -514,7 +514,7 @@ class TestChatEventTerminalState(unittest.TestCase):
         self.assertEqual(history[-1]["thinking"], "Check the evidence first.")
         self.assertEqual(history[-1]["content"], "The final answer.")
 
-    def test_model_error_switches_to_flash_lite_fallback_and_continues(self):
+    def test_model_error_switches_to_gemini_35_flash_lite_and_continues(self):
         from agent import web
         from agent.model_providers import ProviderNetworkError
         from agent.runtime_config import get_runtime_config
@@ -532,7 +532,7 @@ class TestChatEventTerminalState(unittest.TestCase):
         )
         environment = {
             "GEMINI_API_KEY": "google-secret",
-            "GEMINI_MODELS": "gemini-3.5-flash,gemini-3.1-flash-lite",
+            "GEMINI_MODELS": "gemini-3.5-flash,gemini-3.5-flash-lite",
         }
         history = []
         with (
@@ -543,7 +543,9 @@ class TestChatEventTerminalState(unittest.TestCase):
                 web,
                 "_model_chat",
                 side_effect=[
-                    ProviderNetworkError("Primary provider failed.", code="network_failure"),
+                    ProviderNetworkError(
+                        "Primary provider failed.", code="network_failure"
+                    ),
                     iter([completed]),
                 ],
             ) as model_chat,
@@ -565,9 +567,9 @@ class TestChatEventTerminalState(unittest.TestCase):
 
         fallback = next(event for event in events if event.get("type") == "model_fallback")
         terminal = next(event for event in events if event.get("type") == "done")
-        self.assertEqual(fallback["model"]["id"], "gemini:gemini-3.1-flash-lite")
+        self.assertEqual(fallback["model"]["id"], "gemini:gemini-3.5-flash-lite")
         self.assertIn("continuing automatically", fallback["message"])
-        self.assertEqual(session["model_id"], "gemini:gemini-3.1-flash-lite")
+        self.assertEqual(session["model_id"], "gemini:gemini-3.5-flash-lite")
         self.assertEqual(history[-1]["content"], "Recovered answer.")
         self.assertEqual(terminal["state"], "completed")
         chat_calls = [
@@ -576,14 +578,18 @@ class TestChatEventTerminalState(unittest.TestCase):
         ]
         self.assertEqual(len(chat_calls), 2)
 
-    def test_failed_flash_lite_fallback_switches_to_local_and_continues(self):
+    def test_failed_remote_fallback_tiers_switch_to_local_and_continue(self):
         from agent import web
         from agent.model_providers import ProviderNetworkError
         from agent.runtime_config import get_runtime_config
 
         environment = {
             "GEMINI_API_KEY": "google-secret",
-            "GEMINI_MODELS": "gemini-3.5-flash,gemini-3.1-flash-lite",
+            "GEMINI_MODELS": (
+                "gemini-3.5-flash,gemini-3.5-flash-lite,gemma-4-31b-it"
+            ),
+            "NVIDIA_API_KEY": "nvidia-secret",
+            "NVIDIA_MODELS": "nvidia/nemotron-3-ultra-550b-a55b",
         }
         completed = SimpleNamespace(
             message=SimpleNamespace(
@@ -606,7 +612,15 @@ class TestChatEventTerminalState(unittest.TestCase):
                 "_model_chat",
                 side_effect=[
                     ProviderNetworkError("Primary failed.", code="network_failure"),
-                    ProviderNetworkError("Flash Lite failed.", code="network_failure"),
+                    ProviderNetworkError(
+                        "Gemini fallback failed.", code="network_failure"
+                    ),
+                    ProviderNetworkError(
+                        "NVIDIA fallback failed.", code="network_failure"
+                    ),
+                    ProviderNetworkError(
+                        "Hosted Gemma failed.", code="network_failure"
+                    ),
                     iter([completed]),
                 ],
             ) as model_chat,
@@ -632,7 +646,12 @@ class TestChatEventTerminalState(unittest.TestCase):
         terminal = next(event for event in events if event.get("type") == "done")
         self.assertEqual(
             [event["model"]["id"] for event in fallbacks],
-            ["gemini:gemini-3.1-flash-lite", "local:default"],
+            [
+                "gemini:gemini-3.5-flash-lite",
+                "nvidia:nvidia/nemotron-3-ultra-550b-a55b",
+                "gemini:gemma-4-31b-it",
+                "local:default",
+            ],
         )
         self.assertEqual(terminal["state"], "completed")
         self.assertEqual(session["model_id"], "local:default")
@@ -641,7 +660,7 @@ class TestChatEventTerminalState(unittest.TestCase):
             call for call in model_chat.call_args_list
             if call.kwargs.get("kind") == web.OperationKind.CHAT
         ]
-        self.assertEqual(len(chat_calls), 3)
+        self.assertEqual(len(chat_calls), 5)
 
     def test_midstream_model_error_preserves_partial_text_and_continues(self):
         from agent import web
@@ -674,7 +693,7 @@ class TestChatEventTerminalState(unittest.TestCase):
 
         environment = {
             "GEMINI_API_KEY": "google-secret",
-            "GEMINI_MODELS": "gemini-3.5-flash,gemini-3.1-flash-lite",
+            "GEMINI_MODELS": "gemini-3.5-flash,gemini-3.5-flash-lite",
         }
         history = []
         with (
@@ -709,12 +728,12 @@ class TestChatEventTerminalState(unittest.TestCase):
         )
         self.assertEqual(visible, "Partial answer. Recovered continuation.")
         self.assertEqual(history[-1]["content"], visible)
-        self.assertEqual(session["model_id"], "gemini:gemini-3.1-flash-lite")
+        self.assertEqual(session["model_id"], "gemini:gemini-3.5-flash-lite")
         self.assertEqual(
             sum(event.get("type") == "model_fallback" for event in events), 1
         )
 
-    def test_unconfigured_flash_lite_fallback_skips_to_local_without_loop(self):
+    def test_unconfigured_remote_fallbacks_skip_to_local_without_loop(self):
         from agent import web
         from agent.model_providers import ProviderNetworkError
         from agent.runtime_config import get_runtime_config
@@ -1695,6 +1714,50 @@ class TestRuntimeSystemPromptPayload(unittest.TestCase):
 
         self.assertEqual(overridden["default_system_prompt"], "DEFAULT SYSTEM POLICY")
         self.assertEqual(overridden["active_system_prompt"], "custom override")
+
+    def test_external_model_payload_uses_external_default_and_override(self):
+        from agent import web
+        from agent.system_prompts import load_external_system_prompt
+
+        session = {
+            "model_id": "gemini:gemini-2.5-flash",
+            "runtime_profile": "manual",
+            "options": {},
+            "system": "",
+            "history": True,
+            "think": True,
+            "verbose": False,
+            "wordwrap": True,
+            "format": "",
+        }
+        environment = {
+            "GEMINI_API_KEY": "google-secret",
+            "GEMINI_MODELS": "gemini-2.5-flash",
+        }
+        with patch.dict("os.environ", environment, clear=True):
+            payload = web._runtime_payload(session)
+
+        self.assertEqual(
+            payload["default_system_prompt"],
+            load_external_system_prompt(),
+        )
+        self.assertEqual(
+            payload["active_system_prompt"],
+            load_external_system_prompt(),
+        )
+
+        session["system"] = "custom provider policy"
+        with patch.dict("os.environ", environment, clear=True):
+            overridden = web._runtime_payload(session)
+
+        self.assertEqual(
+            overridden["default_system_prompt"],
+            load_external_system_prompt(),
+        )
+        self.assertEqual(
+            overridden["active_system_prompt"],
+            "custom provider policy",
+        )
 
 
 if __name__ == "__main__":

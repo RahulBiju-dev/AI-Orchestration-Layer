@@ -4,6 +4,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { spawn } = require('child_process');
+const { resolveBackendEnvironmentFile } = require('./backend_environment');
 
 const BACKEND_START_TIMEOUT_MS = 15 * 60 * 1000;
 const BACKEND_READY_TIMEOUT_MS = 30000;
@@ -192,12 +193,23 @@ async function waitForBackendReady(port, child) {
 }
 
 function backendEnvironment(ownerToken) {
-  return {
+  const environment = {
     ...process.env,
     PYTHONUNBUFFERED: '1',
     SELENE_ELECTRON: '1',
     SELENE_BACKEND_OWNER: ownerToken,
   };
+  const envFile = resolveBackendEnvironmentFile({
+    env: environment,
+    isPackaged: app.isPackaged,
+    userDataPath: app.getPath('userData'),
+    executablePath: process.execPath,
+    appImagePath: process.env.APPIMAGE,
+  });
+  if (envFile && !environment.SELENE_ENV_FILE) {
+    environment.SELENE_ENV_FILE = envFile;
+  }
+  return environment;
 }
 
 async function startBackend() {

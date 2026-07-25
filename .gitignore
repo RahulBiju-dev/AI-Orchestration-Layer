@@ -248,6 +248,7 @@ node_modules/
 dist-electron/
 bun.lockb
 bun.lock
+*.spec
 
 # Later
 .github/

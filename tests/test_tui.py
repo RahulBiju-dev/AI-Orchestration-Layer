@@ -140,7 +140,7 @@ class DisplaySinkRoutingTests(unittest.TestCase):
         self.assertIn(("thinking_delta", "Check the evidence first."), calls)
         self.assertIn(("content_final", "The final answer."), calls)
 
-    def test_model_errors_update_tui_through_flash_lite_then_local(self):
+    def test_model_errors_update_tui_through_ordered_fallback_chain(self):
         from agent import core
         from agent.model_providers import ProviderNetworkError
 
@@ -192,7 +192,11 @@ class DisplaySinkRoutingTests(unittest.TestCase):
         )
         environment = {
             "GEMINI_API_KEY": "google-secret",
-            "GEMINI_MODELS": "gemini-3.5-flash,gemini-3.1-flash-lite",
+            "GEMINI_MODELS": (
+                "gemini-3.5-flash,gemini-3.5-flash-lite,gemma-4-31b-it"
+            ),
+            "NVIDIA_API_KEY": "nvidia-secret",
+            "NVIDIA_MODELS": "nvidia/nemotron-3-ultra-550b-a55b",
         }
         persistent = core._new_session_state()
         persistent["model_id"] = "gemini:gemini-3.5-flash"
@@ -204,7 +208,15 @@ class DisplaySinkRoutingTests(unittest.TestCase):
                 "chat_with_model",
                 side_effect=[
                     ProviderNetworkError("Primary failed.", code="network_failure"),
-                    ProviderNetworkError("Flash Lite failed.", code="network_failure"),
+                    ProviderNetworkError(
+                        "Gemini fallback failed.", code="network_failure"
+                    ),
+                    ProviderNetworkError(
+                        "NVIDIA fallback failed.", code="network_failure"
+                    ),
+                    ProviderNetworkError(
+                        "Hosted Gemma failed.", code="network_failure"
+                    ),
                     iter([completed]),
                 ],
             ) as model_chat,
@@ -221,10 +233,12 @@ class DisplaySinkRoutingTests(unittest.TestCase):
 
         self.assertEqual(response["content"], "Recovered answer.")
         self.assertEqual(persistent["model_id"], "local:default")
-        self.assertEqual(model_chat.call_count, 3)
+        self.assertEqual(model_chat.call_count, 5)
         self.assertIn(("refresh_runtime_meta",), calls)
         status_text = "\n".join(call[1] for call in calls if call[0] == "status")
-        self.assertIn("gemini-3.1-flash-lite", status_text)
+        self.assertIn("gemini-3.5-flash-lite", status_text)
+        self.assertIn("nvidia/nemotron-3-ultra-550b-a55b", status_text)
+        self.assertIn("gemma-4-31b-it", status_text)
         self.assertIn("Gemma 4 E4B", status_text)
         self.assertIn("continuing automatically", status_text)
 
@@ -281,11 +295,11 @@ class TuiAppSmokeTests(unittest.TestCase):
             status_meta={"profile": "manual"},
         )
 
-        expected_saved = (
-            _estimate_message_tokens({"role": "system", "content": "saved policy"})
+        expected_default = (
+            _estimate_message_tokens({"role": "system", "content": "default policy"})
             + _estimate_messages_tokens([{"role": "user", "content": "hello"}])
         )
-        self.assertEqual(app._estimate_context_used(), expected_saved)
+        self.assertEqual(app._estimate_context_used(), expected_default)
 
         session["system"] = "override policy"
         expected_override = (

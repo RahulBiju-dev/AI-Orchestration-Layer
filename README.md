@@ -1,8 +1,10 @@
-# Selene (AI Orchestration Layer)
+# Selene — Routed AI Orchestration Layer
 
-A modular, tool-augmented **AI orchestration layer** built with Python and [Ollama](https://ollama.com/). Selene sits between you and a local or configured external chat model: it owns the agentic loop, tool registry, context management, RAG vault, and session lifecycle, then surfaces the same capabilities through multiple interfaces.
+A provider-neutral, tool-augmented **AI routing and orchestration system** built with Python. Selene sits between its interfaces, a shared agent runtime, and multiple model backends. It selects the active model per conversation, converts provider-specific request and stream formats into one internal contract, runs tools, manages context and sessions, and automatically falls back when a routed model fails.
 
-Conversation storage and document memory stay local. Chat inference stays local with the default Selene model, or is sent to the provider selected in the Web/Desktop Model menu when an external model is configured. Optional integrations such as Google Calendar and Google Tasks contact their provider only after user-authorized OAuth. The orchestration core wraps the default customised [Gemma 4](https://ai.google.dev/gemma) model with autonomous tool-calling, real-time streaming, and a persistent RAG (Retrieval-Augmented Generation) vault for long-term document memory.
+The router currently supports the managed local [Gemma 4](https://ai.google.dev/gemma) model through [Ollama](https://ollama.com/), Google Gemini, OpenRouter, NVIDIA hosted NIM, and arbitrary OpenAI-compatible or self-hosted endpoints. Models share the same tools, modes, system identity, conversation lifecycle, streaming UI, error contract, and persistent RAG (Retrieval-Augmented Generation) vault. Adding a provider belongs in the centralized adapter layer rather than the interfaces or agent loop.
+
+Conversation state, credentials, vault indexes, embeddings, and source documents remain on the host. Only the prompt material required for a turn—such as conversation messages, tool schemas, and retrieved excerpts—is sent to the selected external provider. Local Ollama remains the default and privacy-preserving path, but it is one route in the system rather than the architecture itself.
 
 **Fedora Linux is the primary development and reference platform.** Windows 10/11 are supported natively (no WSL or Unix compatibility layer). See [docs/platform-support.md](docs/platform-support.md) for the full tool and backend matrix.
 
@@ -10,17 +12,18 @@ Conversation storage and document memory stay local. Chat inference stays local 
 
 | Interface | How to launch | Role |
 |-----------|---------------|------|
-| **Web UI** (default) | `python main.py` | Browser chat with SSE streaming, thinking panels, tool cards, and sidebar controls |
-| **Terminal CLI** | `python main.py --cli` | Rich terminal loop with slash commands and Markdown streaming |
-| **Desktop app** | Electron build (`package.json`) | Packaged Web UI + PyInstaller backend for installable distribution |
+| **Web UI** (default) | `python main.py` | Browser chat with model routing, concurrent conversations, SSE streaming, thinking panels, and tool cards |
+| **Terminal / TUI** | `python main.py --cli` | Routed model selection through `/model`, slash commands, thinking/tool blocks, and Markdown streaming |
+| **Desktop app** | Electron build (`package.json`) | Packaged routed Web UI + server-side PyInstaller backend |
 
-All interfaces share `tool_runner`, local Ollama services, managed model lifecycle, vault/RAG, and session rules; Web/Desktop chat can additionally route through the provider adapter layer. The product is the orchestration layer, not a single UI.
+All interfaces converge on the same model registry, provider adapters, prompt policy, tool runner, context guards, fallback chain, vault/RAG, and session rules. Provider API keys remain in the Python backend and are never exposed to browser or Electron renderer code.
 
 ---
 
 ## Table of Contents
 
 - [How It Works — Theory](#how-it-works--theory)
+  - [Model Routing](#model-routing)
   - [The Agentic Loop](#the-agentic-loop)
   - [Tool Calling](#tool-calling)
   - [Streaming Inference](#streaming-inference)
@@ -36,15 +39,15 @@ All interfaces share `tool_runner`, local Ollama services, managed model lifecyc
 - [Platform support](#platform-support)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
-- [External Model Providers](#external-model-providers)
 - [Diagnostics](#diagnostics)
 - [Building the Desktop App (Electron)](#building-the-desktop-app-electron)
+- [Model Providers and Routing](#model-providers-and-routing)
 - [Usage](#usage)
   - [Web UI (Default)](#web-ui-default)
   - [Terminal CLI](#terminal-cli)
   - [Slash Commands](#slash-commands)
   - [Vault Commands](#vault-commands)
-  - [Runtime Configuration](#runtime-configuration)
+  - [Routed Runtime Configuration](#routed-runtime-configuration)
 - [Performance Tuning](#performance-tuning)
 - [Project Structure](#project-structure)
 - [Testing](#testing)
@@ -54,6 +57,39 @@ All interfaces share `tool_runner`, local Ollama services, managed model lifecyc
 ---
 
 ## How It Works — Theory
+
+### Model Routing
+
+Selene has one provider-neutral chat contract and several backend adapters. A conversation stores a stable model identifier such as `local:default`, `gemini:gemini-2.5-flash`, or `openrouter:openrouter/free`. Before each generation, the runtime resolves that identifier through the server-side registry, applies the model-owned system prompt and context limit, and routes the canonical request to the correct adapter.
+
+```
+Interface / conversation
+          │ selected model ID
+          ▼
+┌──────────────────────────────┐
+│ Model registry + prompt policy│
+│ availability · capabilities  │
+│ context limits · credentials │
+└──────────────┬───────────────┘
+               ▼
+┌──────────────────────────────┐
+│ Provider adapter              │
+│ request conversion            │
+│ authentication                │
+│ stream/response normalization │
+│ safe error mapping            │
+└──────┬────────┬────────┬─────┘
+       ▼        ▼        ▼
+   Ollama    Gemini   OpenAI-compatible
+                        │
+              OpenRouter · NVIDIA · custom
+```
+
+The rest of the application never needs provider-specific payloads. Every adapter returns normalized content, thinking metadata, tool calls, token usage, stop reasons, and user-safe errors. The shared agent loop can therefore continue through tools or render a response without knowing which provider produced it.
+
+Routing is conversation-scoped and persistent. Switching modes, loading another conversation, moving between Web/Desktop views, or using `/model` in the terminal does not silently reset the selected route. The local route is always registered; external routes are exposed only when their required server-side configuration is present.
+
+If a chat model fails, the router retries the same turn through a bounded fallback chain: Google Gemini 3.5 Flash Lite, NVIDIA Nemotron 3 Ultra 550B, hosted Gemma 4 31B, and finally local Gemma 4 E4B. Unconfigured routes are skipped. Each transition updates the active model in the UI/TUI, replaces the system prompt and context policy with the fallback model's own defaults, and continues without duplicating an already-attempted route.
 
 ### The Agentic Loop
 
@@ -70,17 +106,17 @@ This creates an **iterative refinement loop** where the model can chain multiple
 - Synthesise both results into a single coherent answer
 
 ```
-User Prompt ──→ LLM ──→ Tool Calls? ──Yes──→ Execute Tools ──→ Inject Results ──→ LLM ──┐
-                              │                                                         │
-                              No                                                        │
-                              │                                                         │
-                              ▼                                                         │
-                        Stream Answer ◀────────────────────────────────────────────────┘
+User Prompt ──→ Model Router ──→ Tool Calls? ──Yes──→ Execute Tools ──→ Inject Results ──┐
+                                      │                                                  │
+                                      No                                                 │
+                                      │                                                  │
+                                      ▼                                                  │
+                                Stream Answer ◀─────────────────────────────────────────┘
 ```
 
 ### Tool Calling
 
-The agent uses the **OpenAI-compatible function calling** format supported by Ollama. Each tool is defined as a JSON schema that describes its name, purpose, and parameters. These schemas are sent to the model alongside every prompt, enabling the model to "know" what tools are available and how to invoke them.
+Internally, Selene uses a canonical function-calling contract. Each tool is defined as a JSON schema describing its name, purpose, parameters, required fields, and enums. Provider adapters translate that contract to Ollama, Gemini's native function declarations, or OpenAI-compatible tool payloads and normalize returned calls back into the same internal shape.
 
 When the model decides a tool is needed, it emits a structured JSON object instead of text:
 
@@ -104,18 +140,19 @@ When the model emits multiple independent read-only tool calls in the same respo
 
 ### Streaming Inference
 
-LLM inference happens in two phases:
+Autoregressive model inference has two broad phases:
 
-1. **Prefill (prompt evaluation):** The model processes all input tokens in parallel. Cost is proportional to `num_ctx` (context window size) × number of input tokens. This is the "thinking" phase.
+1. **Prefill (prompt evaluation):** The selected model processes the input context. Local cost is strongly affected by context length and available memory; hosted providers account for it through their own latency and token limits. Prefill is not the same thing as model reasoning.
 
 2. **Decode (token generation):** The model generates output tokens one at a time, each conditioned on all previous tokens via the **KV cache** (a matrix of key-value attention states). This is the bottleneck for tokens-per-second (tok/s).
 
-The agent streams both phases to the terminal in real-time:
+Provider adapters normalize available stream channels in real time:
 
-- **Thinking tokens** (from Gemma's `thinking` field) are displayed in dim magenta as the model reasons through the problem
-- **Content tokens** are accumulated into a buffer and rendered as rich Markdown using `rich.Live`
+- **Thinking/reasoning metadata** reported by Ollama, Gemini, OpenRouter, NVIDIA, or a compatible endpoint is routed to the collapsible Thinking block
+- **Final content** is routed separately to the response block and rendered as Markdown
+- **Tool calls and usage** are normalized into shared events consumed by Web, Desktop, and TUI
 
-To avoid CPU overhead from re-rendering the entire Markdown buffer on every token, the renderer is **throttled** to approximately 12 FPS (~80ms intervals). Tokens still accumulate in the buffer at full speed — only the visual update is debounced.
+To avoid CPU overhead from re-rendering the entire Markdown buffer on every chunk, the renderers batch visual updates while the stream reader continues consuming provider events.
 
 ### RAG Vault — Retrieval-Augmented Generation
 
@@ -153,11 +190,11 @@ The **context window** (`num_ctx`) is the maximum number of tokens the model can
 The agent manages this automatically:
 
 - **Conservative default `num_ctx` is 4096** under the low-VRAM profile (the safe default when VRAM cannot be measured or is ~4 GiB). The balanced profile raises this to **8192** on larger GPUs. Override with `SELENE_NUM_CTX` or `/set parameter num_ctx`.
-- **System prompt persistence** keeps the active model system prompt in every model request. Selene reads the local `Modelfile` system prompt first, then falls back to Ollama's built-model prompt, then to `~/.selene-agent/system_prompt_cache.txt` (or `$SELENE_DATA_DIR/system_prompt_cache.txt`). This makes prompt edits effective at runtime even before the model is rebuilt, while still keeping a durable fallback.
+- **Provider-aware system prompts** keep the selected model's active prompt in every chat request. Local Gemma uses the compact prompt owned by `Modelfile`, with Ollama inspection and `~/.selene-agent/system_prompt_cache.txt` (or `$SELENE_DATA_DIR/system_prompt_cache.txt`) as durable fallbacks. API models use the larger `agent/prompts/external_models.md` prompt, which keeps Selene's personality while adding stronger reasoning, evidence, tool-loop, research, mutation, and recovery guidance. An explicit conversation system prompt overrides either model default.
 - **System reminder anchoring** adds a compact runtime system reminder near the active user turn while preserving the full system prompt at the front. This helps long conversations retain tool/evidence rules even when the beginning of the context is far away.
 - **History trimming and compaction** keep the prompt within the active token budget. Near 75% usage, older turns are summarized and passed through the context optimizer while system instructions and recent exchanges remain intact; hard trimming remains the final bound.
-- **Context preflight guards** reserve output space before every Ollama call, including follow-up calls after tools. The guard counts serialized chat messages, the runtime tool schema list, a safety margin, and the requested `num_predict` output budget; if necessary it lowers `num_predict` for that call. When Ollama reaches the per-call output limit, Selene automatically continues from the latest answer suffix and streams one combined response instead of silently ending mid-output.
-- **Compact runtime tool schemas** are sent to Ollama instead of the verbose documentation schemas. Function names, descriptions, parameters, required fields, and enums are preserved, but prose-heavy parameter descriptions are stripped because the detailed tool explanations already live in the system prompt and README.
+- **Context preflight guards** reserve output space before every routed chat call, including follow-ups after tools. The guard counts serialized messages, runtime tool schemas, the selected model's context limit, a safety margin, and the requested output budget. When a model reaches its per-call output limit, Selene continues from the latest answer suffix and streams one combined response instead of silently ending mid-output.
+- **Compact runtime tool schemas** are sent through the selected adapter rather than duplicating verbose documentation. Function names, descriptions, parameters, required fields, and enums are preserved while provider-specific conversion remains centralized.
 - **Graceful overflow handling** stops before generation if the prompt still cannot safely fit after trimming. In that case Selene returns a controlled warning asking for a narrower request, a fresh chat, or a larger `num_ctx`, rather than producing unstable output.
 - Both values can be overridden at runtime via `/set parameter num_ctx <value>`.
 
@@ -166,15 +203,20 @@ The agent manages this automatically:
 ## Features
 
 ### Core
-- **Local by default:** The bundled Selene, embedding, and vision models run through Ollama; configured external providers are opt-in for Web/Desktop chat.
-- **Custom model:** Uses a `Modelfile` to wrap Gemma 4 (8B, Q4_K_M quantisation) with a tailored system prompt and optimised sampling parameters.
-- **Thinking visibility:** Streams the model's internal chain-of-thought reasoning before the final answer.
-- **Multi-interface orchestration:** One agent core powering Web UI (default), Terminal CLI (`--cli`), and optional Electron desktop packaging.
+- **Conversation-scoped model routing:** Select a configured local, Gemini, OpenRouter, NVIDIA, or OpenAI-compatible model without changing the tool loop or interface.
+- **Central model registry:** Model IDs, display names, providers, endpoints, required environment variables, capabilities, availability, and context limits live in one server-side layer.
+- **Normalized provider contract:** Gemini-native and OpenAI-compatible request, response, stream, reasoning, tool-call, usage, and error formats become one internal contract.
+- **Automatic fallback:** Failed turns move through Gemini 3.5 Flash Lite, NVIDIA Nemotron 3 Ultra 550B, hosted Gemma 4 31B, and local Gemma 4 E4B when those routes are available, with every transition shown in Web and TUI.
+- **Provider-aware prompts:** Local Gemma retains the compact `Modelfile`; external models receive a larger reasoning/tool prompt with the same Selene identity.
+- **Local data plane:** Conversations, credentials, vault indexes, embeddings, and source documents remain local even when chat inference is routed externally.
+- **Managed local route:** Ollama remains the zero-key default, using a staged `Modelfile` build around Gemma 4 E4B.
+- **Multi-interface orchestration:** One routed agent core powers Web UI, Terminal/TUI (`--cli`), and Electron desktop packaging.
 
 ### Web UI
 
 The default interface — launch with `python main.py` and the agent opens in your browser automatically.
 
+- **Model selector** — choose any configured route per conversation immediately beside the Mode control.
 - **Cyberpunk-Obsidian aesthetic** — deep charcoal backgrounds, glassmorphism cards, and neon glowing accents in Cyan, Magenta, Teal, and Amber.
 - **Enhanced 3D Elements** — realistic layered shadows (`--shadow-subtle`, `--shadow-heavy`) and tactile hover/active states that simulate physical lift for cards and message bubbles.
 - **Context window usage indicators** — visual tracking of the model's context capacity in real time.
@@ -185,7 +227,7 @@ The default interface — launch with `python main.py` and the agent opens in yo
 - **Composer mode picker** — switch between Fast (the default), Ultra Thinking, and Deep Research beside the context meter; enhanced modes use a restrained live text shine while running, and the compact `×` returns the conversation to Fast.
 - **Ultra Thinking** — forces difficulty-aware tools to their highest level, suspends the ordinary eight-round tool cap, and runs an independent second reasoning/review pass before exposing the final answer. Cancellation, context guards, confirmations, timeouts, and repeated-no-progress protection remain active.
 - **Deep Research** — plans three to eight initial hard-difficulty searches according to the active context window, gathers the web evidence in parallel, and continues with as many distinct follow-up search rounds as the evidence requires before synthesizing a source-linked response. Raw research transcripts are compacted silently after every three searches or two page scrapes, while the exact original request is re-anchored. The ordinary eight-round cap is suspended while cancellation, context, timeout, and repeated-no-progress protections remain active.
-- **Collapsible thinking panel** — while the model reasons, a dedicated magenta panel shows the chain-of-thought with animated dots. After completion it collapses into a togglable bar (DeepSeek/Gemini style).
+- **Collapsible thinking panel** — provider-reported reasoning summaries and tool activity appear separately from the final response and collapse after completion.
 - **Consistent reasoning display** — provider-reported reasoning, plan metadata, and dedicated research-planning passes share the collapsible Thinking block in Web and TUI; only the final answer is rendered as the response.
 - **Concurrent web conversations** — sending a prompt creates its sidebar conversation immediately; other conversations can be opened and prompted while responses continue in the background, with a running indicator beside each active chat.
 - **Interactive tool cards** — each tool invocation renders a visual card: `⟳ Running [tool]` → `✓ Executed [tool]`. Click the header to expand raw JSON parameters and output.
@@ -367,43 +409,38 @@ Example routine definition:
 
 ## Architecture
 
-Selene is an **orchestration layer**: thin UI shells (terminal, web, desktop) sit on a shared agent runtime that owns tools, model lifecycle, context, and memory.
+Selene is a **routed orchestration layer**: thin UI shells sit on a shared agent runtime, and that runtime owns model selection, provider conversion, prompts, fallback, tools, context, and memory.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  Interfaces                                                      │
-│  Web UI (default)  ·  Terminal CLI (--cli)  ·  Electron desktop  │
-└───────────────┬──────────────────────────────┬───────────────────┘
-                │                              │
-     agent/core.py                    agent/web.py + web_runtime
-     Terminal loop · /commands        Threaded HTTP + SSE
-     session save                     generation ownership · APIs
-                │                              │
-                └────────────────┬─────────────┘
-                                 ▼
-              ┌────────────────────────────────────┐
-              │  Orchestration core (main.py entry)│
-              │  doctor · profiles · managed model │
-              │  agent/model_providers.py          │
-              │  chat registry + provider adapters │
-              │  agent/ollama_runtime.py           │
-              │  local coordinator + embed/vision  │
-              └────────────────┬───────────────────┘
-                               │
-              ┌────────────────┼────────────────────┐
-              ▼                ▼                    ▼
-   agent/tool_runner.py   tools/registry.py   agent/platform_runtime.py
-   ordered/parallel       schemas·dispatch    paths·process·desktop
-   cancel + timeouts      ·ToolMetadata       terminals·browser
-              │
-              ▼
-         tools/* handlers  ──► optional Chroma / Ollama / OS APIs
+┌──────────────────────────────────────────────────────────────────────┐
+│ Interfaces                                                           │
+│ Web UI · Electron desktop · Terminal/TUI                             │
+│ Model selector · modes · conversations · streaming presentation      │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ Shared agent runtime                                                  │
+│ agent/web.py · agent/core.py · web_runtime                            │
+│ session ownership · context guards · tool loop · cancellation         │
+└───────────────┬──────────────────────────────────┬───────────────────┘
+                ▼                                  ▼
+┌───────────────────────────────────┐   ┌──────────────────────────────┐
+│ Routed model plane                │   │ Tool and local-data plane     │
+│ model_providers.py                │   │ tool_runner.py + registry.py  │
+│ system_prompts.py                 │   │ ordered/parallel execution    │
+│ registry · adapters · fallback    │   │ vault · Chroma · OS APIs      │
+│ normalized streams and errors     │   │ local embedding and vision    │
+└───────────────┬───────────────────┘   └──────────────────────────────┘
+                │
+       ┌────────┼──────────┬──────────────┬─────────────────┐
+       ▼        ▼          ▼              ▼                 ▼
+    Ollama   Gemini    OpenRouter      NVIDIA       custom compatible
 
- Supporting modules: runtime_config · model_lifecycle · diagnostics ·
- persistence · cancellation
+Supporting modules: runtime_config · model_lifecycle · diagnostics ·
+persistence · cancellation · platform_runtime
 
- Electron desktop (optional): electron/main.js spawns selene-backend,
- waits for stdout port announce, single-instance lock, owned shutdown
+Electron desktop: electron/main.js spawns the server-side backend, waits
+for readiness, keeps provider keys outside the renderer, and owns shutdown.
 ```
 
 Authoritative module map for contributors: [AGENTS.md](AGENTS.md).
@@ -413,19 +450,19 @@ Authoritative module map for contributors: [AGENTS.md](AGENTS.md).
 1. Browser opens automatically at `http://localhost:5005` (or next free port)
 2. User message is `POST`ed to `/api/chat` with client and generation identity headers
 3. `web_runtime` leases generation ownership (one active generation per saved session; unsaved chats isolated per tab)
-4. `web.py` builds a provider-neutral request with session parameters, trimmed history, and compact tool schemas; `model_providers.py` routes it to local Ollama or the selected server-side provider adapter
-5. Tool calls run through `tool_runner` (metadata-aware parallelism, cancellation, bounds); SSE `tool_*` events stream to the browser
-6. Thinking tokens arrive as `thinking` SSE events; content tokens as `token` events
-7. `app.js` renders tokens in real time, assembles the thinking panel, and builds tool cards
-8. The stream ends in exactly one terminal state (`completed`, `cancelled`, or `failed`) and history is updated when appropriate
+4. `web.py` builds a provider-neutral request with the conversation's model ID, selected system prompt, trimmed history, context policy, and compact tool schemas
+5. `model_providers.py` resolves the registered route, authenticates server-side, converts the request for Ollama/Gemini/OpenAI-compatible APIs, and normalizes the returned stream
+6. Tool calls run through `tool_runner` (metadata-aware parallelism, cancellation, bounds); SSE `tool_*` events stream to the browser
+7. Normalized thinking and final-content events render in their respective UI blocks
+8. The stream ends in exactly one terminal state (`completed`, `cancelled`, or `failed`); failures may activate the bounded fallback route before completion
 
 ### Data Flow — Terminal CLI
 
 1. **User input** enters the chat loop in `agent/core.py`
 2. Slash commands (`/help`, `/save`, `/vault`, etc.) are intercepted and handled locally — they never touch the LLM
-3. Natural language input is sent through the shared Ollama coordinator with compact tool schemas and (trimmed) conversation history
+3. Natural language input is sent through the same model registry and selected provider adapter with compact tool schemas and trimmed conversation history
 4. Tool calls go through `tool_runner` → registry dispatch → Python handlers
-5. Tool results are appended to the conversation and the model is called again
+5. Tool results are appended to the conversation and routed back to the same selected model
 6. Final text output is streamed through the terminal renderer with Markdown and LaTeX processing
 7. `Ctrl+\` cancels the active generation while keeping partial context; `Ctrl+C` exits the process
 
@@ -463,12 +500,15 @@ Critical JSON (sessions, aliases, routines metadata, and similar) is written wit
 
 ## Prerequisites
 
-- **[Ollama](https://ollama.com/)** installed and running (`ollama serve`)
 - **Python 3.10+** (CI validates 3.11/3.12; local Fedora hosts may be newer)
-- **Gemma 4 E4B model:** `ollama pull gemma4:e4b`
-- **Embedding model (for vault):** `ollama pull embeddinggemma`
-- **Vision model (optional):** `ollama pull moondream`
+- **At least one chat route:**
+  - **Local:** [Ollama](https://ollama.com/) running with `gemma4:e4b`
+  - **External:** a configured Gemini, OpenRouter, NVIDIA, or OpenAI-compatible endpoint in `.env`
+- **For local vault embeddings:** Ollama with `embeddinggemma`
+- **For local vision:** Ollama with `moondream`
 - **For Spotify:** Spotify desktop app. On Linux, `dbus-python` is also required (pre-installed on most GNOME/Fedora systems).
+
+Ollama is the default route and is required for the managed local chat model, local embeddings, and local vision. Web/Desktop can start with configured external chat providers when the local chat model is unavailable; local vault embedding and vision features still require their Ollama models. The current terminal startup path also initializes the local runtime before model switching.
 
 ---
 
@@ -487,15 +527,19 @@ sudo dnf install poppler-utils -y
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Ensure Ollama has the required models
+# Choose the local route (default)
 ollama pull gemma4:e4b
-ollama pull embeddinggemma
-ollama pull moondream   # optional vision
+ollama pull embeddinggemma  # optional: vault/RAG
+ollama pull moondream       # optional: vision
+
+# Or configure one or more external routes
+cp .env.example .env
+# Add only the provider keys and model lists you intend to use
 
 # Non-destructive environment check
 python main.py --doctor
 
-# Start the agent (auto-builds the custom model on first run)
+# Start the routed Web UI
 python main.py
 ```
 
@@ -506,6 +550,7 @@ git clone https://github.com/RahulBiju-dev/AI-Orchestration-Layer.git
 cd AI-Orchestration-Layer
 python -m pip install -r requirements.txt
 # dbus-python is skipped automatically via environment markers
+Copy-Item .env.example .env  # optional external routes
 python main.py --doctor
 python main.py
 ```
@@ -518,12 +563,12 @@ The agent supports memory-safe multimodal vision, allowing it to read slides, di
 
 ### What happens on first run
 
-The agent uses a **staged managed-model lifecycle**: build under a temporary alias, inspect, publish to the live `selene` alias, then record Modelfile hash metadata. It never pre-deletes the live alias. The Modelfile bundles:
+Selene loads the provider configuration, registers the local route plus each configured external route, and exposes that safe metadata to the interfaces. If the local Ollama route is available, the agent uses a **staged managed-model lifecycle**: build under a temporary alias, inspect it, publish it to the live `selene` alias, and record Modelfile hash metadata. It never pre-deletes the live alias. The Modelfile bundles:
 - The Gemma 4 base weights
 - A system prompt with personality, knowledge cutoff rules, and tool-use instructions
 - Conservative sampling parameters aligned with the selected hardware profile
 
-This custom model is cached by Ollama and reused on subsequent runs when the Modelfile hash matches.
+This custom model is cached by Ollama and reused when the Modelfile hash matches. A configured external route does not download or bundle remote weights; the Python backend reads its API configuration and sends requests only when that model is selected.
 
 ---
 
@@ -542,7 +587,7 @@ Reports Python/OS, runtime paths and writability, hardware profile, Ollama avail
 
 Selene can be built into a standalone desktop application using Electron and PyInstaller. This bundles the Python backend and web UI into a single executable that you can distribute.
 
-> **Note**: The Ollama engine and models (like Gemma 4) are **not** bundled in the app to keep the file size reasonable. Users must have Ollama installed and running on their system.
+> **Note**: Model runtimes and weights are not bundled. Install Ollama to use the local chat, embedding, or vision routes. An external-only Web/Desktop setup can instead provide server-side API configuration through `.env` or `SELENE_ENV_FILE`.
 
 ### Scripts (`package.json`)
 
@@ -587,9 +632,21 @@ Selene can be built into a standalone desktop application using Electron and PyI
 
    `electron/build_desktop.py` always forces `--publish never`. NSIS uninstall leaves user runtime data intact (`deleteAppDataOnUninstall: false`).
 
-## External Model Providers
+## Model Providers and Routing
 
-The Web UI and Electron desktop UI show a **Model** dropdown immediately before **Mode**. Options use the underlying model name without a `Selene` prefix; the first local option is **Gemma 4 E4B**. The selected model remains only the inference backend, and every external request receives the application's identity and active system prompt. The managed local model is always registered and remains the default. External models appear only when their required server-side configuration is present. The selection is saved with the conversation; a new conversation inherits the current selection.
+The registry is Selene's source of truth for model identity, provider, endpoint, required configuration, capabilities, context capacity, and availability. The UI consumes only safe registry metadata; it never constructs provider URLs or reads credentials.
+
+| Route | Model ID prefix | Adapter | Availability |
+|-------|-----------------|---------|--------------|
+| Managed local Gemma | `local:` | Ollama | Registered by default; requires the local runtime to generate |
+| Google Gemini | `gemini:` | Native Gemini contents, tools, and SSE | Requires `GEMINI_API_KEY` and configured model IDs |
+| OpenRouter | `openrouter:` | OpenAI-compatible chat completions | Requires `OPENROUTER_API_KEY` and free-model IDs |
+| NVIDIA hosted NIM | `nvidia:` | OpenAI-compatible chat completions | Requires `NVIDIA_API_KEY` and model IDs |
+| Compatible/self-hosted | `custom:` | Configurable OpenAI-compatible endpoint | Requires a base URL and model ID; API key is optional |
+
+The Web and Electron interfaces show a **Model** dropdown immediately before **Mode**; Terminal/TUI uses `/model` or `/set model`. Options use the underlying model name without a `Selene` prefix, and the first local option is **Gemma 4 E4B**. External routes appear only when their required server-side configuration is present. Selection is stored with the conversation, survives mode changes and navigation, and is inherited by a newly created conversation.
+
+System prompts are model-aware. Local chat uses the compact `Modelfile` prompt designed for the constrained local context. Every external chat model uses `agent/prompts/external_models.md`, a larger provider-neutral prompt with the same Selene identity and more explicit reasoning, evidence, tool selection, loop prevention, research, file, mutation, and error-recovery rules. The selected prompt is applied before context accounting and reasserted at the provider boundary, so automatic API-to-local fallback cannot carry the external prompt into Gemma. `/set system "<prompt>"` remains a per-conversation override; `/set system default` restores whichever default belongs to the selected model. `/show system` reports the effective prompt and whether it is a model default or conversation override.
 
 For a source checkout, create the ignored local configuration file:
 
@@ -603,7 +660,7 @@ On PowerShell:
 Copy-Item .env.example .env
 ```
 
-Add keys only to `.env` or to the backend process environment. Packaged deployments can set `SELENE_ENV_FILE` to an absolute server-side env-file path. Do not add keys to `agent/static`, Electron renderer code, browser storage, a committed session file, or a URL. Exported process variables take precedence over `.env`, and the browser receives only safe model metadata (identifier, display name, provider, capabilities, and context limit).
+Add keys only to `.env` or to the backend process environment. The Electron development app reads the project-root `.env`. Packaged desktop builds first look for `.env` in the application user-data directory, then beside a portable executable; a locally packaged AppImage under `dist-electron` also reuses the project-root `.env`. Set `SELENE_ENV_FILE` to an absolute server-side env-file path to override those locations. Restart the desktop app after changing provider configuration. Do not add keys to `agent/static`, Electron renderer code, browser storage, a committed session file, or a URL. Exported process variables take precedence over `.env`, and the browser receives only safe model metadata (identifier, display name, provider, capabilities, and context limit).
 
 | Provider | Required variables | Optional variables |
 |----------|--------------------|--------------------|
@@ -612,17 +669,24 @@ Add keys only to `.env` or to the backend process environment. Packaged deployme
 | [Google Gemini](https://ai.google.dev/gemini-api/docs/api-key) | `GEMINI_API_KEY`, `GEMINI_MODELS` | `GEMINI_BASE_URL`, `GEMINI_CONTEXT_WINDOW`; legacy `GEMINI_MODEL` |
 | OpenAI-compatible / self-hosted | `CUSTOM_LLM_BASE_URL`, `CUSTOM_LLM_MODEL` | `CUSTOM_LLM_API_KEY`, `CUSTOM_LLM_CONTEXT_WINDOW` |
 
-Remote models have no implicit model default and appear in the selector only when every required variable in the table is set. `OPENROUTER_MODELS` accepts a comma-separated list and exposes one selector entry per configured model through the same `OPENROUTER_API_KEY`; use `openrouter/free` for the zero-cost router, or specific model identifiers ending in `:free`. The older single-value `OPENROUTER_MODEL` remains supported when `OPENROUTER_MODELS` is unset. `NVIDIA_MODELS` accepts comma-separated NVIDIA model IDs and exposes each through one `NVIDIA_API_KEY`, using NVIDIA's OpenAI-compatible hosted endpoint by default. `GEMINI_MODELS` works the same way through one `GEMINI_API_KEY`; the older single-value `GEMINI_MODEL` remains supported when `GEMINI_MODELS` is unset. Selene accepts only the free Gemini chat/tool models listed in `.env.example`, not specialized Live, TTS, image, embedding, or robotics endpoints. `CUSTOM_LLM_API_KEY` may be blank when a trusted local endpoint does not require authentication. Custom endpoints are intended for open-weight models that you host or access through an OpenAI-compatible service. Restart the Python backend after changing provider configuration.
+Remote routes have no implicit model default and appear only when every required variable in the table is set. Each `*_MODELS` value accepts a comma-separated list and creates one registry entry per model while reusing the provider's single API key. `OPENROUTER_MODELS` accepts `openrouter/free` or specific identifiers ending in `:free`; the older single-value `OPENROUTER_MODEL` remains supported. `NVIDIA_MODELS` routes multiple model IDs through NVIDIA's OpenAI-compatible hosted endpoint. `GEMINI_MODELS` routes multiple supported free chat/tool models through one Google key; the older `GEMINI_MODEL` remains supported. Specialized Live, TTS, image, embedding, and robotics Gemini endpoints are not registered as chat routes. `CUSTOM_LLM_API_KEY` may be blank for a trusted local endpoint that does not authenticate. Restart the Python backend after changing provider configuration.
 
 API-backed models default to the maximum context recorded in the registry instead of inheriting the local hardware profile: 1,048,576 tokens for the listed Gemini models and 262,144 for hosted Gemma 4 26B/31B. OpenRouter, NVIDIA, and custom endpoints default to 131,072 because their selected model cannot be inferred generically; set the corresponding `*_CONTEXT_WINDOW` variable to the endpoint's advertised maximum. An explicit per-conversation `num_ctx` remains respected but is capped at the selected model's registry limit. Switching back to local Gemma 4 E4B restores the hardware-aware local context because the API maximum is not persisted into session settings.
 
-Provider requests are made only by the Python backend. `agent/model_providers.py` owns the registry, identity injection, context limits, availability checks, authentication headers, endpoint construction, request/response conversion, and safe error mapping. OpenRouter, NVIDIA, and custom endpoints share the OpenAI-compatible adapter; Gemini has a centralized adapter for its native content and function-call formats. Each adapter normalizes content, thinking text when supplied, function calls, token usage, stop reasons, timeouts, invalid credentials, rate limits, malformed responses, and network failures into the contract consumed by `agent/web.py`. Standard SSE metadata and isolated malformed proxy frames are ignored when later valid model events arrive. A terminal provider or network failure is rendered and saved as an error-styled assistant response rather than disappearing into a toast.
+Provider requests are made only by the Python backend. `agent/system_prompts.py` centrally selects and applies the local, external, or explicit conversation prompt. `agent/model_providers.py` owns the registry, prompt enforcement at execution, identity injection, context limits, availability checks, authentication headers, endpoint construction, request/response conversion, and safe error mapping. OpenRouter, NVIDIA, and custom endpoints share the OpenAI-compatible adapter; Gemini has a centralized adapter for its native content and function-call formats. Each adapter normalizes content, thinking text when supplied, function calls, token usage, stop reasons, timeouts, invalid credentials, rate limits, malformed responses, and network failures into the contract consumed by `agent/web.py`. Standard SSE metadata and isolated malformed proxy frames are ignored when later valid model events arrive. A terminal provider or network failure is rendered and saved as an error-styled assistant response rather than disappearing into a toast.
 
 OpenRouter can report provider failures inside an HTTP 200 SSE stream. Selene reads those typed error events and turns rate limits, unavailable free capacity, timeouts, context limits, and access errors into specific response-box messages instead of reporting a malformed or empty stream. For reasoning models such as Nemotron, complete `reasoning_details` continuation blocks are stored with the assistant turn and replayed only to OpenRouter on follow-up and tool-result requests, as required by its multi-turn protocol. These blocks may contain opaque provider state, so conversation files should be protected with the same care as prompt history even though they never contain the OpenRouter API key.
 
-When the active chat model fails before or during generation, Selene first retries the same turn with `gemini:gemini-3.1-flash-lite`. If that model is unavailable or also fails, Selene retries once more with local Gemma 4 E4B. Each transition updates the selected model immediately in Web and TUI. Add `gemini-3.1-flash-lite` to `GEMINI_MODELS` and configure `GEMINI_API_KEY` to enable the first tier; the local tier remains available without a provider key. The chain is bounded and never retries a model already attempted during that response.
+When the active chat model fails before or during generation, Selene tries these routes in order:
 
-To register another model for an existing provider, add a `ModelDefinition` entry in `build_model_registry()` and point it at the applicable adapter configuration. To add a new provider, implement its payload and response conversion inside `agent/model_providers.py`, route it in `_remote_chat()`, declare its capabilities and required environment variables, then add mocked adapter/error tests in `tests/test_model_providers.py`. Provider-specific code should not be added to `agent/web.py` or the browser.
+1. `gemini:gemini-3.5-flash-lite`
+2. `nvidia:nvidia/nemotron-3-ultra-550b-a55b`
+3. `gemini:gemma-4-31b-it`
+4. `local:default`
+
+Each transition updates the selected model immediately in Web and TUI. A remote tier is skipped unless its model ID is present in the corresponding `*_MODELS` list and its API key is configured. The local tier needs no provider key but still requires a working Ollama runtime. The chain is bounded and never retries a model already attempted during that response.
+
+To register another model for an existing provider, extend its registry configuration and reuse the applicable adapter. To add a new provider, implement payload and response conversion inside `agent/model_providers.py`, route it in `_remote_chat()`, declare capabilities and required environment variables, then add mocked adapter/error tests. Provider-specific logic does not belong in `agent/web.py`, `agent/core.py`, or browser code.
 
 External chat does not make local document processing remote: vault embeddings and vision tools still use the configured local Ollama embedding/vision models. Conversely, prompts, tool schemas, relevant conversation history, and tool results needed for an external chat turn are sent to the selected provider, so review that provider's retention and privacy terms before use. Web/Desktop use the Model menu; the TUI and classic CLI use `/model` or `/set model`. Only server-configured models are listed.
 
@@ -701,7 +765,7 @@ Type `/` in the terminal CLI to open the filtered command menu. Use **Up/Down** 
 | `/set wordwrap` / `/set nowordwrap` | Toggle word wrapping |
 | `/show parameters` | View active session parameters and flags |
 | `/show system` | Display the current system prompt |
-| `/show model` | Show model architecture and parameter count (also `/show info`) |
+| `/show model` | Show the active route, provider, context limit, and local details when available (also `/show info`) |
 | `/quit` | Exit the agent (also `/exit`, `/q`) |
 
 ### Vault Commands
@@ -745,18 +809,18 @@ The vault provides persistent semantic search over your local documents:
 
 **Complete notes workflow:** Finish the resumable index first. Use `vault_search` for focused questions, `vault_read` with `next_cursor` for exhaustive logs, `export_vault_pdf` for a lossless reference export, or `build_vault_notes_pdf` for refined notes. The refined workflow returns a new cursor until every ordered excerpt has a durable note section; it never treats one top-K search as the whole lecture deck.
 
-### Runtime Configuration
+### Routed Runtime Configuration
 
-Settings resolve in this order (highest wins):
+The conversation's selected model ID chooses the route. Runtime settings then resolve for that model in this order (highest wins):
 
 1. Session / slash-command override (`/set …`)
 2. Environment variables (`SELENE_*`)
 3. Selected hardware profile (`auto`, `low-vram`, `balanced`, `manual`)
-4. Bundled Modelfile defaults (`manual`)
+4. Model-owned defaults: the local Modelfile or the external registry and prompt policy
 
-The desktop app and browser UI ask which runtime profile to use when they open. **Manual** is preselected and keeps the bundled Modelfile values; choose **Auto** to inspect the device, or explicitly select **Low VRAM** or **Balanced**. The same choice remains available under Settings → Model.
+The desktop app and browser UI ask which local runtime profile to use when they open. **Manual** is preselected and keeps the bundled Modelfile values; choose **Auto** to inspect the device, or explicitly select **Low VRAM** or **Balanced**. The same choice remains available under Settings → Model. External routes take their context ceiling and capabilities from the model registry rather than a local hardware profile.
 
-All model parameters can be adjusted without restarting:
+Model parameters can be adjusted without restarting. The router passes only the subset supported by the selected provider; `num_ctx` also controls Selene's history budget and is capped by the registered model context limit.
 
 ```bash
 >>> /set parameter temperature 0.8
@@ -787,10 +851,8 @@ Common environment overrides (see `agent/runtime_config.py` for the full list):
 
 ## Performance Tuning
 
-Selene defaults to the **manual** profile and bundled Modelfile parameters. Hardware inspection only selects a profile when **auto** is explicitly chosen; in Auto mode, unmeasurable VRAM or a ~4 GiB class GPU selects the conservative **low-vram** profile. All chat, title, summary, embedding, and vision work shares one Ollama coordinator; low-VRAM mode serializes model-heavy work without serializing ordinary tools.
-Selene defaults to the **manual** profile and the bundled Modelfile parameters. Hardware inspection only selects a profile when you choose **auto**; in Auto mode, unmeasurable VRAM or a ~4 GiB class GPU selects the conservative **low-vram** profile. All chat, title, summary, embedding, and vision work shares one Ollama coordinator; low-VRAM mode serializes model-heavy work without serializing ordinary tools.
+These settings tune the **local Ollama route and local services**. Selene defaults to the **manual** profile and bundled Modelfile parameters. Hardware inspection only selects a profile when you choose **auto**; in Auto mode, unmeasurable VRAM or a ~4 GiB class GPU selects the conservative **low-vram** profile. Local chat, title, summary, embedding, and vision work shares one Ollama coordinator; low-VRAM mode serializes model-heavy work without serializing ordinary tools. External chat routes use their provider limits and do not consume these local model slots.
 
-| Setting | low-vram (Auto safeguard) | balanced (larger GPU) | Purpose |
 | Setting | low-vram (Auto safeguard) | balanced (larger GPU) | Purpose |
 |---------|------------------------------|------------------------|---------|
 | `num_ctx` | 4096 | 8192 | Context window |
@@ -852,6 +914,9 @@ AI-Orchestration-Layer/
 │   ├── web_runtime.py         # Client/session generation ownership leases
 │   ├── tool_runner.py         # Metadata-aware ordered/parallel tool execution
 │   ├── model_providers.py     # Model registry, adapters, normalized chat contract
+│   ├── system_prompts.py      # Provider-aware default/override prompt policy
+│   ├── prompts/
+│   │   └── external_models.md # Large external-model reasoning/tool prompt
 │   ├── environment.py         # Safe server-side .env loader
 │   ├── ollama_runtime.py      # Shared local Ollama coordinator + API client
 │   ├── model_lifecycle.py     # Staged alias build → inspect → publish
@@ -887,9 +952,16 @@ Runtime data is kept outside the checkout (see [Runtime data paths](#runtime-dat
 
 ### Key Design Decisions
 
+- **The model registry owns routing** — interfaces persist a model ID; the registry resolves provider, endpoint, credentials, capabilities, context limits, and availability.
+- **One normalized model contract** — adapters translate provider-specific request, stream, tool-call, usage, and error formats at the boundary.
+- **Provider logic stays centralized** — adding a model is a registry change; adding a protocol is an adapter change, not a web/TUI rewrite.
+- **Prompt and context policy follow the route** — local models retain the Modelfile-oriented policy, while external models receive the larger provider-aware system prompt and registered context ceiling.
+- **Bounded failover is explicit** — provider failures surface in the response UI, announce the route change, and retry through the configured fallback chain instead of looping indefinitely.
 - **Multi-interface by design** — Web UI is the default (`python main.py`); Terminal CLI is opt-in via `--cli`; Electron packages the same orchestration backend for desktop distribution.
-- **Shared Ollama coordinator** — chat, titles, summaries, embeddings, and vision share one queue/slot policy so low-VRAM hosts stay stable.
-- **Managed model lifecycle** — rebuilds stage under a temporary alias, inspect, then publish to `selene`; the live alias is never pre-deleted.
+- **Secrets stay server-side** — provider keys are loaded by the backend and are never embedded in browser or Electron renderer code, logs, or stream events.
+- **Local services remain first-class** — embeddings, vault retrieval, vision, and the optional local chat route continue through Ollama even when a conversation uses an external chat model.
+- **Shared local coordinator** — local chat, titles, summaries, embeddings, and vision share one queue/slot policy so low-VRAM hosts stay stable.
+- **Managed local model lifecycle** — rebuilds stage under a temporary alias, inspect, then publish to the configured local model; the live alias is never pre-deleted.
 - **SSE over WebSockets** — token streaming uses standard HTTP with automatic reconnect behaviour and no upgrade handshake.
 - **`ThreadingMixIn` HTTP server** — long-lived SSE connections do not block session APIs.
 - **Generation ownership** — `web_runtime` isolates unsaved tabs and serializes generations on a saved session name; terminal SSE state is exclusive.
@@ -911,7 +983,7 @@ python -m unittest discover -s tests -v
 python main.py --doctor
 ```
 
-CI (`.github/workflows/ci.yml`) runs Linux and Windows Python matrices, registry validation, frontend bundle checks, and packaging configuration smoke tests. Tests never download Ollama models or require a GPU, OAuth credentials, Spotify, or GUI interaction.
+CI (`.github/workflows/ci.yml`) runs Linux and Windows Python matrices, model/tool registry validation, normalized provider-adapter fixtures, frontend checks, and packaging configuration smoke tests. Provider tests use mocked responses and placeholder configuration: they never require real API keys. The suite also avoids downloading Ollama models or requiring a GPU, OAuth credentials, Spotify, or GUI interaction.
 
 ## Contributing
 

@@ -20,16 +20,28 @@ import requests
 from agent.cancellation import CancellationToken
 from agent.environment import load_dotenv
 from agent.runtime_config import RuntimeConfig
+from agent.system_prompts import (
+    active_system_prompt_for_session,
+    apply_active_system_prompt,
+)
 
 
 LOCAL_MODEL_ID = "local:default"
-ERROR_FALLBACK_MODEL = "gemini-3.1-flash-lite"
+ERROR_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 ERROR_FALLBACK_MODEL_ID = f"gemini:{ERROR_FALLBACK_MODEL}"
-ERROR_FALLBACK_MODEL_IDS = (ERROR_FALLBACK_MODEL_ID, LOCAL_MODEL_ID)
+NVIDIA_ERROR_FALLBACK_MODEL_ID = "nvidia:nvidia/nemotron-3-ultra-550b-a55b"
+GEMMA_ERROR_FALLBACK_MODEL_ID = "gemini:gemma-4-31b-it"
+ERROR_FALLBACK_MODEL_IDS = (
+    ERROR_FALLBACK_MODEL_ID,
+    NVIDIA_ERROR_FALLBACK_MODEL_ID,
+    GEMMA_ERROR_FALLBACK_MODEL_ID,
+    LOCAL_MODEL_ID,
+)
 DEFAULT_CAPABILITIES = frozenset({"chat", "streaming", "tools", "thinking", "json"})
 REMOTE_CAPABILITIES = frozenset({"chat", "streaming", "tools", "json"})
 GEMINI_FREE_CHAT_MODELS = (
     "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-3-flash-preview",
     "gemini-2.5-pro",
@@ -525,7 +537,10 @@ def session_for_model(
 ) -> dict[str, Any]:
     """Return request-only settings with the selected provider's context limit."""
     source = deepcopy(dict(session or {}))
-    selected = resolve_model(source.get("model_id"), runtime, environ)
+    try:
+        selected = resolve_model(source.get("model_id"), runtime, environ)
+    except (MissingProviderConfiguration, UnsupportedModelError):
+        selected = resolve_model(LOCAL_MODEL_ID, runtime, environ)
     if selected.id == LOCAL_MODEL_ID or not selected.context_window:
         return source
 
@@ -1477,22 +1492,30 @@ def chat_with_model(
     """Route a canonical Selene chat call through the selected adapter."""
     environment = os.environ if environ is None else environ
     model = resolve_model((session or {}).get("model_id"), runtime, environment)
+    routed_kwargs = dict(kwargs)
+    operation_kind = getattr(kwargs.get("kind"), "value", kwargs.get("kind"))
+    if operation_kind in (None, "chat"):
+        routed_kwargs["messages"] = apply_active_system_prompt(
+            kwargs.get("messages") or [],
+            active_system_prompt_for_session(session),
+        )
     if model.id == LOCAL_MODEL_ID:
-        local_kwargs = dict(kwargs)
-        local_kwargs["model"] = model.model
-        return ollama_service_factory(runtime).chat(**local_kwargs)
+        routed_kwargs["model"] = model.model
+        return ollama_service_factory(runtime).chat(**routed_kwargs)
 
-    operation_timeout = float(kwargs.pop("operation_timeout", runtime.chat_timeout_seconds))
-    kwargs.pop("kind", None)
-    kwargs.pop("owner", None)
-    cancellation_token = kwargs.pop("cancellation_token", None)
-    kwargs.pop("model", None)
+    operation_timeout = float(
+        routed_kwargs.pop("operation_timeout", runtime.chat_timeout_seconds)
+    )
+    routed_kwargs.pop("kind", None)
+    routed_kwargs.pop("owner", None)
+    cancellation_token = routed_kwargs.pop("cancellation_token", None)
+    routed_kwargs.pop("model", None)
     return _remote_chat(
         model,
         environ=environment,
         operation_timeout=operation_timeout,
         cancellation_token=cancellation_token,
-        **kwargs,
+        **routed_kwargs,
     )
 
 

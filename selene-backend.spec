@@ -10,6 +10,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('Modelfile', '.'),
+        ('agent/prompts/external_models.md', 'agent/prompts'),
         ('agent/static', 'agent/static')
     ],
     hiddenimports=[

@@ -2334,14 +2334,17 @@ function updateComposerState() {
   if (el.mic) el.mic.disabled = !state.voice.recognition || state.isGenerating;
   if (el.modeTrigger) el.modeTrigger.disabled = state.isGenerating;
   if (el.modeClear) el.modeClear.disabled = state.isGenerating;
-  if (el.modelSelect) el.modelSelect.disabled = state.isGenerating;
+  if (el.modelTrigger) el.modelTrigger.disabled = state.isGenerating;
   if (el.modePicker) {
     el.modePicker.classList.toggle(
       "running",
       state.isGenerating && activeAgentMode() !== "normal"
     );
   }
-  if (state.isGenerating) closeModeMenu();
+  if (state.isGenerating) {
+    closeModeMenu();
+    closeModelMenu();
+  }
   if (el.send) {
     el.send.disabled = stopping || (!state.isGenerating && !hasText);
     el.send.textContent = stopping ? "Stopping…" : (state.isGenerating ? "Stop" : "Send");
@@ -2552,16 +2555,18 @@ function updateContextMeter(forcedUsed = null, forcedBudget = null) {
 }
 
 function activeSystemPromptText() {
-  // Match backend: session system override, else Modelfile/default system prompt.
+  // Match backend: session override, else the selected model's own default.
   const override = String(state.settings.system || "").trim();
   if (override) return override;
-  const fromHistory = state.history.find((message) => message.role === "system")?.content;
-  if (fromHistory) return String(fromHistory);
-  return String(
+  const backendPrompt = String(
     state.runtime?.active_system_prompt
       || state.runtime?.default_system_prompt
       || ""
   );
+  if (backendPrompt) return backendPrompt;
+  const fromHistory = state.history.find((message) => message.role === "system")?.content;
+  if (fromHistory) return String(fromHistory);
+  return "";
 }
 
 function estimatedContextTokens() {

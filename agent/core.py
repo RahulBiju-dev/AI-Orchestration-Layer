@@ -75,6 +75,10 @@ from agent.modes import (
 from agent.persistence import atomic_write_json, atomic_write_text
 from agent.platform_runtime import get_runtime_paths, resource_path
 from agent.runtime_config import RuntimeConfigurationError, RuntimeConfig, get_runtime_config
+from agent.system_prompts import (
+    active_system_prompt_for_session,
+    extract_local_system_prompt,
+)
 from agent.tool_runner import (
     ToolCallResult,
     ToolCallSpec,
@@ -557,16 +561,7 @@ def _context_safety_margin(num_ctx: int) -> int:
 
 
 def _extract_system_prompt_from_modelfile() -> str:
-    path = os.path.join(_PROJECT_ROOT, "Modelfile")
-    try:
-        with open(path, "r", encoding="utf-8") as stream:
-            text = stream.read()
-    except OSError:
-        return ""
-    match = re.search(r'SYSTEM\s+"""(.*?)"""', text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return ""
+    return extract_local_system_prompt()
 
 
 def _modelfile_mtime() -> float | None:
@@ -2738,17 +2733,20 @@ def _handle_show(args: str, session: dict, history: list[dict]) -> None:
         return
 
     if sub == "system":
-        prompt = session.get("system", "")
-        if not prompt:
-            # Check if history has one from the Modelfile
-            if history and history[0].get("role") == "system":
-                prompt = history[0]["content"]
+        override = str(session.get("system") or "").strip()
+        prompt = active_system_prompt_for_session(
+            session,
+            local_prompt=load_default_system_prompt(),
+        )
         if prompt:
             _console.print()
-            print_info("System prompt")
+            print_info(
+                "System prompt",
+                detail="conversation override" if override else "model default",
+            )
             _console.print(f"  [dim]{prompt}[/]\n")
         else:
-            print_info("No system prompt set (using Modelfile default)")
+            print_info("No system prompt is available")
             _console.print()
         return
 
@@ -3637,7 +3635,10 @@ def process_user_turn(
         model_user_input = user_input
 
     # ── Sync system prompt ────────────────────────────────────────
-    active_system = session.get("system") or default_system_prompt
+    active_system = active_system_prompt_for_session(
+        session,
+        local_prompt=default_system_prompt,
+    )
     if active_system:
         if (
             not history
