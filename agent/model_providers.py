@@ -954,11 +954,65 @@ def _openai_payload(definition: ModelDefinition, kwargs: Mapping[str, Any]) -> d
         payload["response_format"] = {"type": "json_object"}
     if payload["stream"]:
         payload["stream_options"] = {"include_usage": True}
+    if _is_nvidia_nemotron(definition):
+        payload["chat_template_kwargs"] = {
+            "enable_thinking": bool(kwargs.get("think", True)),
+            "force_nonempty_content": True,
+        }
     return payload
 
 
-def _openai_chunk(payload: Mapping[str, Any], provider: str) -> NormalizedChunk:
-    _raise_for_provider_payload_error(payload, provider)
+def _is_nvidia_nemotron(definition: ModelDefinition) -> bool:
+    model = definition.model.casefold().removeprefix("nvidia/")
+    return (
+        definition.id.startswith("nvidia:")
+        and model.startswith("nemotron-3-")
+    )
+
+
+def _requests_fenced_output(messages: Sequence[dict]) -> bool:
+    for message in reversed(messages):
+        if str(message.get("role") or "") != "user":
+            continue
+        request = normalize_provider_text(message.get("content")).casefold()
+        return bool(re.search(
+            r"\b(?:code\s*(?:block|fence)|fenced\s+(?:code|block|output))\b",
+            request,
+        ))
+    return False
+
+
+_TRUNCATED_MARKDOWN_FENCE_PREFIX = re.compile(
+    r"^(markdown|arkdown|rkdown|kdown|down)(?=\r?\n(?:#{1,6}\s|[-*+]\s|>\s))"
+)
+
+
+def _repair_nemotron_markdown_prefix(
+    content: str,
+    definition: ModelDefinition,
+    *,
+    requested_fence: bool,
+) -> str:
+    """Repair the observed NIM loss of an opening Markdown fence fragment."""
+    if (
+        not content
+        or not requested_fence
+        or not _is_nvidia_nemotron(definition)
+    ):
+        return content
+    match = _TRUNCATED_MARKDOWN_FENCE_PREFIX.match(content)
+    if not match:
+        return content
+    return "```markdown" + content[match.end():]
+
+
+def _openai_chunk(
+    payload: Mapping[str, Any],
+    definition: ModelDefinition,
+    *,
+    repair_markdown_fence: bool = False,
+) -> NormalizedChunk:
+    _raise_for_provider_payload_error(payload, definition.provider)
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         raise MalformedProviderResponse(
@@ -982,7 +1036,11 @@ def _openai_chunk(payload: Mapping[str, Any], provider: str) -> NormalizedChunk:
         )))
     result = NormalizedChunk(
         message=NormalizedMessage(
-            content=normalize_provider_text(message.get("content")),
+            content=_repair_nemotron_markdown_prefix(
+                normalize_provider_text(message.get("content")),
+                definition,
+                requested_fence=repair_markdown_fence,
+            ),
             thinking=_provider_reasoning_text(message),
             tool_calls=tool_calls,
             provider_metadata=(
@@ -1001,7 +1059,7 @@ def _openai_chunk(payload: Mapping[str, Any], provider: str) -> NormalizedChunk:
         or result.message.tool_calls
     ):
         raise MalformedProviderResponse(
-            f"{provider} completed the request without generating content. "
+            f"{definition.provider} completed the request without generating content. "
             "The endpoint may be warming up; try again shortly or select another model.",
             code="empty_response",
         )
@@ -1099,7 +1157,12 @@ def _iter_sse_json(response: requests.Response, provider: str) -> Iterator[dict[
         response.close()
 
 
-def _openai_stream(response: requests.Response, definition: ModelDefinition) -> Iterator[NormalizedChunk]:
+def _openai_stream(
+    response: requests.Response,
+    definition: ModelDefinition,
+    *,
+    repair_markdown_fence: bool = False,
+) -> Iterator[NormalizedChunk]:
     pending: dict[int, dict[str, str]] = {}
     reasoning_details: list[dict[str, Any]] = []
     prompt_tokens = 0
@@ -1107,6 +1170,8 @@ def _openai_stream(response: requests.Response, definition: ModelDefinition) -> 
     done_reason = ""
     saw_choice = False
     saw_output = False
+    content_started = False
+    initial_content = ""
     for payload in _iter_sse_json(response, definition.provider):
         _raise_for_provider_payload_error(payload, definition.provider)
         usage = payload.get("usage") or {}
@@ -1150,12 +1215,40 @@ def _openai_stream(response: requests.Response, definition: ModelDefinition) -> 
             current["arguments"] += str(function.get("arguments") or "")
         content = normalize_provider_text(delta.get("content"))
         thinking = _provider_reasoning_text(delta)
+        if (
+            content
+            and repair_markdown_fence
+            and _is_nvidia_nemotron(definition)
+            and not content_started
+        ):
+            initial_content += content
+            if "\n" in initial_content or len(initial_content) >= 64:
+                content = _repair_nemotron_markdown_prefix(
+                    initial_content,
+                    definition,
+                    requested_fence=repair_markdown_fence,
+                )
+                initial_content = ""
+                content_started = True
+            else:
+                content = ""
+        elif content:
+            content_started = True
         if content or thinking:
             saw_output = True
             yield NormalizedChunk(message=NormalizedMessage(
                 content=content,
                 thinking=thinking,
             ))
+    if initial_content:
+        saw_output = True
+        yield NormalizedChunk(message=NormalizedMessage(
+            content=_repair_nemotron_markdown_prefix(
+                initial_content,
+                definition,
+                requested_fence=repair_markdown_fence,
+            ),
+        ))
     if not saw_choice:
         raise MalformedProviderResponse(
             f"{definition.provider} ended the request without returning a model response. "
@@ -1415,6 +1508,7 @@ def _remote_chat(
     token.raise_if_cancelled()
     streaming = bool(kwargs.get("stream"))
     kwargs["messages"] = _selene_messages(kwargs.get("messages") or [])
+    repair_markdown_fence = _requests_fenced_output(kwargs["messages"])
 
     if definition.id.startswith("gemini:"):
         response = _post(
@@ -1458,11 +1552,21 @@ def _remote_chat(
         raise
     if not streaming:
         try:
-            return _openai_chunk(_response_json(response, definition.provider), definition.provider)
+            return _openai_chunk(
+                _response_json(response, definition.provider),
+                definition,
+                repair_markdown_fence=repair_markdown_fence,
+            )
         finally:
             release_response()
     return _cancellable(
-        _openai_stream(response, definition), token, cleanup=release_response
+        _openai_stream(
+            response,
+            definition,
+            repair_markdown_fence=repair_markdown_fence,
+        ),
+        token,
+        cleanup=release_response,
     )
 
 

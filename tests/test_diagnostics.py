@@ -52,6 +52,29 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("xlrd", payload["dependencies"])
         self.assertIn("xlwt", payload["dependencies"])
 
+    def test_chromadb_runtime_checks_dynamic_packaged_modules(self):
+        payload = diagnostics._check_chromadb_runtime()
+
+        self.assertTrue(payload["ok"])
+        self.assertIn("chromadb.api.rust", payload["modules"])
+        self.assertIn("chromadb.telemetry.product.posthog", payload["modules"])
+        self.assertIn("chromadb_rust_bindings", payload["modules"])
+
+    def test_chromadb_runtime_reports_incomplete_bundle(self):
+        real_import = diagnostics.importlib.import_module
+
+        def import_module(name):
+            if name == "chromadb.api.rust":
+                raise ModuleNotFoundError(name)
+            return real_import(name)
+
+        with patch.object(diagnostics.importlib, "import_module", side_effect=import_module):
+            payload = diagnostics._check_chromadb_runtime()
+
+        self.assertFalse(payload["ok"])
+        self.assertIn("chromadb.api.rust", payload["errors"])
+        self.assertIn("complete ChromaDB package", payload["remedy"])
+
     def test_main_doctor_exit_codes(self):
         with patch.object(diagnostics, "run_diagnostics", return_value={"ok": True, "checks": {}, "failed_checks": [], "elapsed_seconds": 0}):
             self.assertEqual(diagnostics.main_doctor(as_json=True), 0)

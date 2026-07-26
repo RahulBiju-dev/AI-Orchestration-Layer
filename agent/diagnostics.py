@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import os
@@ -259,6 +260,35 @@ def _check_optional_dependencies() -> dict[str, Any]:
     return _status(True, dependencies=present)
 
 
+def _check_chromadb_runtime() -> dict[str, Any]:
+    required_modules = (
+        "chromadb.api.rust",
+        "chromadb.telemetry.product.posthog",
+        "chromadb_rust_bindings",
+    )
+    errors: dict[str, str] = {}
+    for module_name in required_modules:
+        try:
+            importlib.import_module(module_name)
+        except Exception as exc:
+            errors[module_name] = f"{type(exc).__name__}: {exc}"
+    return _status(
+        not errors,
+        modules=list(required_modules),
+        errors=errors,
+        error=(
+            "ChromaDB runtime modules are incomplete."
+            if errors
+            else None
+        ),
+        remedy=(
+            "Rebuild the packaged backend with the complete ChromaDB package."
+            if errors
+            else None
+        ),
+    )
+
+
 def _check_poppler() -> dict[str, Any]:
     pdftoppm = shutil.which("pdftoppm")
     poppler_path = os.environ.get("POPPLER_PATH") or os.environ.get("SELENE_POPPLER_PATH")
@@ -339,6 +369,7 @@ def run_diagnostics(*, include_network: bool = True) -> dict[str, Any]:
     checks["gpu"] = _check_gpu()
     checks["tool_registry"] = _check_tool_registry()
     checks["optional_dependencies"] = _check_optional_dependencies()
+    checks["chromadb_runtime"] = _check_chromadb_runtime()
     checks["poppler"] = _check_poppler()
     checks["capabilities"] = _check_capabilities()
     checks["port"] = _check_port_availability()

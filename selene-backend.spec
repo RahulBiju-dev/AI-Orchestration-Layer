@@ -2,19 +2,28 @@
 
 import sys
 
+from PyInstaller.utils.hooks import collect_all
+
 block_cipher = None
+
+chromadb_datas, chromadb_binaries, chromadb_hiddenimports = collect_all(
+    'chromadb',
+    filter_submodules=lambda name: not name.startswith('chromadb.test'),
+)
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=chromadb_binaries,
     datas=[
         ('Modelfile', '.'),
         ('agent/prompts/external_models.md', 'agent/prompts'),
-        ('agent/static', 'agent/static')
+        ('agent/static', 'agent/static'),
+        *chromadb_datas,
     ],
     hiddenimports=[
-        'ollama', 'chromadb', 'rich', 'requests', 'pdf2image', 'pypdf', 'docx', 'ddgs',
+        'ollama', 'rich', 'requests', 'pdf2image', 'pypdf', 'docx', 'ddgs',
+        *chromadb_hiddenimports,
         *(['dbus'] if sys.platform.startswith('linux') else []),
     ],
     hookspath=[],

@@ -28,6 +28,16 @@ class SystemPromptPolicyTests(unittest.TestCase):
             spec,
         )
 
+    def test_desktop_backend_bundle_collects_dynamic_chromadb_modules(self):
+        root = Path(__file__).resolve().parents[1]
+        spec = (root / "selene-backend.spec").read_text(encoding="utf-8")
+        self.assertIn("chromadb_hiddenimports = collect_all(", spec)
+        self.assertIn("'chromadb',", spec)
+        self.assertIn("not name.startswith('chromadb.test')", spec)
+        self.assertIn("binaries=chromadb_binaries", spec)
+        self.assertIn("*chromadb_datas", spec)
+        self.assertIn("*chromadb_hiddenimports", spec)
+
     def test_local_and_external_models_have_distinct_owned_defaults(self):
         local = extract_local_system_prompt()
         external = load_external_system_prompt()

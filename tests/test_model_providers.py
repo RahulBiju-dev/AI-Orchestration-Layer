@@ -404,6 +404,107 @@ class AdapterTests(unittest.TestCase):
             "You are Selene",
             post.call_args.kwargs["json"]["messages"][0]["content"],
         )
+        self.assertNotIn("chat_template_kwargs", post.call_args.kwargs["json"])
+
+    def test_nemotron_uses_required_coding_content_flags(self):
+        response = FakeResponse({
+            "choices": [{"message": {"content": "NVIDIA answer."}}],
+        })
+        with patch("agent.model_providers.requests.post", return_value=response) as post:
+            chat_with_model(
+                {"model_id": "nvidia:nvidia/nemotron-3-ultra-550b-a55b"},
+                runtime(),
+                ollama_service_factory=MagicMock(),
+                environ={
+                    "NVIDIA_API_KEY": "nvidia-secret",
+                    "NVIDIA_MODELS": "nvidia/nemotron-3-ultra-550b-a55b",
+                },
+                messages=[{"role": "user", "content": "show code"}],
+                stream=False,
+                think=False,
+            )
+
+        self.assertEqual(
+            post.call_args.kwargs["json"]["chat_template_kwargs"],
+            {
+                "enable_thinking": False,
+                "force_nonempty_content": True,
+            },
+        )
+
+    def test_nemotron_repairs_truncated_markdown_fence_non_streaming(self):
+        response = FakeResponse({
+            "choices": [{
+                "message": {
+                    "content": "down\n# Personal Operating Manual\n```",
+                },
+            }],
+        })
+        with patch("agent.model_providers.requests.post", return_value=response):
+            result = chat_with_model(
+                {"model_id": "nvidia:nvidia/nemotron-3-ultra-550b-a55b"},
+                runtime(),
+                ollama_service_factory=MagicMock(),
+                environ={
+                    "NVIDIA_API_KEY": "nvidia-secret",
+                    "NVIDIA_MODELS": "nvidia/nemotron-3-ultra-550b-a55b",
+                },
+                messages=[{"role": "user", "content": "put it in a code block"}],
+                stream=False,
+            )
+
+        self.assertEqual(
+            result.message.content,
+            "```markdown\n# Personal Operating Manual\n```",
+        )
+
+    def test_nemotron_does_not_rewrite_down_without_a_fence_request(self):
+        response = FakeResponse({
+            "choices": [{
+                "message": {
+                    "content": "down\n# The hill and back again",
+                },
+            }],
+        })
+        with patch("agent.model_providers.requests.post", return_value=response):
+            result = chat_with_model(
+                {"model_id": "nvidia:nvidia/nemotron-3-ultra-550b-a55b"},
+                runtime(),
+                ollama_service_factory=MagicMock(),
+                environ={
+                    "NVIDIA_API_KEY": "nvidia-secret",
+                    "NVIDIA_MODELS": "nvidia/nemotron-3-ultra-550b-a55b",
+                },
+                messages=[{"role": "user", "content": "write a heading about walking"}],
+                stream=False,
+            )
+
+        self.assertEqual(result.message.content, "down\n# The hill and back again")
+
+    def test_nemotron_repairs_split_stream_markdown_fence_prefix(self):
+        response = FakeResponse(lines=[
+            'data: {"choices":[{"delta":{"content":"do"}}]}',
+            'data: {"choices":[{"delta":{"content":"wn\\n# Personal Operating Manual\\n"}}]}',
+            'data: {"choices":[{"delta":{"content":"```"},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ])
+        with patch("agent.model_providers.requests.post", return_value=response):
+            chunks = list(chat_with_model(
+                {"model_id": "nvidia:nvidia/nemotron-3-ultra-550b-a55b"},
+                runtime(),
+                ollama_service_factory=MagicMock(),
+                environ={
+                    "NVIDIA_API_KEY": "nvidia-secret",
+                    "NVIDIA_MODELS": "nvidia/nemotron-3-ultra-550b-a55b",
+                },
+                messages=[{"role": "user", "content": "put it in a code block"}],
+                stream=True,
+            ))
+
+        self.assertEqual(
+            "".join(chunk.message.content for chunk in chunks),
+            "```markdown\n# Personal Operating Manual\n```",
+        )
 
     def test_mojibake_is_repaired_without_changing_valid_unicode(self):
         self.assertEqual(repair_text_encoding("High (â‚¹1,00,000+)"), "High (₹1,00,000+)")
