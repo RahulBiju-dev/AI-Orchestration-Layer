@@ -367,15 +367,15 @@ _TOOL_SELECTION_STOPWORDS = {
 }
 _TOOL_KEYWORD_HINTS = {
     "get_current_datetime": "date time today tomorrow yesterday timezone current now",
-    "spreadsheet": "spreadsheet excel xlsx xls csv worksheet cells table",
+    "spreadsheet": "spreadsheet excel xlsx xls csv worksheet cells table write save create export rows columns",
     "web_search": "web internet online latest current news search research",
-    "web_scrape": "website webpage url link article scrape page",
+    "web_scrape": "website webpage url link article scrape fetch read summarize analyze source content",
     "read_document": "pdf docx document pages extract",
     "read_file": "file text lines read inspect path",
     "create_file": "create write save new file",
     "create_pdf": "create write generate export pdf document notes report",
     "export_vault_pdf": "export entire complete vault pdf reference knowledge",
-    "build_vault_notes_pdf": "generate refined lecture notes pdf from entire vault recursively exhaustive",
+    "build_vault_notes_pdf": "generate refined lecture notes pdf from slides vision entire vault recursively exhaustive",
     "spotify_play": "spotify song music album playlist artist play",
     "open_browser": "browser website webapp open url",
     "view_code": "code source implementation function class inspect",
@@ -391,12 +391,20 @@ _TOOL_KEYWORD_HINTS = {
     "list_vaults": "list vault collections indexes",
     "list_vault_aliases": "vault alias aliases list",
     "create_structured_note": "obsidian note markdown wikilink tags create",
-    "knowledge_graph_builder": "knowledge graph concepts relationships path",
-    "run_simulation": "simulation monte carlo scenario probability model",
+    "knowledge_graph_builder": (
+        "knowledge graph concept map relationship map dependency map causal chain "
+        "causal path feedback loop cycle central concept influence impact connected "
+        "upstream downstream entity relationship topology"
+    ),
+    "run_simulation": (
+        "simulate simulation monte carlo what if scenario sensitivity probability "
+        "forecast projection uncertainty risk trials recurrence euler growth inventory "
+        "capacity cash flow demand compound best case base case worst case"
+    ),
     "api_orchestrator": "api http endpoint request integration",
-    "context_memory_optimizer": "compact optimize conversation context memory",
-    "reasoning_chain_debugger": "audit claim evidence reasoning confidence graph",
-    "automated_routine_executor": "routine workflow recurring trigger automation",
+    "context_memory_optimizer": "compact optimize conversation chat history context memory messages token budget",
+    "reasoning_chain_debugger": "audit debug verify argument logic rationale claim evidence conclusion dependency confidence graph unsupported",
+    "automated_routine_executor": "routine workflow recurring trigger automation macro define save run execute",
 }
 _TOOL_COMPANIONS = {
     "web_search": ("web_scrape",),
@@ -435,6 +443,112 @@ def _recent_called_tool_names(messages: list[dict]) -> list[str]:
             if name and name not in names:
                 names.append(name)
     return names[-4:]
+
+
+def _required_tools_for_request(request_text: str) -> list[str]:
+    """Return tools whose triggering evidence is explicit, not score-dependent."""
+    text = request_text.casefold()
+    required: list[str] = []
+    has_public_url = bool(re.search(r"\b(?:https?://|www\.)[^\s<>()]+", text))
+    webpage_action = any(
+        phrase in text
+        for phrase in (
+            "read this url", "read this page", "scrape this", "summarize this article",
+            "summarise this article", "analyze this webpage", "analyse this webpage",
+            "extract this website", "inspect this link",
+        )
+    )
+    if has_public_url or webpage_action:
+        required.append("web_scrape")
+
+    memory_subject = any(
+        phrase in text
+        for phrase in ("conversation", "chat history", "context window", "message history", "memory")
+    )
+    memory_action = any(
+        phrase in text
+        for phrase in ("compact", "compress", "optimize", "optimise", "summarize", "summarise", "reduce")
+    )
+    if memory_subject and memory_action:
+        required.append("context_memory_optimizer")
+
+    graph_structure = any(
+        phrase in text
+        for phrase in (
+            "knowledge graph", "concept map", "relationship map",
+            "dependency map", "dependency graph", "causal graph",
+            "causal chain", "causal path", "feedback loop",
+            "feedback cycle", "entity relationship", "impact path",
+            "mind map", "systems map", "influence map",
+        )
+    )
+    graph_action = any(
+        phrase in text
+        for phrase in (
+            "map the", "map how", "map these", "show how", "trace the",
+            "trace how", "find the path", "find paths", "find connections",
+            "identify relationships", "identify dependencies",
+            "identify feedback", "visualize relationships",
+            "visualise relationships", "diagram how", "draw a graph",
+            "build a graph", "connect these",
+        )
+    )
+    graph_subject = any(
+        phrase in text
+        for phrase in (
+            "concept", "entities", "components", "services", "factors",
+            "relationships", "dependencies", "causes", "effects",
+            "upstream", "downstream", "influence",
+        )
+    )
+    if graph_structure or (graph_action and graph_subject):
+        required.append("knowledge_graph_builder")
+
+    reasoning_subject = any(
+        phrase in text
+        for phrase in (
+            "reasoning", "argument", "claim", "evidence", "conclusion",
+            "rationale", "logic", "dependency graph",
+        )
+    )
+    reasoning_action = any(
+        phrase in text
+        for phrase in ("audit", "debug", "verify", "validate", "check", "find gaps", "unsupported")
+    )
+    if reasoning_subject and reasoning_action:
+        required.append("reasoning_chain_debugger")
+
+    explicit_simulation = any(
+        phrase in text
+        for phrase in (
+            "simulate", "simulation", "monte carlo", "what if", "what-if",
+            "what happens if", "what would happen if",
+            "scenario analysis", "sensitivity analysis", "run trials",
+            "best case", "base case", "worst case",
+        )
+    )
+    time_horizon = bool(re.search(
+        r"\bover\s+\d+(?:\.\d+)?\s+(?:steps?|days?|weeks?|months?|quarters?|years?)\b",
+        text,
+    ))
+    dynamic_projection = time_horizon or any(
+        phrase in text
+        for phrase in (
+            "forecast", "project", "projection", "over time", "per month",
+            "per year", "each month", "each year", "compound growth",
+        )
+    )
+    numeric_system = any(
+        phrase in text
+        for phrase in (
+            "probability", "uncertainty", "risk", "growth", "inventory",
+            "demand", "capacity", "cash flow", "revenue", "cost", "population",
+            "queue", "failure rate",
+        )
+    )
+    if explicit_simulation or (dynamic_projection and numeric_system):
+        required.append("run_simulation")
+    return required
 
 
 def select_tool_schemas(
@@ -503,10 +617,20 @@ def select_tool_schemas(
             if name in continuation_names
         ]
 
-    chosen: list[str] = [
+    scored: list[str] = [
         name for name, score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))
         if score > 0
     ]
+    chosen: list[str] = []
+    for name in _required_tools_for_request(recent_user_text):
+        if name in by_name and name not in chosen:
+            chosen.append(name)
+    for name in scored:
+        if name not in chosen:
+            chosen.append(name)
+        for companion in _TOOL_COMPANIONS.get(name, ()):
+            if companion in by_name and companion not in chosen:
+                chosen.append(companion)
     if not chosen:
         chosen.extend(_DEFAULT_TOOL_NAMES)
     else:
@@ -528,9 +652,10 @@ def select_tool_schemas(
     ) and "get_current_datetime" not in chosen[:maximum]:
         chosen.insert(0, "get_current_datetime")
 
-    selected_names = set(chosen[:maximum])
-    # Preserve registry order for stable prompts and model caching.
-    return [schema for name, schema in by_name.items() if name in selected_names]
+    # Preserve deterministic request-priority order. Required tools come first,
+    # then scored tools and defaults, which makes the model less likely to
+    # overlook a capability selected specifically for this request.
+    return [by_name[name] for name in chosen[:maximum] if name in by_name]
 
 
 def tool_schemas_for_model(
@@ -1149,7 +1274,20 @@ def _compact_history_bg(history: list[dict], session: dict, start_idx: int, end_
             preserve_recent=2,
         ))
         replacement = optimized.get("messages")
+        stats = optimized.get("stats")
         if not isinstance(replacement, list) or not replacement:
+            return
+        if not isinstance(stats, dict):
+            return
+        if (
+            int(stats.get("source_messages_compacted") or 0) > 0
+            and int(stats.get("selected_facts") or 0) == 0
+        ):
+            # Never mutate durable history into an unexplained empty summary.
+            return
+        if int(stats.get("estimated_output_tokens") or 0) >= int(
+            stats.get("estimated_input_tokens") or 0
+        ):
             return
 
         # Do not overwrite a slice that changed while compaction was running.

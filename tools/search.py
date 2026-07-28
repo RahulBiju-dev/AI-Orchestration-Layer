@@ -160,6 +160,8 @@ def web_search(
                     item["scrape_error"] = scraped["error"]
                 elif isinstance(scraped, dict):
                     item["content"] = {
+                        "url": scraped.get("url") or url,
+                        "canonical_url": scraped.get("canonical_url") or "",
                         "title": scraped.get("title") or item.get("title") or "",
                         "description": scraped.get("description") or "",
                         "headings": scraped.get("headings") or [],
@@ -167,6 +169,8 @@ def web_search(
                         "truncated": bool(scraped.get("truncated")),
                         "content_type": scraped.get("content_type") or "",
                         "status_code": scraped.get("status_code"),
+                        "request_attempts": scraped.get("request_attempts"),
+                        "warning": scraped.get("warning") or "",
                     }
                     scraped_count += 1
                 else:

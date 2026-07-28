@@ -71,7 +71,7 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "spreadsheet",
-            "description": "View spreadsheet metadata/previews, read or query bounded cells, and create .csv, .xls, or .xlsx files. Creation requires explicit confirmation and does not overwrite unless requested.",
+            "description": "Reliably view, read, search, or write .csv, legacy .xls, and .xlsx spreadsheets. Use action=create with rows/sheets and confirmed=true when the user asks to create, save, write, or export spreadsheet data. New output is reopened and verified before atomic installation; existing files are preserved unless overwrite is explicit.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -82,26 +82,48 @@ TOOL_SCHEMAS: list[dict] = [
                     "query": {"type": "string", "description": "Optional case-insensitive value search for read."},
                     "sheets": {
                         "type": "array",
+                        "minItems": 1,
+                        "maxItems": 20,
                         "description": "For create: worksheets with name and rows. Cell values must be strings, numbers, booleans, or null.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "name": {"type": "string"},
-                                "rows": {"type": "array", "items": {"type": "array"}}
+                                "name": {"type": "string", "minLength": 1, "maxLength": 31},
+                                "rows": {
+                                    "type": "array",
+                                    "maxItems": 10000,
+                                    "items": {
+                                        "type": "array",
+                                        "maxItems": 256,
+                                        "items": {
+                                            "type": ["string", "number", "boolean", "null"],
+                                            "maxLength": 1000000
+                                        }
+                                    }
+                                }
                             },
-                            "required": ["name", "rows"]
+                            "required": ["name", "rows"],
+                            "additionalProperties": False
                         }
                     },
                     "rows": {
                         "type": "array",
-                        "items": {"type": "array"},
+                        "maxItems": 10000,
+                        "items": {
+                            "type": "array",
+                            "maxItems": 256,
+                            "items": {
+                                "type": ["string", "number", "boolean", "null"],
+                                "maxLength": 1000000
+                            }
+                        },
                         "description": "Convenience rows for creating a single-sheet workbook, especially CSV. Use sheets for multiple Excel worksheets."
                     },
-                    "max_rows": {"type": "integer", "description": "Rows returned per preview/read (1-200, default 50)."},
-                    "max_columns": {"type": "integer", "description": "Columns returned per preview/read (1-100, default 30)."},
+                    "max_rows": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Rows returned per preview/read (1-200, default 50)."},
+                    "max_columns": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Columns returned per preview/read (1-100, default 30)."},
                     "data_only": {"type": "boolean", "description": "For .xlsx reads, return cached formula results instead of formulas when available."},
                     "overwrite": {"type": "boolean", "description": "For create, replace an existing file only when explicitly requested."},
-                    "allow_formulas": {"type": "boolean", "description": "For create, interpret strings beginning with = as formulas. Defaults false."},
+                    "allow_formulas": {"type": "boolean", "description": "For Excel create, interpret strings beginning with = as formulas. For CSV, leave formula-looking fields unescaped. Defaults false to prevent spreadsheet formula injection."},
                     "delimiter": {"type": "string", "description": "For CSV, optional delimiter: comma, semicolon, tab (or \\t), or pipe. Reading auto-detects when omitted; writing defaults to comma."},
                     "confirmed": {"type": "boolean", "description": "Must be true for create after explicit user approval."}
                 },
@@ -165,8 +187,7 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "web_scrape",
             "description": (
-                "Fetch a public HTTP(S) page and extract readable text, metadata, headings, "
-                "and optional links. Use after web_search when a specific source needs detailed reading."
+                "Read a specific public webpage or article URL; return grounded text, headings, metadata, and links."
             ),
             "parameters": {
                 "type": "object",
@@ -554,7 +575,10 @@ TOOL_SCHEMAS.extend([
         "type": "function",
         "function": {
             "name": "export_vault_pdf",
-            "description": "Export every matching vault chunk in source/page order to a complete reference PDF without model summarization.",
+            "description": (
+                "Export every matching vault chunk in source/page order to a complete reference PDF without model summarization. "
+                "For slide PDFs, set require_vision=true after indexing with vision_mode=all."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -564,6 +588,10 @@ TOOL_SCHEMAS.extend([
                     "source": {"type": "string"},
                     "start_page": {"type": "integer", "minimum": 1},
                     "end_page": {"type": "integer", "minimum": 1},
+                    "require_vision": {
+                        "type": "boolean",
+                        "description": "Require verified complete vision_mode=all coverage for selected PDF pages."
+                    },
                     "overwrite": {"type": "boolean"},
                     "confirmed": {"type": "boolean"}
                 },
@@ -577,7 +605,8 @@ TOOL_SCHEMAS.extend([
             "name": "build_vault_notes_pdf",
             "description": (
                 "Recursively turn an entire vault into refined grounded notes and a final PDF. "
-                "Processes bounded ordered windows, saves every note section durably, and returns next_cursor until complete."
+                "Processes bounded ordered windows, saves every note section durably, and returns next_cursor until complete. "
+                "For slides, first index_vault with vision_mode=all until complete=true, then call this with require_vision=true."
             ),
             "parameters": {
                 "type": "object",
@@ -588,6 +617,10 @@ TOOL_SCHEMAS.extend([
                     "source": {"type": "string"},
                     "cursor": {"type": ["string", "integer"], "description": "Omit initially; on resume pass returned next_cursor exactly."},
                     "sections_per_run": {"type": "integer", "minimum": 1, "maximum": 12},
+                    "require_vision": {
+                        "type": "boolean",
+                        "description": "For slides/diagram-heavy PDFs, refuse notes unless every page completed vision_mode=all."
+                    },
                     "action": {"type": "string", "enum": ["build", "status"]},
                     "overwrite": {"type": "boolean"},
                     "confirmed": {"type": "boolean"}
@@ -692,21 +725,61 @@ TOOL_SCHEMAS.extend([
         "type": "function",
         "function": {
             "name": "knowledge_graph_builder",
-            "description": "Build a concept/relationship graph and discover explainable multi-hop causal paths, conflicts, feedback cycles, and central concepts. Inferences are grounded only in supplied edges.",
+            "description": "Call to map supplied concepts/entities and typed relationships, trace dependency or causal paths, find direct links, contradictory effects, feedback regions, and central nodes. Construct edges only from relationships stated or evidenced in the request/tool results; this tool analyzes them but does not invent facts.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "concepts": {"type": "array", "maxItems": 500, "items": {"type": "object"}, "description": "Concept objects with id, optional label, and optional attributes."},
-                    "relationships": {"type": "array", "maxItems": 3000, "items": {"type": "object"}, "description": "Edges with source, target, type, optional weight (0-1), and evidence."},
+                    "concepts": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 500,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "minLength": 1, "maxLength": 200},
+                                "label": {"type": "string", "minLength": 1, "maxLength": 2000},
+                                "attributes": {
+                                    "type": "object",
+                                    "additionalProperties": True
+                                }
+                            },
+                            "required": ["id"],
+                            "additionalProperties": False
+                        },
+                        "description": "Concept/entity records. IDs must be stable exact identifiers used by relationship endpoints."
+                    },
+                    "relationships": {
+                        "type": "array",
+                        "maxItems": 3000,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "minLength": 1, "maxLength": 200},
+                                "source": {"type": "string", "minLength": 1, "maxLength": 200},
+                                "target": {"type": "string", "minLength": 1, "maxLength": 200},
+                                "type": {"type": "string", "minLength": 1, "maxLength": 200},
+                                "weight": {"type": "number", "minimum": 0, "maximum": 1},
+                                "evidence": {}
+                            },
+                            "required": ["source", "target", "type"],
+                            "additionalProperties": False
+                        },
+                        "description": "Directed typed edges. Use domain-specific types such as depends_on, causes, part_of, enables, prevents, or contradicts; weight is optional confidence from 0 to 1."
+                    },
                     "query": {
                         "type": "object",
                         "properties": {
-                            "source": {"type": "string"},
-                            "target": {"type": "string"},
-                            "relation_types": {"type": "array", "maxItems": 100, "items": {"type": "string"}}
+                            "source": {"type": "string", "minLength": 1, "maxLength": 200},
+                            "target": {"type": "string", "minLength": 1, "maxLength": 200},
+                            "relation_types": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 100,
+                                "items": {"type": "string", "minLength": 1, "maxLength": 200}
+                            }
                         },
                         "additionalProperties": False,
-                        "description": "Optional source, target, and relation_types filter."
+                        "description": "Optional endpoint/type filter. Omit relation_types to traverse every supplied edge type."
                     },
                     "max_depth": {"type": "integer", "minimum": 1, "maximum": 8, "description": "Maximum inference path length (1-8, default 4)."}
                 },
@@ -718,18 +791,52 @@ TOOL_SCHEMAS.extend([
         "type": "function",
         "function": {
             "name": "run_simulation",
-            "description": "Run bounded discrete-time what-if or Monte Carlo simulations from explicit variables and equations. Use recurrence for next-state equations or euler for rates of change.",
+            "description": "Call for multi-step numerical what-if questions, scenario comparisons, sensitivity analysis, projections, or Monte Carlo uncertainty ranges. Translate user-supplied values and stated assumptions into transparent variables/equations; use recurrence for next-state equations or euler for rates. Do not present results as independently validated forecasts.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "variables": {"type": "object", "description": "Initial numeric state keyed by variable name."},
-                    "equations": {"type": "object", "description": "Safe arithmetic expression for each updated variable; may use step, time, dt, normal(), and uniform()."},
+                    "variables": {
+                        "type": "object",
+                        "minProperties": 1,
+                        "maxProperties": 100,
+                        "additionalProperties": {"type": "number"},
+                        "description": "Initial numeric state keyed by identifier, for example {inventory: 100, demand: 12}."
+                    },
+                    "equations": {
+                        "type": "object",
+                        "minProperties": 1,
+                        "maxProperties": 100,
+                        "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 2000},
+                        "description": "Updated-variable expressions using state names, step, time, dt, pi, e, min, max, abs, sqrt, log, exp, sin, cos, floor, ceil, normal, or uniform. Every target must exist in variables."
+                    },
                     "steps": {"type": "integer", "minimum": 1, "maximum": 10000},
                     "dt": {"type": "number", "minimum": 0.000000001, "maximum": 1000000},
                     "mode": {"type": "string", "enum": ["recurrence", "euler"]},
-                    "scenarios": {"type": "array", "maxItems": 20, "items": {"type": "object"}, "description": "Named scenarios containing variable overrides."},
+                    "scenarios": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 20,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                                "overrides": {
+                                    "type": "object",
+                                    "additionalProperties": {"type": "number"}
+                                }
+                            },
+                            "required": ["name", "overrides"],
+                            "additionalProperties": False
+                        },
+                        "description": "Optional named cases that override initial variables, such as baseline, optimistic, and pessimistic."
+                    },
                     "trials": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Monte Carlo trials (1-1000)."},
-                    "seed": {"type": "integer", "description": "Optional reproducibility seed."}
+                    "seed": {
+                        "type": "integer",
+                        "minimum": -9223372036854775807,
+                        "maximum": 9223372036854775807,
+                        "description": "Optional reproducibility seed. Supply one for repeatable stochastic results."
+                    }
                 },
                 "required": ["variables", "equations"]
             }
@@ -791,12 +898,24 @@ TOOL_SCHEMAS.extend([
         "type": "function",
         "function": {
             "name": "context_memory_optimizer",
-            "description": "Compress explicit conversation messages into compact memory while retaining system instructions, recent turns, decisions, constraints, facts, tool results, and semantic links.",
+            "description": "Compact supplied chat messages to a token budget while preserving policy, recent tool turns, and key facts.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "messages": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
-                    "target_tokens": {"type": "integer", "minimum": 256, "maximum": 100000},
+                    "messages": {
+                        "type": "array",
+                        "maxItems": 10000,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "role": {"type": "string", "minLength": 1, "maxLength": 50},
+                                "content": {},
+                                "tool_calls": {"type": "array"}
+                            },
+                            "required": ["role"]
+                        }
+                    },
+                    "target_tokens": {"type": "integer", "minimum": 256, "maximum": 8000},
                     "preserve_recent": {"type": "integer", "minimum": 0, "maximum": 50},
                     "critical_terms": {"type": "array", "maxItems": 100, "items": {"type": "string", "maxLength": 200}}
                 },
@@ -808,13 +927,43 @@ TOOL_SCHEMAS.extend([
         "type": "function",
         "function": {
             "name": "reasoning_chain_debugger",
-            "description": "Audit an explicit claim/evidence rationale for missing support, bad references, circular dependencies, ambiguity, and unjustified confidence. It does not expose hidden model chain-of-thought.",
+            "description": "Audit an explicit claim/evidence graph for unsupported conclusions, bad links, cycles, and confidence gaps.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "conclusion": {"type": "string"},
-                    "steps": {"type": "array", "maxItems": 500, "items": {"type": "object"}, "description": "Steps with id, claim, depends_on, evidence_ids, assumption, and confidence."},
-                    "evidence": {"type": "array", "maxItems": 1000, "items": {"type": "object"}, "description": "Evidence records with stable id and source."}
+                    "conclusion": {"type": "string", "minLength": 1, "maxLength": 10000},
+                    "steps": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 500,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "maxLength": 200},
+                                "claim": {"type": "string", "maxLength": 10000},
+                                "depends_on": {"type": "array", "maxItems": 200, "items": {"type": "string", "maxLength": 200}},
+                                "evidence_ids": {"type": "array", "maxItems": 200, "items": {"type": "string", "maxLength": 200}},
+                                "assumption": {"type": "boolean"},
+                                "confidence": {"type": "number"}
+                            },
+                            "required": ["claim"],
+                            "additionalProperties": False
+                        }
+                    },
+                    "evidence": {
+                        "type": "array",
+                        "maxItems": 1000,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "minLength": 1, "maxLength": 200},
+                                "source": {"type": "string"},
+                                "quality": {"type": "number", "minimum": 0, "maximum": 1}
+                            },
+                            "required": ["id"],
+                            "additionalProperties": True
+                        }
+                    }
                 },
                 "required": ["conclusion", "steps"]
             }
@@ -824,13 +973,13 @@ TOOL_SCHEMAS.extend([
         "type": "function",
         "function": {
             "name": "automated_routine_executor",
-            "description": "Define, store, list, preview, run, or delete reusable local workflow macros. App-only routines may be persistently approved at definition time; command and URL routines always require confirmation for each run.",
+            "description": "Reliably define, store, list, preview, run, replace, or delete reusable local workflow macros. Use this when the user asks to create or run a routine/workflow. Registered tool actions are schema-validated before saving and revalidated before execution. App-only routines may be persistently approved; commands, URLs, and other tools require per-run confirmation.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["list", "define", "show", "run", "delete"]},
-                    "name": {"type": "string"},
-                    "trigger": {"type": "string", "description": "Legacy single trigger accepted for compatibility. For new definitions, put every phrase in routine.triggers."},
+                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "trigger": {"type": "string", "minLength": 1, "maxLength": 200, "description": "Legacy single trigger accepted for compatibility. For new definitions, put every phrase in routine.triggers."},
                     "routine": {
                         "type": "object",
                         "description": "Complete routine definition. Infer a useful description from the user's request and preserve their trigger wording and example usages. Never leave description or triggers empty.",
@@ -838,19 +987,46 @@ TOOL_SCHEMAS.extend([
                             "description": {
                                 "type": "string",
                                 "minLength": 1,
+                                "maxLength": 500,
                                 "description": "Concise explanation of the routine's purpose and actions, derived from the user's request."
                             },
                             "triggers": {
                                 "type": "array",
                                 "minItems": 1,
                                 "maxItems": 25,
-                                "items": {"type": "string", "minLength": 1},
+                                "items": {"type": "string", "minLength": 1, "maxLength": 200},
                                 "description": "Natural-language phrases that identify this routine. Include the canonical phrase and each example usage supplied by the user."
                             },
                             "actions": {
                                 "type": "array",
                                 "minItems": 1,
-                                "description": "Ordered actions. Use {type: open_app, app_name: <display name>} for one app, or {type: tool, tool_name: launch_apps, arguments: {app_names: [...]}} for several. Other registered tools may be called with type: tool."
+                                "maxItems": 50,
+                                "description": "Ordered actions. Use open_app for one app, tool/launch_apps for several, or tool with another registered tool name and its normal arguments.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"type": "string", "enum": ["command", "open_app", "open_url", "delay", "tool"]},
+                                        "argv": {
+                                            "type": "array",
+                                            "minItems": 1,
+                                            "maxItems": 100,
+                                            "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+                                        },
+                                        "cwd": {"type": "string", "minLength": 1, "maxLength": 4096},
+                                        "timeout": {"type": "number", "minimum": 1, "maximum": 600},
+                                        "app_name": {"type": "string", "minLength": 1, "maxLength": 128},
+                                        "url": {"type": "string", "minLength": 1, "maxLength": 4096},
+                                        "seconds": {"type": "number", "minimum": 0, "maximum": 30},
+                                        "tool_name": {"type": "string", "minLength": 1, "maxLength": 200},
+                                        "arguments": {
+                                            "type": "object",
+                                            "additionalProperties": True
+                                        },
+                                        "continue_on_error": {"type": "boolean"}
+                                    },
+                                    "required": ["type"],
+                                    "additionalProperties": False
+                                }
                             },
                             "allow_automatic": {
                                 "type": "boolean",
@@ -860,6 +1036,7 @@ TOOL_SCHEMAS.extend([
                         "required": ["description", "triggers", "actions"]
                     },
                     "dry_run": {"type": "boolean", "description": "Optional. Set true to preview a run; action=show always previews and action=run executes by default."},
+                    "overwrite": {"type": "boolean", "description": "For define, replace an existing routine only when explicitly requested together with confirmed=true."},
                     "confirmed": {"type": "boolean", "description": "Must be true for execution/deletion after explicit user approval, and when granting persistent approval to an automatic app-only routine."}
                 },
                 "required": ["action"]
@@ -1090,10 +1267,12 @@ TOOL_METADATA: dict[str, ToolMetadata] = {
         "create_structured_note", read_only=False, default_timeout_seconds=60, max_output_chars=12_000
     ),
     "knowledge_graph_builder": _metadata(
-        "knowledge_graph_builder", cpu_heavy=True, default_timeout_seconds=60, max_output_chars=30_000
+        "knowledge_graph_builder", cpu_heavy=True, supports_cancellation=True,
+        default_timeout_seconds=60, max_output_chars=100_000
     ),
     "run_simulation": _metadata(
-        "run_simulation", cpu_heavy=True, default_timeout_seconds=120, max_output_chars=25_000
+        "run_simulation", cpu_heavy=True, supports_cancellation=True,
+        default_timeout_seconds=120, max_output_chars=100_000
     ),
     "api_orchestrator": _metadata(
         "api_orchestrator", read_only=False, network_bound=True,

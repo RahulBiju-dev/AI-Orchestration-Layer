@@ -32,6 +32,7 @@ AGENT_MODE_SLASH_COMMANDS = {
 ULTRA_MODE_PROMPT = """Ultra Thinking mode is active for this turn.
 - Analyze every explicit and implicit intent in the original request before acting.
 - Use tools whenever they materially improve correctness. Web searches must use hard difficulty.
+- For a consequential multi-claim conclusion, audit a concise explicit claim/evidence graph with reasoning_chain_debugger before drafting.
 - Do not stop because of the ordinary tool-round count; continue until the request is actually resolved.
 - Never bypass confirmations, tool safety policies, cancellation, timeouts, or context safeguards.
 - Produce a complete draft. A separate second reasoning pass will audit it before it is shown.
@@ -50,6 +51,7 @@ Original user request:
 ULTRA_TERMINAL_PROMPT = """Ultra Thinking mode is active for this turn.
 - Analyze every explicit and implicit intent in the original request before acting.
 - Use tools whenever they materially improve correctness. Web searches must use hard difficulty.
+- For a consequential multi-claim conclusion, audit a concise explicit claim/evidence graph with reasoning_chain_debugger before answering.
 - Continue beyond the ordinary tool-round count while the work is making progress.
 - Never bypass confirmations, tool safety policies, cancellation, timeouts, or context safeguards.
 - Before answering, independently audit the result against the original request and all tool evidence.
@@ -59,9 +61,10 @@ Original user request:
 
 DEEP_RESEARCH_TERMINAL_PROMPT = """Deep Research mode is active for this turn.
 - Plan several distinct searches that cover the core question, recent evidence, primary sources, and limitations.
-- Use web_search at hard difficulty and inspect relevant sources before synthesizing the answer.
+- Use web_search at hard difficulty and inspect relevant sources with page content or web_scrape before synthesizing the answer.
 - Continue with additional distinct searches while material evidence gaps remain.
 - Compare dates, source quality, agreement, contradictions, and uncertainty.
+- When the conclusion depends on linked or conflicting evidence, audit a concise explicit graph with reasoning_chain_debugger.
 - Return a thorough answer with direct source URLs for factual web claims and distinguish facts from inference.
 - Never bypass confirmations, tool safety policies, cancellation, timeouts, or context safeguards.
 
@@ -80,7 +83,8 @@ User request:
 DEEP_RESEARCH_SYNTHESIS_PROMPT = """Deep Research mode is active.
 The preceding hard-difficulty web searches were planned from the user's intent and are research evidence.
 Evaluate source quality, dates, agreement, contradictions, and gaps. If material gaps remain, use additional
-hard-difficulty web searches with distinct queries and inspect relevant pages before answering. Then produce a
+hard-difficulty web searches with distinct queries and inspect relevant pages before answering. Audit a concise
+explicit claim/evidence graph with reasoning_chain_debugger when the conclusion is linked or contested. Then produce a
 thorough, structured response with direct source URLs/citations for factual web claims. Clearly distinguish
 source-supported facts from inference and do not claim exhaustive coverage of the entire web.
 

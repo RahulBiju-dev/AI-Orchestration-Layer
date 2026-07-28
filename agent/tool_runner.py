@@ -244,6 +244,29 @@ def _serialize_result(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
+def _finalize_handler_result(
+    spec: ToolCallSpec,
+    metadata: ToolMetadata,
+    result: object,
+) -> ToolCallResult:
+    """Serialize, classify, and bound a handler result without leaking failures."""
+    try:
+        serialized = _serialize_result(result)
+    except (TypeError, ValueError, OverflowError) as exc:
+        return ToolCallResult(
+            spec,
+            _error_content(
+                "invalid_tool_result",
+                f"Tool returned a result that could not be serialized: {exc}",
+                exception_type=type(exc).__name__,
+            ),
+            ToolResultStatus.ERROR,
+        )
+    status = _handler_result_status(serialized)
+    content, truncated = _bounded_content(serialized, metadata, status)
+    return ToolCallResult(spec, content, status, truncated=truncated)
+
+
 def _bounded_content(
     content: str,
     metadata: ToolMetadata,
@@ -424,11 +447,18 @@ def execute_tool_call(
             ToolResultStatus.ERROR,
         )
 
-    timeout = metadata.default_timeout_seconds if timeout_seconds is None else float(timeout_seconds)
-    if timeout <= 0:
+    try:
+        timeout = (
+            float(metadata.default_timeout_seconds)
+            if timeout_seconds is None
+            else float(timeout_seconds)
+        )
+    except (TypeError, ValueError, OverflowError):
+        timeout = math.nan
+    if not math.isfinite(timeout) or timeout <= 0:
         return ToolCallResult(
             spec,
-            _error_content("invalid_timeout", "Tool timeout must be positive"),
+            _error_content("invalid_timeout", "Tool timeout must be a positive finite number"),
             ToolResultStatus.ERROR,
         )
 
@@ -470,10 +500,7 @@ def execute_tool_call(
                 _error_content("timeout", f"Tool exceeded its {timeout:g}s timeout"),
                 ToolResultStatus.TIMEOUT,
             )
-        serialized = _serialize_result(result)
-        status = _handler_result_status(serialized)
-        content, truncated = _bounded_content(serialized, metadata, status)
-        return ToolCallResult(spec, content, status, truncated=truncated)
+        return _finalize_handler_result(spec, metadata, result)
 
     with _SHUTDOWN_LOCK:
         if _SHUTDOWN:
@@ -541,15 +568,7 @@ def execute_tool_call(
             ToolResultStatus.ERROR,
         )
 
-    serialized = _serialize_result(result)
-    status = _handler_result_status(serialized)
-    content, truncated = _bounded_content(serialized, metadata, status)
-    return ToolCallResult(
-        spec,
-        content,
-        status,
-        truncated=truncated,
-    )
+    return _finalize_handler_result(spec, metadata, result)
 
 
 def is_parallel_safe(spec: ToolCallSpec) -> bool:
@@ -710,7 +729,22 @@ def execute_tool_calls(
                 for spec in batch
             }
             for future in as_completed(futures):
-                result = future.result()
+                spec = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    # execute_tool_call is deliberately exception-safe, but keep
+                    # one unexpected worker failure from discarding every other
+                    # result in an otherwise independent parallel batch.
+                    result = ToolCallResult(
+                        spec,
+                        _error_content(
+                            "runner_failed",
+                            f"Tool runner worker failed: {exc}",
+                            exception_type=type(exc).__name__,
+                        ),
+                        ToolResultStatus.ERROR,
+                    )
                 completed[result.spec.index] = result
         for spec in sorted(batch, key=lambda value: value.index):
             result = completed[spec.index]

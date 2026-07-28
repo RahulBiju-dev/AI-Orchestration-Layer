@@ -59,7 +59,7 @@ def _json(data: dict) -> str:
 def _positive_int(value: int | str | None, default: int, minimum: int = 0, maximum: int | None = None) -> int:
     try:
         parsed = int(value) if value is not None else default
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         parsed = default
     parsed = max(minimum, parsed)
     if maximum is not None:
@@ -72,6 +72,7 @@ def sanitize_collection_name(name: str) -> str:
     Expected a name containing 3-63 characters from [a-zA-Z0-9._-],
     starting and ending with an alphanumeric character.
     """
+    name = str(name or "")
     if not name:
         return "vault"
     # Replace invalid chars with underscores
@@ -142,7 +143,6 @@ def chunk_text_with_offsets(
     """
     chunk_size = _positive_int(chunk_size, DEFAULT_CHUNK_SIZE, minimum=500, maximum=20000)
     chunk_overlap = _positive_int(chunk_overlap, DEFAULT_CHUNK_OVERLAP, minimum=0, maximum=max(0, chunk_size // 2))
-    text = text.replace("\r\n", "\n")
     if not text:
         return []
 
@@ -165,8 +165,8 @@ def chunk_text_with_offsets(
             if boundary >= chunk_size // 2:
                 end = start + boundary + 1
 
-        chunk = text[start:end].strip()
-        if chunk:
+        chunk = text[start:end]
+        if chunk.strip():
             chunks.append({
                 "index": len(chunks),
                 "text": chunk,
@@ -179,13 +179,6 @@ def chunk_text_with_offsets(
         start = max(end - chunk_overlap, start + 1)
 
     return chunks
-
-
-def _strip_frontmatter(text: str) -> str:
-    if not text.startswith("---"):
-        return text
-    match = re.match(r"^---\s*\n.*?\n---\s*\n", text, flags=re.DOTALL)
-    return text[match.end():].lstrip() if match else text
 
 
 def extract_pdf_with_vision(
@@ -264,25 +257,97 @@ def _read_text_for_index(
     if ext in {".pdf", ".docx"}:
         return extract_document_text(path)
 
-    with open(path, "r", encoding="utf-8") as f:
-        text = f.read()
-    text = _strip_frontmatter(text)
-    return text, {"document_type": ext.lstrip(".") or "text", "char_count": len(text)}
+    raw = Path(path).read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = raw.decode("utf-16")
+        encoding = "utf-16"
+    else:
+        if b"\x00" in raw:
+            raise ValueError("binary content cannot be indexed as text")
+        try:
+            text = raw.decode("utf-8-sig")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            try:
+                text = raw.decode("cp1252")
+                encoding = "cp1252"
+            except UnicodeDecodeError:
+                text = raw.decode("latin-1")
+                encoding = "latin-1"
+    return text, {
+        "document_type": ext.lstrip(".") or "text",
+        "char_count": len(text),
+        "encoding": encoding,
+    }
 
 
 def _iter_indexable_files(vault_path: str):
     for root, dirs, files in os.walk(vault_path):
-        dirs[:] = [name for name in dirs if name not in {".git", ".chroma", "__pycache__", "node_modules"}]
-        for fname in files:
+        dirs[:] = sorted(
+            name for name in dirs
+            if name.casefold() not in {".git", ".chroma", "__pycache__", "node_modules"}
+            and not os.path.islink(os.path.join(root, name))
+        )
+        for fname in sorted(files):
+            candidate = os.path.join(root, fname)
+            if os.path.islink(candidate):
+                continue
             ext = os.path.splitext(fname)[1].lower()
             if ext in SUPPORTED_INDEX_EXTENSIONS:
-                yield os.path.join(root, fname)
+                yield candidate
 
 
 def _pdf_fingerprint(path: str) -> str:
     stat = os.stat(path)
     payload = f"{os.path.abspath(path)}:{stat.st_size}:{stat.st_mtime_ns}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _text_generation(
+    path: str,
+    text: str,
+    *,
+    chunk_size: int,
+    chunk_overlap: int,
+    model: str,
+) -> str:
+    """Identify one complete text/config generation without relying on mtimes."""
+    digest = hashlib.sha256()
+    digest.update(os.path.abspath(path).encode("utf-8", errors="surrogatepass"))
+    digest.update(b"\0")
+    digest.update(text.encode("utf-8", errors="surrogatepass"))
+    digest.update(f"\0{chunk_size}:{chunk_overlap}:{model}".encode("utf-8"))
+    return digest.hexdigest()[:20]
+
+
+def _existing_source_ids(
+    collection_obj,
+    source: str,
+    source_path: str,
+) -> set[str]:
+    """Read and validate existing IDs for one physical source file."""
+    raw = collection_obj.get(include=["metadatas"])
+    if not isinstance(raw, dict):
+        raise RuntimeError("ChromaDB returned malformed source metadata")
+    ids = raw.get("ids")
+    metadatas = raw.get("metadatas")
+    if not isinstance(ids, list) or not isinstance(metadatas, list) or len(ids) != len(metadatas):
+        raise RuntimeError("ChromaDB returned misaligned source metadata")
+    matching_ids: set[str] = set()
+    normalized_path = os.path.normcase(os.path.abspath(source_path))
+    for item_id, metadata in zip(ids, metadatas):
+        if not isinstance(item_id, str) or not item_id:
+            raise RuntimeError("ChromaDB returned an invalid source chunk ID")
+        meta = metadata if isinstance(metadata, dict) else {}
+        stored_path = str(meta.get("source_path") or "").strip()
+        same_source = (
+            os.path.normcase(os.path.abspath(stored_path)) == normalized_path
+            if stored_path
+            else str(meta.get("source") or "") == source
+        )
+        if same_source:
+            matching_ids.add(item_id)
+    return matching_ids
 
 
 def _index_job_path(collection_name: str, path: str) -> Path:
@@ -357,12 +422,12 @@ def _index_job_summary(
         # Put control fields first so even legacy prefix previews remain useful.
         "complete": complete,
         "next_page": next_page,
-        "revision": max(0, int(state.get("revision", 0))),
+        "revision": _positive_int(state.get("revision"), 0),
         "source": source or state.get("source") or os.path.basename(path),
         "source_path": os.path.abspath(path),
-        "page_count": max(0, int(state.get("page_count", 0))),
-        "indexed_pages": max(0, int(state.get("indexed_pages", 0))),
-        "indexed_chunks": max(0, int(state.get("indexed_chunks", 0))),
+        "page_count": _positive_int(state.get("page_count"), 0),
+        "indexed_pages": _positive_int(state.get("indexed_pages"), 0),
+        "indexed_chunks": _positive_int(state.get("indexed_chunks"), 0),
         "chunk_size": _positive_int(
             config.get("chunk_size"), DEFAULT_CHUNK_SIZE, minimum=500, maximum=20000
         ),
@@ -381,12 +446,13 @@ def _index_job_summary(
             ),
         ),
         "vision_mode": vision_mode,
-        "vision_pages": max(0, int(state.get("vision_pages", 0))),
+        "vision_pages": _positive_int(state.get("vision_pages"), 0),
         "vision_failed_count": len(failed_pages),
         "vision_failed_pages": failed_pages[:MAX_RETURNED_FAILED_PAGES],
         "vision_failed_pages_truncated": len(failed_pages) > MAX_RETURNED_FAILED_PAGES,
         "vision_complete": bool(complete and not failed_pages),
-        "warning_count": max(int(state.get("warning_count", 0)), len(warnings)),
+        "cleanup_pending": bool(state.get("cleanup_pending")),
+        "warning_count": max(_positive_int(state.get("warning_count"), 0), len(warnings)),
         "warnings": warnings[-MAX_RETURNED_WARNING_SAMPLES:],
         "checkpoint": str(_index_job_path(collection_name, path)),
         "fingerprint": state.get("fingerprint"),
@@ -598,7 +664,9 @@ def _index_pdf_incremental(
         retrying_vision = bool(failed_at_start) and int(state.get("indexed_pages", 0)) >= total_pages
         retry_order: list[int] = []
         if retrying_vision and vision_mode == "off":
-            state["complete"] = True
+            state["vision_failed_pages"] = []
+            state["complete"] = False
+            state["cleanup_pending"] = True
             state["next_page"] = total_pages + 1
             with _INDEX_JOB_LOCK:
                 _save_index_job(collection_name, path, state)
@@ -686,6 +754,11 @@ def _index_pdf_incremental(
                         f"{generation_prefix}page::{page_number}::chunk::{chunk['index']}"
                         for chunk in chunks
                     ]
+                    source_ids = _existing_source_ids(collection_obj, rel, path)
+                    page_prefix = f"{generation_prefix}page::{page_number}::chunk::"
+                    previous_page_ids = {
+                        item_id for item_id in source_ids if item_id.startswith(page_prefix)
+                    }
                     metadatas = [
                         {
                             "source": rel,
@@ -706,12 +779,27 @@ def _index_pdf_incremental(
                         }
                         for chunk in chunks
                     ]
-                    collection_obj.upsert(
-                        ids=ids,
-                        documents=documents,
-                        embeddings=embeddings,
-                        metadatas=metadatas,
-                    )
+                    try:
+                        collection_obj.upsert(
+                            ids=ids,
+                            documents=documents,
+                            embeddings=embeddings,
+                            metadatas=metadatas,
+                        )
+                        stale_page_ids = previous_page_ids - set(ids)
+                        if stale_page_ids:
+                            collection_obj.delete(ids=sorted(stale_page_ids))
+                    except Exception:
+                        # Generation IDs keep the previous complete PDF intact.
+                        # Remove only records that did not exist before this page
+                        # attempt; a subsequent resume can safely retry the page.
+                        new_ids = set(ids) - previous_page_ids
+                        if new_ids:
+                            try:
+                                collection_obj.delete(ids=sorted(new_ids))
+                            except Exception:
+                                pass
+                        raise
                 page_chunk_counts = dict(state.get("page_chunk_counts", {}))
                 page_chunk_counts[str(page_number)] = len(chunks)
                 state["page_chunk_counts"] = page_chunk_counts
@@ -726,7 +814,8 @@ def _index_pdf_incremental(
                     retry_position = retry_order.index(page_number)
                     remaining_in_pass = retry_order[retry_position + 1:]
                     if not failed_vision_pages:
-                        state["complete"] = True
+                        state["complete"] = False
+                        state["cleanup_pending"] = True
                         state["next_page"] = total_pages + 1
                     elif remaining_in_pass:
                         state["complete"] = False
@@ -741,22 +830,34 @@ def _index_pdf_incremental(
                     reached_end = page_number >= total_pages
                     if reached_end and vision_mode != "off" and failed_vision_pages:
                         state["complete"] = False
+                        state["cleanup_pending"] = False
                         state["next_page"] = min(int(value) for value in failed_vision_pages)
                     else:
-                        state["complete"] = reached_end
+                        state["complete"] = False
+                        state["cleanup_pending"] = reached_end
                         state["next_page"] = total_pages + 1 if reached_end else page_number + 1
                 with _INDEX_JOB_LOCK:
                     _save_index_job(collection_name, path, state)
 
-    if state.get("complete"):
+    ready_for_cleanup = (
+        total_pages == 0
+        or (
+            int(state.get("indexed_pages", 0)) >= total_pages
+            and not state.get("vision_failed_pages", [])
+        )
+    )
+    if ready_for_cleanup:
         try:
-            existing = collection_obj.get(where={"source": rel}, include=["metadatas"])
+            existing_ids = _existing_source_ids(collection_obj, rel, path)
             stale_ids = [
-                item_id for item_id in existing.get("ids", [])
+                item_id for item_id in existing_ids
                 if not str(item_id).startswith(generation_prefix)
             ]
             if stale_ids:
                 collection_obj.delete(ids=stale_ids)
+            state["complete"] = True
+            state["cleanup_pending"] = False
+            state["next_page"] = total_pages + 1
         except Exception as exc:
             state.setdefault("warnings", []).append(
                 f"New index completed but stale-generation cleanup failed: {exc}"
@@ -766,8 +867,11 @@ def _index_pdf_incremental(
                 len(state["warnings"]),
             )
             state["warnings"] = state["warnings"][-50:]
-            with _INDEX_JOB_LOCK:
-                _save_index_job(collection_name, path, state)
+            state["complete"] = False
+            state["cleanup_pending"] = True
+            state["next_page"] = total_pages + 1
+        with _INDEX_JOB_LOCK:
+            _save_index_job(collection_name, path, state)
 
     return _index_job_summary(collection_name, path, state, source=rel)
 
@@ -960,7 +1064,15 @@ def index_vault(
     batch_size = _positive_int(batch_size, DEFAULT_BATCH_SIZE, minimum=1, maximum=128)
     chunk_size = _positive_int(chunk_size, DEFAULT_CHUNK_SIZE, minimum=500, maximum=20000)
     chunk_overlap = _positive_int(chunk_overlap, DEFAULT_CHUNK_OVERLAP, minimum=0, maximum=max(0, chunk_size // 2))
-    model = str(model or DEFAULT_EMBED_MODEL)
+    model = str(model or DEFAULT_EMBED_MODEL).strip()
+    if (
+        not model
+        or len(model) > 200
+        or any(character.isspace() or ord(character) < 32 for character in model)
+    ):
+        return _json({
+            "error": "model must be a non-empty name of at most 200 characters without whitespace or control characters"
+        })
 
     try:
         client = get_chroma_client()
@@ -1059,27 +1171,57 @@ def index_vault(
             skipped_files.append({"file": path, "error": str(exc)})
             continue
 
-        chunks = chunk_text_with_offsets(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        if not chunks:
-            skipped_files.append({"file": path, "error": "no extractable text"})
+        try:
+            previous_ids = _existing_source_ids(collection_obj, rel, path)
+        except Exception as exc:
+            skipped_files.append({
+                "file": path,
+                "error": f"could not inspect previous index; existing chunks preserved: {exc}",
+            })
             continue
 
+        chunks = chunk_text_with_offsets(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        if not chunks:
+            # Emptying a tracked document is a valid source change. Only mark it
+            # indexed after all previous chunks have been removed successfully.
+            try:
+                if previous_ids:
+                    collection_obj.delete(ids=sorted(previous_ids))
+            except Exception as exc:
+                skipped_files.append({
+                    "file": path,
+                    "error": f"empty source could not remove previous chunks: {exc}",
+                })
+                continue
+            indexed_files += 1
+            continue
+
+        generation = _text_generation(
+            path,
+            text,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            model=model,
+        )
+        generation_prefix = f"{rel}::text::{generation}::chunk::"
         file_ids: list[str] = []
         file_docs: list[str] = []
         file_metadatas: list[dict] = []
         for chunk in chunks:
             chunk_index = chunk["index"]
-            file_ids.append(f"{rel}::chunk::{chunk_index}")
+            file_ids.append(f"{generation_prefix}{chunk_index}")
             file_docs.append(chunk["text"])
             file_metadatas.append({
                 "source": rel,
-                "source_path": path,
+                "source_path": os.path.abspath(path),
                 "filename": os.path.basename(path),
                 "extension": ext,
                 "chunk_index": chunk_index,
                 "char_start": chunk["char_start"],
                 "char_end": chunk["char_end"],
                 "document_type": info.get("document_type", ext.lstrip(".")),
+                "index_generation": generation,
+                **({"encoding": info["encoding"]} if info.get("encoding") else {}),
             })
 
         # Complete all potentially failing embedding work before modifying the
@@ -1106,38 +1248,94 @@ def index_vault(
             skipped_files.append({"file": path, "error": f"embedding failed; previous index preserved: {exc}"})
             continue
 
-        try:
-            existing = collection_obj.get(where={"source": rel}, include=["metadatas"])
-            previous_ids = set(existing.get("ids", []))
-        except Exception:
-            previous_ids = set()
-
+        written_ids: set[str] = set()
         try:
             for batch_ids, batch_docs, batch_metadata, batch_embeddings in prepared_batches:
                 if cancellation_token:
                     cancellation_token.raise_if_cancelled()
                 collection_obj.upsert(ids=batch_ids, documents=batch_docs, embeddings=batch_embeddings, metadatas=batch_metadata)
+                written_ids.update(batch_ids)
             stale_ids = previous_ids - set(file_ids)
             if stale_ids:
                 collection_obj.delete(ids=sorted(stale_ids))
         except OperationCancelled:
+            rollback_ids = written_ids - previous_ids
+            if rollback_ids:
+                try:
+                    collection_obj.delete(ids=sorted(rollback_ids))
+                except Exception:
+                    pass
             raise
         except Exception as exc:
-            skipped_files.append({"file": path, "error": f"index write failed: {exc}"})
+            rollback_ids = written_ids - previous_ids
+            rollback_error = None
+            if rollback_ids:
+                try:
+                    collection_obj.delete(ids=sorted(rollback_ids))
+                except Exception as rollback_exc:
+                    rollback_error = str(rollback_exc)
+            error = f"index write failed; previous index preserved: {exc}"
+            if rollback_error:
+                error += f"; partial-generation cleanup also failed: {rollback_error}"
+            skipped_files.append({"file": path, "error": error})
             continue
 
         indexed_files += 1
         indexed_chunks += len(file_docs)
 
+    removed_chunks = 0
+    pdf_work_complete = all(job.get("complete", False) for job in pdf_jobs)
+    if not file_path and not skipped_files and pdf_work_complete:
+        # Once the whole folder has indexed successfully, reconcile documents
+        # removed since the prior run. Restrict cleanup to absolute source paths
+        # inside this folder so unrelated documents in a shared collection stay.
+        try:
+            raw = collection_obj.get(include=["metadatas"])
+            if not isinstance(raw, dict):
+                raise RuntimeError("ChromaDB returned malformed collection metadata")
+            existing_ids = raw.get("ids")
+            existing_metadatas = raw.get("metadatas")
+            if (
+                not isinstance(existing_ids, list)
+                or not isinstance(existing_metadatas, list)
+                or len(existing_ids) != len(existing_metadatas)
+            ):
+                raise RuntimeError("ChromaDB returned misaligned collection metadata")
+            candidate_paths = {
+                os.path.normcase(os.path.abspath(candidate)) for candidate in candidates
+            }
+            removed_source_ids = []
+            for item_id, metadata in zip(existing_ids, existing_metadatas):
+                if not isinstance(item_id, str) or not item_id:
+                    raise RuntimeError("ChromaDB returned an invalid chunk ID")
+                meta = metadata if isinstance(metadata, dict) else {}
+                source_path = str(meta.get("source_path") or "").strip()
+                if not source_path or not _path_is_within(source_path, source_root):
+                    continue
+                if os.path.normcase(os.path.abspath(source_path)) not in candidate_paths:
+                    removed_source_ids.append(item_id)
+            if removed_source_ids:
+                collection_obj.delete(ids=sorted(removed_source_ids))
+                removed_chunks = len(removed_source_ids)
+        except Exception as exc:
+            skipped_files.append({
+                "file": source_root,
+                "error": f"folder cleanup failed; removed-source chunks may remain: {exc}",
+            })
+
     # Auto-register an alias when a single file was indexed
     has_pdf_chunks = any(int(job.get("indexed_chunks", 0)) > 0 for job in pdf_jobs)
+    alias_warning = None
     if file_path and (indexed_files == 1 or has_pdf_chunks):
         stem = os.path.splitext(os.path.basename(file_path))[0]
-        register_vault_alias(
-            alias=stem,
-            collection_name=collection_name,
-            file_path=os.path.abspath(file_path),
-        )
+        try:
+            register_vault_alias(
+                alias=stem,
+                collection_name=collection_name,
+                file_path=os.path.abspath(file_path),
+            )
+        except (OSError, PersistenceError, ValueError) as exc:
+            alias_warning = f"Content was indexed, but its friendly alias could not be saved: {exc}"
 
     incomplete_pdf_count = sum(not job.get("complete", False) for job in pdf_jobs)
     failed_pdf_count = sum(bool(job.get("error")) for job in pdf_jobs)
@@ -1184,6 +1382,7 @@ def index_vault(
         "source_root": source_root,
         "indexed_files": indexed_files,
         "indexed_chunks": indexed_chunks,
+        "removed_chunks": removed_chunks,
         "skipped_files": skipped_files[:20],
         "skipped_count": len(skipped_files),
         "chunk_size": effective_chunk_size,
@@ -1200,6 +1399,8 @@ def index_vault(
             "Use action=status to inspect progress, vault_search for semantic lookup, and vault_read for exhaustive ordered retrieval."
         ),
     }
+    if alias_warning:
+        result["warning"] = alias_warning
     if skipped_files and len(skipped_files) == len(candidates):
         result["error"] = skipped_files[0]["error"]
     return _json(result)

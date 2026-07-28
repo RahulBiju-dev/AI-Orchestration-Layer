@@ -47,6 +47,64 @@ class ToolSchemaSelectionTests(unittest.TestCase):
         names = self._names("open the excel spreadsheet and update cells")
         self.assertIn("spreadsheet", names)
 
+    def test_csv_and_legacy_xls_write_requests_select_spreadsheet(self):
+        for request in (
+            "write these rows to a CSV file",
+            "export this table as a legacy XLS spreadsheet",
+        ):
+            with self.subTest(request=request):
+                self.assertIn("spreadsheet", self._names(request))
+
+    def test_routine_definition_request_selects_routine_executor(self):
+        names = self._names("save a routine that exports my report")
+        self.assertIn("automated_routine_executor", names)
+
+    def test_natural_what_if_and_projection_requests_select_simulation(self):
+        requests = (
+            "What happens if demand varies randomly for the next 30 days?",
+            "Project inventory growth over 12 months",
+            "Compare best case, base case, and worst case cash flow",
+        )
+        for request in requests:
+            with self.subTest(request=request):
+                self.assertIn("run_simulation", self._names(request))
+
+    def test_required_simulation_is_prioritized_ahead_of_generic_defaults(self):
+        selected = select_tool_schemas(
+            [{
+                "role": "user",
+                "content": "If demand grows each month, project inventory over 12 months",
+            }],
+            self.session,
+            TOOL_SCHEMAS,
+        )
+        self.assertEqual(selected[0]["function"]["name"], "run_simulation")
+
+    def test_natural_relationship_mapping_requests_select_knowledge_graph(self):
+        requests = (
+            "Map how these services depend on each other",
+            "Trace the causal path through these supplied factors",
+            "Find feedback loops and central concepts in these relationships",
+            "Build a graph connecting these entities",
+        )
+        for request in requests:
+            with self.subTest(request=request):
+                self.assertIn("knowledge_graph_builder", self._names(request))
+
+    def test_required_knowledge_graph_is_prioritized(self):
+        selected = select_tool_schemas(
+            [{
+                "role": "user",
+                "content": "Map how these services depend on each other",
+            }],
+            self.session,
+            TOOL_SCHEMAS,
+        )
+        self.assertEqual(
+            selected[0]["function"]["name"],
+            "knowledge_graph_builder",
+        )
+
     def test_browser_phrasing_selects_browser(self):
         names = self._names("open this website in the browser")
         self.assertIn("open_browser", names)
@@ -54,7 +112,20 @@ class ToolSchemaSelectionTests(unittest.TestCase):
     def test_datetime_preflight_included_with_web_search(self):
         names = self._names("search the web for today's latest news headlines")
         self.assertIn("web_search", names)
+        self.assertIn("web_scrape", names)
         self.assertIn("get_current_datetime", names)
+
+    def test_public_url_requires_page_scraper_without_exact_tool_name(self):
+        names = self._names("Summarize the claims in https://example.com/article")
+        self.assertIn("web_scrape", names)
+
+    def test_natural_argument_audit_selects_reasoning_debugger(self):
+        names = self._names("Check this argument and its evidence for unsupported conclusions")
+        self.assertIn("reasoning_chain_debugger", names)
+
+    def test_natural_history_compaction_selects_memory_optimizer(self):
+        names = self._names("Compress this chat history to reduce the context window")
+        self.assertIn("context_memory_optimizer", names)
 
     def test_each_model_exposed_tool_has_recall_phrasing(self):
         phrases = {

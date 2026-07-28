@@ -183,6 +183,29 @@ class TestToolRunner(unittest.TestCase):
         self.assertTrue(payload["truncated"])
         self.assertEqual(payload["original_characters"], 5_000)
 
+    def test_non_serializable_tool_result_is_a_controlled_error(self):
+        recursive = []
+        recursive.append(recursive)
+        with _registered_tool("recursive_result", lambda: recursive):
+            result = execute_tool_call(_spec("recursive_result"))
+
+        payload = json.loads(result.content)
+        self.assertEqual(result.status, ToolResultStatus.ERROR)
+        self.assertEqual(payload["error_code"], "invalid_tool_result")
+
+    def test_non_finite_timeout_is_rejected_without_invoking_handler(self):
+        invoked = threading.Event()
+        with _registered_tool("timeout_validation", lambda: invoked.set()):
+            result = execute_tool_call(
+                _spec("timeout_validation"),
+                timeout_seconds=float("nan"),
+            )
+
+        payload = json.loads(result.content)
+        self.assertEqual(result.status, ToolResultStatus.ERROR)
+        self.assertEqual(payload["error_code"], "invalid_timeout")
+        self.assertFalse(invoked.is_set())
+
     def test_duplicate_calls_replay_exact_result_once_in_input_order(self):
         calls = []
 

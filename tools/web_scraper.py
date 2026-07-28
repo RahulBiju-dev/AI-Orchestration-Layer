@@ -13,6 +13,7 @@ import ipaddress
 import json
 import re
 import socket
+import time
 from html.parser import HTMLParser
 from typing import Iterable
 from urllib.parse import urldefrag, urljoin, urlparse
@@ -22,7 +23,9 @@ MAX_CHARS = 20_000
 MAX_LINKS = 40
 MAX_HEADINGS = 40
 MAX_REDIRECTS = 5
-TIMEOUT = (5, 15)
+MAX_RETRIES = 2
+TIMEOUT = (3, 8)
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 USER_AGENT = (
     "SeleneAgent/1.0 (+https://localhost; bounded research scraper) "
@@ -44,14 +47,6 @@ _TEXTUAL_TYPES = (
 
 def _json(data: object) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-
-
-def _clamp_int(value: object, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(minimum, min(maximum, parsed))
 
 
 def _clean_text(value: str) -> str:
@@ -246,6 +241,7 @@ def _fetch(url: str) -> dict:
     current_url = url
     redirects: list[str] = []
     session = requests.Session()
+    response = None
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.3",
@@ -253,14 +249,40 @@ def _fetch(url: str) -> dict:
     }
 
     try:
+        retries_used = 0
+        request_attempts = 0
         for _ in range(MAX_REDIRECTS + 1):
             safe_url = _validate_public_http_url(current_url)
-            response = session.get(safe_url, headers=headers, timeout=TIMEOUT, stream=True, allow_redirects=False)
+            while True:
+                request_attempts += 1
+                try:
+                    response = session.get(
+                        safe_url,
+                        headers=headers,
+                        timeout=TIMEOUT,
+                        stream=True,
+                        allow_redirects=False,
+                    )
+                except Exception:
+                    if retries_used >= MAX_RETRIES:
+                        raise
+                    retries_used += 1
+                    time.sleep(0.2 * retries_used)
+                    continue
+                if (
+                    response.status_code in RETRYABLE_STATUS_CODES
+                    and retries_used < MAX_RETRIES
+                ):
+                    response.close()
+                    retries_used += 1
+                    time.sleep(0.2 * retries_used)
+                    continue
+                break
             if response.is_redirect or response.is_permanent_redirect:
                 location = response.headers.get("Location", "")
                 if not location:
                     return {"error": "redirect response did not include a Location header", "url": safe_url}
-                current_url = urljoin(safe_url, location)
+                current_url = _validate_public_http_url(urljoin(safe_url, location))
                 redirects.append(current_url)
                 response.close()
                 continue
@@ -271,11 +293,14 @@ def _fetch(url: str) -> dict:
         final_url = _validate_public_http_url(response.url)
         content_type = response.headers.get("Content-Type", "")
         if content_type and not _looks_textual(content_type):
+            response.close()
             return {
                 "error": "URL did not return a textual page",
                 "url": final_url,
                 "status_code": response.status_code,
                 "content_type": content_type,
+                "redirects": redirects,
+                "request_attempts": request_attempts,
                 "guidance": "Use a document, image, or browser-specific tool for non-text web assets.",
             }
 
@@ -294,6 +319,19 @@ def _fetch(url: str) -> dict:
 
         content = b"".join(chunks)
         text = _decode_response(content, response.encoding)
+        response.close()
+        if response.status_code >= 400:
+            return {
+                "error": f"HTTP request failed with status {response.status_code}",
+                "url": final_url,
+                "requested_url": url,
+                "status_code": response.status_code,
+                "content_type": content_type,
+                "response_excerpt": _clean_text(text)[:2_000],
+                "truncated_bytes": total > MAX_BYTES,
+                "redirects": redirects,
+                "request_attempts": request_attempts,
+            }
         return {
             "url": final_url,
             "requested_url": url,
@@ -303,11 +341,24 @@ def _fetch(url: str) -> dict:
             "text": text,
             "truncated_bytes": total > MAX_BYTES,
             "redirects": redirects,
+            "request_attempts": request_attempts,
         }
     except Exception as exc:
-        return {"error": str(exc), "url": current_url}
+        return {
+            "error": str(exc),
+            "url": current_url,
+            "request_attempts": locals().get("request_attempts", 0),
+        }
     finally:
-        session.close()
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+        try:
+            session.close()
+        except Exception:
+            pass
 
 
 def _extract(url: str, raw: dict, max_chars: int, include_links: bool) -> dict:
@@ -343,6 +394,7 @@ def _extract(url: str, raw: dict, max_chars: int, include_links: bool) -> dict:
         "canonical_url": canonical_url,
         "requested_url": str(raw.get("requested_url") or url),
         "status_code": raw.get("status_code"),
+        "request_attempts": raw.get("request_attempts"),
         "content_type": raw.get("content_type"),
         "title": title,
         "description": description,
@@ -372,8 +424,25 @@ def web_scrape(url: str, max_chars: int = MAX_CHARS, include_links: bool = False
     except ValueError as exc:
         return _json({"error": str(exc)})
 
-    max_chars = _clamp_int(max_chars, MAX_CHARS, 1_000, 50_000)
+    try:
+        max_chars = int(max_chars)
+    except (TypeError, ValueError, OverflowError):
+        return _json({"error": "max_chars must be an integer between 1000 and 50000"})
+    if not 1_000 <= max_chars <= 50_000:
+        return _json({"error": "max_chars must be between 1000 and 50000"})
+    if not isinstance(include_links, bool):
+        return _json({"error": "include_links must be a boolean"})
     raw = _fetch(safe_url)
     if raw.get("error"):
         return _json(raw)
-    return _json(_extract(safe_url, raw, max_chars, bool(include_links)))
+    try:
+        extracted = _extract(safe_url, raw, max_chars, include_links)
+    except Exception as exc:
+        return _json({
+            "error": f"page extraction failed: {exc}",
+            "url": raw.get("url") or safe_url,
+            "status_code": raw.get("status_code"),
+        })
+    if not extracted.get("text"):
+        extracted["warning"] = "The page returned no readable text"
+    return _json(extracted)

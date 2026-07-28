@@ -925,9 +925,18 @@ class TestContextBudget(unittest.TestCase):
             ])
         session = {"options": {"num_ctx": 2048}}
 
-        with patch("ollama.chat", side_effect=AssertionError("unexpected model call")):
+        from tools.context_memory_optimizer import context_memory_optimizer
+
+        with (
+            patch("ollama.chat", side_effect=AssertionError("unexpected model call")),
+            patch(
+                "tools.context_memory_optimizer.context_memory_optimizer",
+                wraps=context_memory_optimizer,
+            ) as optimize,
+        ):
             _check_and_compact_history(history, session)
 
+        self.assertEqual(optimize.call_count, 1)
         self.assertNotIn("_is_compacting", session)
         self.assertEqual(history[0]["role"], "system")
         self.assertEqual([m["content"] for m in history if m.get("role") == "user"][-2:], [

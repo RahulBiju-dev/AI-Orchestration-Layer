@@ -23,27 +23,31 @@ REFRESH_SECONDS = 24 * 60 * 60
 DEFAULT_TOP_K = 10
 DEFAULT_MAX_CHARS = 14000
 DEFAULT_BATCH_SIZE = 16
-MAX_FILES = 5000
-MAX_FILE_BYTES = 2 * 1024 * 1024
-MAX_TOTAL_BYTES = 50 * 1024 * 1024
-MAX_SKIPPED_FILES = 1_000
 STATE_FILE = os.path.join(DATA_DIR, "codebase_indexes.json")
 _STATE_LOCK = threading.RLock()
 _INDEX_LOCK = threading.RLock()
 
 CODE_EXTENSIONS = {
-    ".c", ".cc", ".clj", ".cljs", ".cmake", ".coffee", ".cpp", ".cs", ".css",
-    ".dart", ".ex", ".exs", ".fs", ".fsx", ".go", ".graphql", ".h", ".hpp",
-    ".html", ".htm", ".java", ".jl", ".js", ".jsx", ".json", ".kt", ".kts",
-    ".less", ".lua", ".md", ".markdown", ".mjs", ".mm", ".php", ".pl", ".pm",
-    ".proto", ".py", ".pyi", ".r", ".rb", ".rs", ".rst", ".sass", ".scala",
-    ".scss", ".sh", ".sql", ".svelte", ".swift", ".toml", ".ts", ".tsx", ".vue",
-    ".xml", ".yaml", ".yml", ".zig",
+    ".asm", ".bash", ".bat", ".c", ".cc", ".cfg", ".cjs", ".clj", ".cljc",
+    ".cljs", ".cmake", ".cmd", ".coffee", ".conf", ".config", ".cpp", ".cs",
+    ".css", ".csv", ".cxx", ".dart", ".edn", ".erl", ".ex", ".exs", ".f",
+    ".f03", ".f08", ".f90", ".f95", ".fish", ".fs", ".fsx", ".gql", ".go",
+    ".gradle", ".graphql", ".graphqls", ".groovy", ".h", ".hh", ".hpp", ".hs",
+    ".html", ".htm", ".hxx", ".ini", ".ipynb", ".java", ".jl", ".js", ".jsx",
+    ".json", ".ksh", ".kt", ".kts", ".less", ".lhs", ".lisp", ".lock", ".lua",
+    ".m", ".markdown", ".md", ".mdown", ".mjs", ".mm", ".pas", ".php", ".pl",
+    ".pm", ".pp", ".properties", ".proto", ".ps1", ".psd1", ".psm1", ".py",
+    ".pyi", ".pyw", ".r", ".rake", ".rb", ".rst", ".rs", ".s", ".sass",
+    ".scala", ".scss", ".sh", ".sql", ".svelte", ".swift", ".t", ".tex",
+    ".tf", ".tfvars", ".thrift", ".toml", ".ts", ".tsv", ".tsx", ".vue",
+    ".xml", ".yaml", ".yml", ".zig", ".zsh",
 }
 SPECIAL_FILES = {
     "dockerfile", "makefile", "procfile", "rakefile", "gemfile", "cmakelists.txt",
     "package.json", "pyproject.toml", "requirements.txt", "cargo.toml", "go.mod",
     "composer.json", "build.gradle", "settings.gradle", ".gitignore", ".dockerignore",
+    ".editorconfig", ".env", ".gitattributes", ".npmrc", ".nvmrc", "authors",
+    "copying", "justfile", "license", "notice", "vagrantfile",
 }
 IGNORED_DIRS = {
     ".git", ".hg", ".svn", ".chroma", ".idea", ".vscode", ".pytest_cache",
@@ -91,7 +95,12 @@ def _save_state(state: dict) -> None:
 
 
 def _is_indexable(path: Path) -> bool:
-    return path.suffix.lower() in CODE_EXTENSIONS or path.name.casefold() in SPECIAL_FILES
+    name = path.name.casefold()
+    return (
+        path.suffix.lower() in CODE_EXTENSIONS
+        or name in SPECIAL_FILES
+        or name.startswith(".env.")
+    )
 
 
 def _discover_files(
@@ -100,7 +109,6 @@ def _discover_files(
 ) -> tuple[list[Path], list[dict]]:
     files: list[Path] = []
     skipped: list[dict] = []
-    total_bytes = 0
     for current, dirs, names in os.walk(root, followlinks=False):
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
@@ -117,36 +125,27 @@ def _discover_files(
             if not _is_indexable(path) or path.is_symlink():
                 continue
             try:
-                size = path.stat().st_size
+                path.stat()
             except OSError as exc:
-                if len(skipped) < MAX_SKIPPED_FILES:
-                    skipped.append({"file": str(path), "reason": str(exc)})
-                continue
-            if size > MAX_FILE_BYTES:
-                if len(skipped) < MAX_SKIPPED_FILES:
-                    skipped.append({"file": str(path), "reason": "file exceeds 2 MiB"})
-                continue
-            if len(files) >= MAX_FILES:
-                if len(skipped) < MAX_SKIPPED_FILES:
-                    skipped.append({"file": str(path), "reason": "repository file limit reached"})
-                dirs[:] = []
-                break
-            if total_bytes + size > MAX_TOTAL_BYTES:
-                if len(skipped) < MAX_SKIPPED_FILES:
-                    skipped.append({"file": str(path), "reason": "repository byte limit reached"})
+                skipped.append({"file": str(path), "reason": str(exc)})
                 continue
             files.append(path)
-            total_bytes += size
-        if len(files) >= MAX_FILES:
-            return files, skipped
     return files, skipped
 
 
 def _read_source(path: Path) -> str:
     raw = path.read_bytes()
-    if b"\x00" in raw[:8192]:
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    if b"\x00" in raw:
         raise ValueError("binary file")
-    return raw.decode("utf-8")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            return raw.decode("cp1252")
+        except UnicodeDecodeError:
+            return raw.decode("latin-1")
 
 
 def _line_number(text: str, offset: int) -> int:
@@ -232,6 +231,13 @@ def _index_repository(
     active_ids: set[str] = set()
     records: list[dict] = []
     skipped = list(discovery_skips)
+    for item in discovery_skips:
+        source_path = str(item.get("file") or "")
+        try:
+            source = Path(source_path).relative_to(root).as_posix()
+        except (TypeError, ValueError):
+            source = os.path.relpath(source_path, root).replace(os.sep, "/")
+        active_ids.update(previous_by_source.get(source, set()))
     indexed_chunks = 0
 
     for path in files:
@@ -302,35 +308,41 @@ def _index_repository(
             "skipped_files": skipped[:30],
         }
 
-    overview = _overview_document(root, records)
-    overview_chunks = chunk_text_with_offsets(overview, chunk_size=4000, chunk_overlap=100)
-    overview_ids = [f"__repository_overview__::{item['index']}" for item in overview_chunks]
-    overview_docs = [item["text"] for item in overview_chunks]
-    try:
-        collection.upsert(
-            ids=overview_ids,
-            documents=overview_docs,
-            embeddings=embed_texts(
-                overview_docs,
-                model=model,
-                cancellation_token=cancellation_token,
-            ),
-            metadatas=[{
-                "source": "[repository overview]", "source_path": root, "filename": "[repository overview]",
-                "extension": "", "language": "Repository map", "chunk_index": item["index"],
-                "char_start": item["char_start"], "char_end": item["char_end"],
-                "line_start": _line_number(overview, item["char_start"]),
-                "line_end": _line_number(overview, item["char_end"]),
-                "kind": "overview",
-            } for item in overview_chunks],
-        )
-        active_ids.update(overview_ids)
-        indexed_chunks += len(overview_ids)
-    except OperationCancelled:
-        raise
-    except Exception as exc:
-        skipped.append({"file": "[repository overview]", "reason": str(exc)})
+    if skipped:
+        # A newly generated overview would falsely omit files whose last good
+        # chunks were deliberately preserved. Keep the previous overview until
+        # every supported source has been read and embedded successfully.
         active_ids.update(previous_by_source.get("[repository overview]", set()))
+    else:
+        overview = _overview_document(root, records)
+        overview_chunks = chunk_text_with_offsets(overview, chunk_size=4000, chunk_overlap=100)
+        overview_ids = [f"__repository_overview__::{item['index']}" for item in overview_chunks]
+        overview_docs = [item["text"] for item in overview_chunks]
+        try:
+            collection.upsert(
+                ids=overview_ids,
+                documents=overview_docs,
+                embeddings=embed_texts(
+                    overview_docs,
+                    model=model,
+                    cancellation_token=cancellation_token,
+                ),
+                metadatas=[{
+                    "source": "[repository overview]", "source_path": root, "filename": "[repository overview]",
+                    "extension": "", "language": "Repository map", "chunk_index": item["index"],
+                    "char_start": item["char_start"], "char_end": item["char_end"],
+                    "line_start": _line_number(overview, item["char_start"]),
+                    "line_end": _line_number(overview, item["char_end"]),
+                    "kind": "overview",
+                } for item in overview_chunks],
+            )
+            active_ids.update(overview_ids)
+            indexed_chunks += len(overview_ids)
+        except OperationCancelled:
+            raise
+        except Exception as exc:
+            skipped.append({"file": "[repository overview]", "reason": str(exc)})
+            active_ids.update(previous_by_source.get("[repository overview]", set()))
 
     stale_ids = previous_ids - active_ids
     if stale_ids:
@@ -353,12 +365,18 @@ def _index_repository(
             "state_file": STATE_FILE,
             "preserved": True,
         }
+    complete = not skipped
+    previous_entry = state.get(root) if isinstance(state.get(root), dict) else {}
     state[root] = {
+        **previous_entry,
         "collection": collection_name,
-        "last_indexed_at": now,
         "indexed_files": len(records),
         "indexed_chunks": indexed_chunks,
+        "complete": complete,
+        "last_attempted_at": now,
     }
+    if complete:
+        state[root]["last_indexed_at"] = now
     try:
         _save_state(state)
     except (OSError, PersistenceError) as exc:
@@ -369,7 +387,9 @@ def _index_repository(
             "collection": collection_name,
         }
     return {
-        "refreshed": True,
+        "refreshed": complete,
+        "complete": complete,
+        "needs_retry": not complete,
         "refresh_reason": refresh_reason,
         "codebase_path": root,
         "collection": collection_name,
@@ -394,6 +414,13 @@ def _refresh_status(
         return {
             "needs_refresh": True,
             "reason": "not indexed",
+            **({"index_available": index_available} if index_available is not None else {}),
+        }
+    if entry.get("complete") is False:
+        return {
+            **entry,
+            "needs_refresh": True,
+            "reason": "previous indexing attempt was incomplete",
             **({"index_available": index_available} if index_available is not None else {}),
         }
     try:

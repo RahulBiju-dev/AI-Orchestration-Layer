@@ -21,6 +21,9 @@ MAX_SHEETS = 20
 MAX_CREATE_ROWS = 10_000
 MAX_CREATE_COLUMNS = 256
 MAX_CREATE_CELLS = 100_000
+MAX_EXCEL_CELL_CHARS = 32_767
+MAX_CSV_FIELD_CHARS = 1_000_000
+MAX_CREATE_TEXT_CHARS = 10_000_000
 MAX_READ_ROWS = 200
 MAX_READ_COLUMNS = 100
 MAX_SCAN_CELLS = 200_000
@@ -31,6 +34,7 @@ MAX_XLSX_ARCHIVE_ENTRIES = 20_000
 CSV_DELIMITERS = {",", ";", "\t", "|"}
 _CELL_RANGE_RE = re.compile(r"^([A-Za-z]+)([1-9]\d*)(?::([A-Za-z]+)([1-9]\d*))?$")
 _INVALID_SHEET_CHARS = re.compile(r"[\\/*?:\[\]]")
+csv.field_size_limit(MAX_CSV_FIELD_CHARS)
 
 
 @dataclass
@@ -46,11 +50,23 @@ def _json(value: dict) -> str:
 
 
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError("limit values must be integers, not booleans")
     try:
-        parsed = int(value) if value is not None else default
+        parsed = int(value)
     except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, min(maximum, parsed))
+        raise ValueError("limit values must be integers") from None
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"limit values must be between {minimum} and {maximum}")
+    return parsed
+
+
+def _require_boolean(name: str, value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be boolean")
+    return value
 
 
 def _serialize_cell(value: Any) -> Any:
@@ -158,8 +174,14 @@ def _open_xlsx(file_path: Path, data_only: bool) -> tuple[list[_Sheet], Callable
         data_only=data_only,
         keep_links=False,
     )
+    if len(workbook.worksheets) > MAX_SHEETS:
+        workbook.close()
+        raise ValueError(
+            f"Workbook contains {len(workbook.worksheets)} worksheets; "
+            f"the supported limit is {MAX_SHEETS}"
+        )
     sheets = []
-    for worksheet in workbook.worksheets[:MAX_SHEETS]:
+    for worksheet in workbook.worksheets:
         sheets.append(_Sheet(
             name=worksheet.title,
             row_count=int(worksheet.max_row or 0),
@@ -176,6 +198,12 @@ def _open_xls(file_path: Path, data_only: bool) -> tuple[list[_Sheet], Callable[
     except ImportError as exc:
         raise RuntimeError("Missing spreadsheet dependency. Run: pip install xlrd") from exc
     workbook = xlrd.open_workbook(file_path, on_demand=True)
+    if workbook.nsheets > MAX_SHEETS:
+        workbook.release_resources()
+        raise ValueError(
+            f"Workbook contains {workbook.nsheets} worksheets; "
+            f"the supported limit is {MAX_SHEETS}"
+        )
 
     def cell_value(worksheet, row: int, column: int):
         cell = worksheet.cell(row - 1, column - 1)
@@ -188,7 +216,7 @@ def _open_xls(file_path: Path, data_only: bool) -> tuple[list[_Sheet], Callable[
         return cell.value
 
     sheets = []
-    for worksheet in workbook.sheets()[:MAX_SHEETS]:
+    for worksheet in workbook.sheets():
         sheets.append(_Sheet(
             name=worksheet.name,
             row_count=worksheet.nrows,
@@ -275,7 +303,9 @@ def _validate_input_sheets(sheets: Any, extension: str) -> list[tuple[str, list[
     validated = []
     names = set()
     total_cells = 0
+    total_text_chars = 0
     format_row_limit = 65_536 if extension == ".xls" else MAX_CREATE_ROWS
+    max_cell_chars = MAX_CSV_FIELD_CHARS if extension == ".csv" else MAX_EXCEL_CELL_CHARS
     for index, item in enumerate(sheets):
         if not isinstance(item, dict):
             raise ValueError(f"sheets[{index}] must be an object")
@@ -302,6 +332,18 @@ def _validate_input_sheets(sheets: Any, extension: str) -> list[tuple[str, list[
                     raise ValueError("Cell values must be strings, numbers, booleans, or null")
                 if isinstance(value, float) and not math.isfinite(value):
                     raise ValueError("Cell numbers must be finite")
+                if isinstance(value, str):
+                    if len(value) > max_cell_chars:
+                        raise ValueError(
+                            f"Worksheet '{name}' cell {_column_letters(len(normalized) + 1)}"
+                            f"{row_index + 1} exceeds the {max_cell_chars}-character "
+                            f"{extension[1:].upper()} cell limit"
+                        )
+                    total_text_chars += len(value)
+                    if total_text_chars > MAX_CREATE_TEXT_CHARS:
+                        raise ValueError(
+                            f"Workbook exceeds the {MAX_CREATE_TEXT_CHARS}-character text limit"
+                        )
                 normalized.append(value)
             normalized_rows.append(normalized)
             total_cells += len(normalized)
@@ -317,16 +359,18 @@ def _create_xlsx(file_path: Path, sheets: list[tuple[str, list[list[Any]]]], all
     except ImportError as exc:
         raise RuntimeError("Missing spreadsheet dependency. Run: pip install openpyxl") from exc
     workbook = openpyxl.Workbook(write_only=False)
-    for index, (name, rows) in enumerate(sheets):
-        worksheet = workbook.active if index == 0 else workbook.create_sheet()
-        worksheet.title = name
-        for row_index, row in enumerate(rows, start=1):
-            for column_index, value in enumerate(row, start=1):
-                cell = worksheet.cell(row=row_index, column=column_index, value=value)
-                if isinstance(value, str) and value.startswith("=") and not allow_formulas:
-                    cell.data_type = "s"
-    workbook.save(file_path)
-    workbook.close()
+    try:
+        for index, (name, rows) in enumerate(sheets):
+            worksheet = workbook.active if index == 0 else workbook.create_sheet()
+            worksheet.title = name
+            for row_index, row in enumerate(rows, start=1):
+                for column_index, value in enumerate(row, start=1):
+                    cell = worksheet.cell(row=row_index, column=column_index, value=value)
+                    if isinstance(value, str) and value.startswith("=") and not allow_formulas:
+                        cell.data_type = "s"
+        workbook.save(file_path)
+    finally:
+        workbook.close()
 
 
 def _create_xls(file_path: Path, sheets: list[tuple[str, list[list[Any]]]], allow_formulas: bool) -> None:
@@ -351,19 +395,103 @@ def _create_csv(
     sheets: list[tuple[str, list[list[Any]]]],
     allow_formulas: bool,
     delimiter: str | None,
-) -> None:
+) -> int:
     if len(sheets) != 1:
         raise ValueError("CSV creation accepts exactly one worksheet/rows array")
     selected_delimiter = _validate_delimiter(delimiter) or ","
+    escaped_formula_cells = 0
     with open(file_path, "w", encoding="utf-8", newline="") as stream:
         writer = csv.writer(stream, delimiter=selected_delimiter, lineterminator="\n")
         for row in sheets[0][1]:
             safe_row = []
             for value in row:
-                if not allow_formulas and isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+                candidate = value.lstrip("\t\r\n") if isinstance(value, str) else ""
+                if (
+                    not allow_formulas
+                    and isinstance(value, str)
+                    and candidate.startswith(("=", "+", "-", "@"))
+                ):
                     value = "'" + value
+                    escaped_formula_cells += 1
                 safe_row.append("" if value is None else value)
             writer.writerow(safe_row)
+    return escaped_formula_cells
+
+
+def _sync_file(file_path: Path) -> None:
+    """Flush library-created output before it is installed at the destination."""
+    with open(file_path, "rb") as stream:
+        os.fsync(stream.fileno())
+
+
+def _sync_parent(directory: Path) -> None:
+    """Best-effort directory sync so an installed workbook survives a crash."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _verify_created_workbook(
+    file_path: Path,
+    expected_sheets: list[tuple[str, list[list[Any]]]],
+    delimiter: str | None,
+) -> None:
+    """Reopen new output and verify its format and materialized dimensions."""
+    workbook_sheets, close = _open_workbook(file_path, False, delimiter)
+    try:
+        expected_names = [name for name, _ in expected_sheets]
+        actual_names = [sheet.name for sheet in workbook_sheets]
+        if file_path.suffix.lower() != ".csv" and actual_names != expected_names:
+            raise RuntimeError(
+                f"Spreadsheet verification failed: expected worksheets {expected_names}, "
+                f"found {actual_names}"
+            )
+        if len(workbook_sheets) != len(expected_sheets):
+            raise RuntimeError(
+                "Spreadsheet verification failed: worksheet count changed while writing"
+            )
+        for actual, (_, rows) in zip(workbook_sheets, expected_sheets):
+            materialized_rows = 0
+            materialized_columns = 0
+            for row_index, row in enumerate(rows, start=1):
+                for column_index, value in enumerate(row, start=1):
+                    if value is not None and value != "":
+                        materialized_rows = max(materialized_rows, row_index)
+                        materialized_columns = max(materialized_columns, column_index)
+            if (
+                actual.row_count < materialized_rows
+                or actual.column_count < materialized_columns
+            ):
+                raise RuntimeError(
+                    f"Spreadsheet verification failed for worksheet '{actual.name}': "
+                    "written dimensions are smaller than the supplied data"
+                )
+    finally:
+        close()
+
+
+def _install_workbook(temporary: Path, destination: Path, overwrite: bool) -> None:
+    """Atomically install output and never race into an unapproved overwrite."""
+    if overwrite:
+        os.replace(temporary, destination)
+    else:
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            raise FileExistsError(
+                f"File already exists and overwrite=false: {destination}"
+            ) from None
+        else:
+            temporary.unlink()
+    _sync_parent(destination.parent)
 
 
 def _create_workbook(
@@ -375,6 +503,10 @@ def _create_workbook(
 ) -> dict:
     extension = file_path.suffix.lower()
     validated_sheets = _validate_input_sheets(sheets, extension)
+    if extension == ".csv":
+        if len(validated_sheets) != 1:
+            raise ValueError("CSV creation accepts exactly one worksheet/rows array")
+        validated_sheets = [("CSV", validated_sheets[0][1])]
     existed = file_path.exists()
     if existed and not overwrite:
         raise FileExistsError(f"File already exists and overwrite=false: {file_path}")
@@ -383,14 +515,19 @@ def _create_workbook(
     handle, temporary_name = tempfile.mkstemp(prefix=f".{file_path.stem}-", suffix=extension, dir=file_path.parent)
     os.close(handle)
     temporary = Path(temporary_name)
+    escaped_formula_cells = 0
     try:
         if extension == ".xlsx":
             _create_xlsx(temporary, validated_sheets, allow_formulas)
         elif extension == ".xls":
             _create_xls(temporary, validated_sheets, allow_formulas)
         else:
-            _create_csv(temporary, validated_sheets, allow_formulas, delimiter)
-        os.replace(temporary, file_path)
+            escaped_formula_cells = _create_csv(
+                temporary, validated_sheets, allow_formulas, delimiter
+            )
+        _sync_file(temporary)
+        _verify_created_workbook(temporary, validated_sheets, delimiter)
+        _install_workbook(temporary, file_path, overwrite)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -403,7 +540,14 @@ def _create_workbook(
         "sheet_count": len(validated_sheets),
         "row_counts": {name: len(rows) for name, rows in validated_sheets},
         "formulas_enabled": allow_formulas,
-        "overwritten": existed,
+        "verified": True,
+        "overwritten": existed and overwrite,
+        "size_bytes": file_path.stat().st_size,
+        **(
+            {"escaped_formula_cells": escaped_formula_cells}
+            if extension == ".csv"
+            else {}
+        ),
         **({"delimiter": _validate_delimiter(delimiter) or ","} if extension == ".csv" else {}),
     }
 
@@ -440,20 +584,28 @@ def spreadsheet(
         return _json({"error": "Only .csv, .xls, and .xlsx files are supported"})
 
     try:
+        data_only = _require_boolean("data_only", data_only)
+        overwrite = _require_boolean("overwrite", overwrite)
+        allow_formulas = _require_boolean("allow_formulas", allow_formulas)
+        confirmed = _require_boolean("confirmed", confirmed)
+        if extension != ".csv" and delimiter not in {None, ""}:
+            raise ValueError("delimiter is only valid for CSV files")
         if action == "create":
-            if confirmed is not True:
+            if not confirmed:
                 return _json({
                     "error": "Creating a spreadsheet requires explicit user approval.",
                     "required": "Call again with confirmed=true only after the user requests creation.",
                 })
+            if sheets is not None and rows is not None:
+                raise ValueError("Provide either sheets or rows for create, not both")
             creation_sheets = sheets
             if creation_sheets is None and rows is not None:
                 creation_sheets = [{"name": "CSV" if extension == ".csv" else "Sheet1", "rows": rows}]
             return _json(_create_workbook(
                 path,
                 creation_sheets,
-                bool(overwrite),
-                bool(allow_formulas),
+                overwrite,
+                allow_formulas,
                 delimiter,
             ))
 
@@ -467,7 +619,7 @@ def spreadsheet(
             })
         row_limit = _bounded_int(max_rows, 50, 1, MAX_READ_ROWS)
         column_limit = _bounded_int(max_columns, 30, 1, MAX_READ_COLUMNS)
-        workbook_sheets, close = _open_workbook(path, bool(data_only), delimiter)
+        workbook_sheets, close = _open_workbook(path, data_only, delimiter)
         try:
             base = {
                 "ok": True,
@@ -550,9 +702,9 @@ def spreadsheet(
                 "range": info["range"],
                 "rows": rows,
                 "truncated": info["truncated"],
-                "data_only": bool(data_only),
+                "data_only": data_only,
             })
         finally:
             close()
-    except (OSError, ValueError, RuntimeError, FileExistsError) as exc:
+    except (csv.Error, OSError, ValueError, RuntimeError, FileExistsError) as exc:
         return _json({"error": str(exc), "action": action, "file": str(path)})

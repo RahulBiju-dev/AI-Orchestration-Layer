@@ -23,7 +23,7 @@ def _json(data: dict) -> str:
 def _positive_int(value: int | str | None, default: int, minimum: int = 1, maximum: int | None = None) -> int:
     try:
         parsed = int(value) if value is not None else default
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         parsed = default
     parsed = max(minimum, parsed)
     if maximum is not None:
@@ -46,6 +46,46 @@ def _similarity(value: Any) -> float | None:
     if not math.isfinite(distance):
         return None
     return round(1.0 / (1.0 + max(0.0, distance)), 6)
+
+
+def _finite_distance(value: Any) -> float | None:
+    try:
+        distance = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return distance if math.isfinite(distance) else None
+
+
+def _query_rows(results: Any) -> tuple[list, list, list]:
+    """Validate the single-query Chroma response before consuming any row."""
+    if not isinstance(results, dict):
+        raise RuntimeError("Vault search returned malformed results")
+    rows: list[list] = []
+    for name in ("documents", "metadatas", "distances"):
+        value = results.get(name)
+        if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], list):
+            raise RuntimeError(f"Vault search returned malformed {name}")
+        rows.append(value[0])
+    documents, metadatas, distances = rows
+    if not (len(documents) == len(metadatas) == len(distances)):
+        raise RuntimeError("Vault search returned misaligned documents, metadata, and distances")
+    return documents, metadatas, distances
+
+
+def _collection_rows(raw: Any, *, include_documents: bool) -> tuple[list[str], list, list]:
+    """Validate an ordered Chroma get response so records cannot be dropped by zip."""
+    if not isinstance(raw, dict):
+        raise RuntimeError("Vault collection returned malformed records")
+    ids = raw.get("ids")
+    metadatas = raw.get("metadatas")
+    documents = raw.get("documents", []) if include_documents else [None] * len(ids or [])
+    if not isinstance(ids, list) or not isinstance(metadatas, list) or not isinstance(documents, list):
+        raise RuntimeError("Vault collection returned malformed records")
+    if not (len(ids) == len(metadatas) == len(documents)):
+        raise RuntimeError("Vault collection returned misaligned records")
+    if any(not isinstance(item_id, str) or not item_id for item_id in ids):
+        raise RuntimeError("Vault collection returned an invalid record ID")
+    return ids, documents, metadatas
 
 
 def _embed_query(
@@ -84,7 +124,26 @@ def _query_collection(
         if os.path.isabs(source):
             where = {"source_path": os.path.abspath(source)}
         else:
-            fetch_k = min(max(top_k * 10, 50), collection_count)
+            requested = source.casefold()
+            raw = collection.get(include=["metadatas"])
+            _, _, metadatas = _collection_rows(raw, include_documents=False)
+            matched_sources = sorted({
+                str(meta.get("source"))
+                for meta in metadatas
+                if isinstance(meta, dict)
+                and str(meta.get("source") or "")
+                and any(
+                    requested in str(meta.get(field) or "").casefold()
+                    for field in ("source", "source_path", "filename")
+                )
+            })
+            if not matched_sources:
+                return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+            where = (
+                {"source": matched_sources[0]}
+                if len(matched_sources) == 1
+                else {"source": {"$in": matched_sources}}
+            )
 
     kwargs = {
         "query_embeddings": [emb],
@@ -98,46 +157,20 @@ def _query_collection(
     if cancellation_token:
         cancellation_token.raise_if_cancelled()
     
-    if source and not os.path.isabs(source):
-        source_lower = source.lower()
-        docs = results.get("documents", [[]])[0]
-        metas = results.get("metadatas", [[]])[0]
-        dists = results.get("distances", [[]])[0]
-
-        f_docs, f_metas, f_dists = [], [], []
-        for d, m, dist in zip(docs, metas, dists):
-            m = m if isinstance(m, dict) else {}
-            m_source = str(m.get("source", "")).lower()
-            m_file = str(m.get("filename", "")).lower()
-            if source_lower in m_source or source_lower in m_file:
-                f_docs.append(d)
-                f_metas.append(m)
-                f_dists.append(dist)
-                if len(f_docs) >= top_k:
-                    break
-                    
-        results = {
-            "documents": [f_docs],
-            "metadatas": [f_metas],
-            "distances": [f_dists]
-        }
-        
     return results
 
 
 def _flatten_results(results: Dict[str, Any], max_chars: int) -> tuple[list[dict], str]:
-    docs = results.get("documents", [[]])
-    metadatas = results.get("metadatas", [[]])
-    distances = results.get("distances", [[]])
+    documents, metadatas, distances = _query_rows(results)
 
     matches: list[dict] = []
     context_parts: list[str] = []
     used_chars = 0
 
-    for index, doc in enumerate(docs[0] if docs else []):
-        meta = metadatas[0][index] if metadatas and metadatas[0] and index < len(metadatas[0]) else {}
+    for index, doc in enumerate(documents):
+        meta = metadatas[index]
         meta = meta if isinstance(meta, dict) else {}
-        distance = distances[0][index] if distances and distances[0] and index < len(distances[0]) else None
+        distance = _finite_distance(distances[index])
         text = str(doc or "").strip()
         header = (
             f"Source: {meta.get('source', 'unknown')} | "
@@ -145,13 +178,19 @@ def _flatten_results(results: Dict[str, Any], max_chars: int) -> tuple[list[dict
             f"chars: {meta.get('char_start', '?')}-{meta.get('char_end', '?')}"
         )
         entry = f"{header}\n{text}\n---"
-        remaining = max_chars - used_chars
+        separator_size = 2 if context_parts else 0
+        remaining = max_chars - used_chars - separator_size
         if remaining <= 0:
             break
         if len(entry) > remaining:
-            entry = entry[:max(0, remaining - 3)].rstrip() + "..."
+            if remaining <= 3:
+                break
+            entry = entry[:remaining - 3].rstrip()
+            if not entry:
+                break
+            entry += "..."
         context_parts.append(entry)
-        used_chars += len(entry)
+        used_chars += separator_size + len(entry)
 
         matches.append({
             "rank": index + 1,
@@ -203,14 +242,28 @@ def search_vault(
         collection_name = collection
 
     # Resolve human-friendly aliases first, then sanitize as fallback
-    collection_name = resolve_vault_alias(collection_name)
+    try:
+        collection_name = resolve_vault_alias(str(collection_name or "vault"))
+    except Exception as exc:
+        return _json({"error": f"Could not resolve vault collection: {exc}"})
     
     if not query or not str(query).strip():
         return _json({"error": "query is required"})
     query = str(query).strip()
     if len(query) > 4000:
         return _json({"error": "query exceeds the 4000-character limit"})
+    if (
+        not isinstance(model, str)
+        or not model.strip()
+        or len(model) > 200
+        or any(character.isspace() or ord(character) < 32 for character in model)
+    ):
+        return _json({
+            "error": "model must be a non-empty name of at most 200 characters without whitespace or control characters"
+        })
+    model = model.strip()
 
+    source = str(source).strip() if source is not None else None
     top_k_int = _positive_int(top_k, DEFAULT_TOP_K, minimum=1, maximum=20)
     max_chars_int = _positive_int(max_chars, DEFAULT_MAX_CHARS, minimum=1000, maximum=20000)
 
@@ -268,8 +321,7 @@ def ordered_vault_records(
     client = get_chroma_client()
     collection_obj = client.get_collection(name=resolve_vault_alias(collection_name))
     raw = collection_obj.get(include=["metadatas"])
-    ids = raw.get("ids", [])
-    metadatas = raw.get("metadatas", [])
+    ids, _, metadatas = _collection_rows(raw, include_documents=False)
     records = []
     for item_id, metadata in zip(ids, metadatas):
         meta = metadata if isinstance(metadata, dict) else {}
@@ -309,18 +361,24 @@ def read_vault(
     cancellation_token: CancellationToken | None = None,
 ) -> str:
     """Read every vault chunk through a stable cursor instead of similarity search."""
-    collection_name = resolve_vault_alias(collection)
+    try:
+        collection_name = resolve_vault_alias(str(collection or "vault"))
+    except Exception as exc:
+        return _json({"error": f"Could not resolve vault collection: {exc}"})
+    source = str(source).strip() if source is not None else None
     raw_cursor = str(cursor or "0").strip()
     try:
         if ":" in raw_cursor:
             record_raw, char_raw = raw_cursor.split(":", 1)
-            cursor_int = max(0, min(int(record_raw), 10_000_000))
-            cursor_char = max(0, min(int(char_raw), 10_000_000))
+            cursor_int = int(record_raw)
+            cursor_char = int(char_raw)
         else:
-            cursor_int = max(0, min(int(raw_cursor), 10_000_000))
+            cursor_int = int(raw_cursor)
             cursor_char = 0
     except ValueError:
         return _json({"error": "cursor must be an integer or '<chunk>:<character>'"})
+    if not (0 <= cursor_int <= 10_000_000 and 0 <= cursor_char <= 10_000_000):
+        return _json({"error": "cursor values must be between 0 and 10000000"})
     max_chunks_int = _positive_int(max_chunks, 8, minimum=1, maximum=50)
     # Keep the complete cursor envelope below the shared low-VRAM tool-output cap.
     max_chars_int = _positive_int(max_chars, DEFAULT_READ_CHARS, minimum=500, maximum=3200)
@@ -343,6 +401,12 @@ def read_vault(
             end_page=end_page_int,
             cancellation_token=cancellation_token,
         )
+        if cursor_int > len(records) or (cursor_int == len(records) and cursor_char):
+            return _json({
+                "error": f"cursor starts beyond the {len(records)} available chunk(s)",
+                "collection": collection_name,
+                "total_chunks": len(records),
+            })
         selected = records[cursor_int:cursor_int + max_chunks_int]
         if not selected:
             return _json({
@@ -361,12 +425,16 @@ def read_vault(
             ids=[item["id"] for item in selected],
             include=["documents", "metadatas"],
         )
+        ids, documents, metadatas = _collection_rows(raw, include_documents=True)
         by_id = {
             item_id: (document, metadata or {})
-            for item_id, document, metadata in zip(
-                raw.get("ids", []), raw.get("documents", []), raw.get("metadatas", [])
-            )
+            for item_id, document, metadata in zip(ids, documents, metadatas)
         }
+        missing_ids = [item["id"] for item in selected if item["id"] not in by_id]
+        if missing_ids:
+            raise RuntimeError(
+                f"Vault collection did not return {len(missing_ids)} requested record(s)"
+            )
         parts = []
         used = 0
         consumed = 0
@@ -377,7 +445,11 @@ def read_vault(
             document, meta = by_id.get(item["id"], ("", item["metadata"]))
             document = str(document or "")
             offset = cursor_char if selected_index == 0 else 0
-            if offset >= len(document):
+            if offset > len(document):
+                raise ValueError(
+                    f"cursor character offset {offset} exceeds chunk length {len(document)}"
+                )
+            if offset == len(document):
                 consumed += 1
                 next_cursor = cursor_int + consumed
                 continue

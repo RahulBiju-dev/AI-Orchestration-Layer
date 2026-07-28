@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+import importlib
 import math
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from agent.ollama_runtime import OllamaUnavailableError
 from tools import api_orchestrator as api_module
 from tools import obsi_vault_writer
+from tools import vault_embeddings as embedding_module
+from tools import web_scraper as scraper_module
 from tools.api_orchestrator import api_orchestrator
 from tools.app_launcher import _is_safe_desktop_entry
 from tools.automated_routine_executor import _validate as validate_routine
@@ -29,6 +33,7 @@ from tools.search import web_search
 from tools.spreadsheet import _Sheet, _parse_range
 from tools.vault_embeddings import embed_texts
 from tools.vault_search import ordered_vault_records
+from agent.cancellation import CancellationToken, OperationCancelled
 from tools.vision_describer import describe_image
 from tools.web_scraper import web_scrape
 
@@ -60,6 +65,27 @@ class RemainingToolReliabilityTests(unittest.TestCase):
         self.assertIn("messages[0]", payload["error"])
         payload = json.loads(context_memory_optimizer([], critical_terms="wrong"))
         self.assertIn("critical_terms", payload["error"])
+        payload = json.loads(context_memory_optimizer([], target_tokens=1))
+        self.assertIn("target_tokens", payload["error"])
+
+    def test_context_optimizer_reports_unavoidable_budget_and_preserves_tool_protocol(self):
+        oversized = json.loads(context_memory_optimizer(
+            [
+                {"role": "system", "content": "policy " * 500},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"function": {"name": "web_scrape", "arguments": {"url": "https://example.com"}}}],
+                },
+                {"role": "tool", "tool_name": "web_scrape", "content": "page evidence"},
+            ],
+            target_tokens=256,
+            preserve_recent=1,
+        ))
+        self.assertFalse(oversized["stats"]["target_met"])
+        self.assertEqual(oversized["messages"][-2]["role"], "assistant")
+        self.assertEqual(oversized["messages"][-1]["role"], "tool")
+        self.assertEqual(oversized["stats"]["preserved_recent_messages"], 2)
 
     def test_simulation_rejects_non_finite_and_expensive_inputs(self):
         payload = json.loads(run_simulation({"x": math.inf}, {"x": "x"}))
@@ -80,6 +106,95 @@ class RemainingToolReliabilityTests(unittest.TestCase):
         payload = json.loads(run_simulation({"x": 1}, {"x": "x + 1"}, steps=2))
         self.assertEqual(payload["scenarios"][0]["sample_trajectory"][-1]["x"], 3.0)
 
+    def test_simulation_rejects_silent_clamping_and_ambiguous_scenarios(self):
+        self.assertIn(
+            "steps must be between",
+            json.loads(run_simulation({"x": 1}, {"x": "x"}, steps=0))["error"],
+        )
+        self.assertIn(
+            "trials must be an integer",
+            json.loads(run_simulation({"x": 1}, {"x": "x"}, trials=True))["error"],
+        )
+        duplicate = json.loads(run_simulation(
+            {"x": 1},
+            {"x": "x"},
+            scenarios=[
+                {"name": "Baseline", "overrides": {}},
+                {"name": "baseline", "overrides": {}},
+            ],
+        ))
+        self.assertIn("Duplicate scenario name", duplicate["error"])
+
+    def test_simulation_compiles_each_equation_once_and_seed_is_reproducible(self):
+        simulation_module = importlib.import_module("tools.run_simulation")
+        real_parse = simulation_module.ast.parse
+        arguments = {
+            "variables": {"x": 0, "y": 1},
+            "equations": {
+                "x": "x + normal(0, 1)",
+                "y": "max(0, y + uniform(-0.1, 0.1))",
+            },
+            "steps": 20,
+            "trials": 10,
+            "seed": 42,
+        }
+        with patch.object(
+            simulation_module.ast, "parse", wraps=real_parse
+        ) as parse:
+            first = json.loads(run_simulation(**arguments))
+        second = json.loads(run_simulation(**arguments))
+
+        self.assertEqual(parse.call_count, 2)
+        self.assertEqual(first, second)
+        self.assertEqual(first["evaluations"], 400)
+
+    def test_simulation_bounds_result_shape_without_losing_final_summary(self):
+        variables = {f"x{index}": float(index) for index in range(20)}
+        equations = {name: f"{name} + 1" for name in variables}
+        payload = json.loads(run_simulation(
+            variables,
+            equations,
+            steps=1_000,
+            scenarios=[
+                {"name": f"case-{index}", "overrides": {}}
+                for index in range(10)
+            ],
+        ))
+
+        self.assertNotIn("error", payload)
+        self.assertTrue(all(
+            scenario["trajectory_truncated"] for scenario in payload["scenarios"]
+        ))
+        self.assertTrue(all(
+            len(scenario["final_distribution"]) == 20
+            for scenario in payload["scenarios"]
+        ))
+        trajectory_values = sum(
+            scenario["trajectory_points"] * 20
+            for scenario in payload["scenarios"]
+        )
+        self.assertLessEqual(trajectory_values, 1_000)
+
+    def test_simulation_rejects_function_keywords_before_running(self):
+        payload = json.loads(run_simulation(
+            {"x": 0},
+            {"x": "normal(mu=0, sigma=1)"},
+            steps=100,
+            trials=100,
+        ))
+        self.assertIn("positional arguments only", payload["error"])
+
+    def test_simulation_honors_cancellation_before_work_starts(self):
+        token = CancellationToken()
+        token.cancel("stop simulation")
+        with self.assertRaises(OperationCancelled):
+            run_simulation(
+                {"x": 0},
+                {"x": "x + 1"},
+                steps=10_000,
+                cancellation_token=token,
+            )
+
     def test_reasoning_debugger_normalizes_references_and_mermaid_ids(self):
         payload = json.loads(reasoning_chain_debugger(
             "done",
@@ -98,6 +213,97 @@ class RemainingToolReliabilityTests(unittest.TestCase):
         ))
         self.assertFalse(payload["valid"])
         self.assertIn("Duplicate evidence id", [item["issue"] for item in payload["issues"]])
+
+    def test_reasoning_debugger_normalizes_links_and_reports_graph_coverage(self):
+        payload = json.loads(reasoning_chain_debugger(
+            "final claim",
+            [
+                {"id": "root", "claim": "supported fact", "evidence_ids": [" e1 "]},
+                {"id": "final", "claim": "final claim", "depends_on": [" root "]},
+                {"id": "unused", "claim": "separate assumption", "assumption": True},
+            ],
+            [{"id": "e1", "source": "https://example.com", "quality": 0.9}],
+        ))
+        self.assertTrue(payload["valid"])
+        self.assertTrue(payload["conclusion_established"])
+        self.assertEqual(payload["evidence_coverage"]["referenced"], 1)
+        self.assertEqual(payload["graph_coverage"]["disconnected_steps"], 1)
+
+    def test_reasoning_debugger_rejects_an_empty_graph(self):
+        payload = json.loads(reasoning_chain_debugger("claim", []))
+        self.assertIn("at least one", payload["error"])
+
+    def test_reasoning_debugger_bounds_large_diagnostic_output(self):
+        steps = [
+            {
+                "id": f"step-{index}",
+                "claim": "final" if index == 0 else f"claim {index}",
+                "depends_on": [f"missing-{value}-{'x' * 80}" for value in range(100)],
+            }
+            for index in range(200)
+        ]
+        raw = reasoning_chain_debugger("final", steps)
+        payload = json.loads(raw)
+        self.assertLessEqual(len(raw), 24_000)
+        self.assertTrue(payload["issues_truncated"])
+        self.assertGreater(payload["total_issues"], len(payload["issues"]))
+
+    def test_web_scraper_rejects_ambiguous_options_and_extraction_failures(self):
+        self.assertIn("max_chars", json.loads(web_scrape("https://8.8.8.8", max_chars="many"))["error"])
+        self.assertIn("include_links", json.loads(web_scrape("https://8.8.8.8", include_links="false"))["error"])
+        with (
+            patch.object(scraper_module, "_validate_public_http_url", return_value="https://example.com"),
+            patch.object(scraper_module, "_fetch", return_value={
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html",
+                "text": "<p>text</p>",
+            }),
+            patch.object(scraper_module, "_extract", side_effect=RuntimeError("bad html")),
+        ):
+            payload = json.loads(web_scrape("https://example.com"))
+        self.assertIn("page extraction failed", payload["error"])
+
+    def test_web_scraper_retries_transient_status_and_reports_attempts(self):
+        class Response:
+            def __init__(self, status, body):
+                self.status_code = status
+                self.headers = {"Content-Type": "text/plain"}
+                self.url = "https://example.com"
+                self.encoding = "utf-8"
+                self.is_redirect = False
+                self.is_permanent_redirect = False
+                self.body = body
+                self.closed = False
+
+            def iter_content(self, **_kwargs):
+                yield self.body
+
+            def close(self):
+                self.closed = True
+
+        first = Response(503, b"temporary")
+        second = Response(200, b"recovered")
+        session = SimpleNamespace(
+            get=Mock(side_effect=[first, second]),
+            close=Mock(),
+        )
+        with (
+            patch("requests.Session", return_value=session),
+            patch.object(
+                scraper_module,
+                "_validate_public_http_url",
+                return_value="https://example.com",
+            ),
+            patch.object(scraper_module.time, "sleep"),
+        ):
+            payload = scraper_module._fetch("https://example.com")
+
+        self.assertEqual(payload["text"], "recovered")
+        self.assertEqual(payload["request_attempts"], 2)
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+        session.close.assert_called_once()
 
     def test_knowledge_graph_rejects_bad_query_weight_and_edge_ids(self):
         concepts = [{"id": "a"}, {"id": "b"}]
@@ -190,6 +396,94 @@ class RemainingToolReliabilityTests(unittest.TestCase):
             embed_texts("not-a-sequence-of-documents")
         with self.assertRaises(ValueError):
             embed_texts(["document"], timeout="invalid")
+        with self.assertRaises(TypeError):
+            embed_texts([123])
+        with self.assertRaises(ValueError):
+            embed_texts(["  "])
+        with self.assertRaises(ValueError):
+            embed_texts(["document"], timeout=1.5)
+        with self.assertRaises(ValueError):
+            embed_texts(["document"], model="bad model")
+
+    def test_embedding_helper_batches_under_one_owner_and_preserves_text(self):
+        service = SimpleNamespace(
+            coordinator=SimpleNamespace(current_context_owner=lambda: "outer-operation"),
+        )
+
+        def embed(values, **_kwargs):
+            return {
+                "embeddings": [
+                    [float(index + 1), 1.0]
+                    for index, _value in enumerate(values)
+                ]
+            }
+
+        service.embed = Mock(side_effect=embed)
+        texts = [" leading and trailing "] + [
+            f"document {index}" for index in range(128)
+        ]
+        with (
+            patch.object(embedding_module, "_EMBED_SERVICE", service),
+            patch.dict(embedding_module._MODEL_DIMENSIONS, {}, clear=True),
+        ):
+            result = embed_texts(texts, model="batch-model")
+
+        self.assertEqual(len(result), 129)
+        self.assertEqual(service.embed.call_count, 2)
+        self.assertEqual(len(service.embed.call_args_list[0].args[0]), 128)
+        self.assertEqual(len(service.embed.call_args_list[1].args[0]), 1)
+        self.assertEqual(
+            service.embed.call_args_list[0].args[0][0],
+            " leading and trailing ",
+        )
+        self.assertTrue(all(
+            call.kwargs["owner"] == "outer-operation"
+            for call in service.embed.call_args_list
+        ))
+
+    def test_embedding_helper_retries_transient_failure_and_rejects_dimension_drift(self):
+        service = SimpleNamespace(
+            coordinator=SimpleNamespace(current_context_owner=lambda: None),
+            embed=Mock(side_effect=[
+                OllamaUnavailableError("starting"),
+                {"embeddings": [[1.0, 2.0]]},
+                {"embeddings": [[1.0, 2.0, 3.0]]},
+            ]),
+        )
+        with (
+            patch.object(embedding_module, "_EMBED_SERVICE", service),
+            patch.object(embedding_module, "_retry_delay", return_value=True),
+            patch.dict(embedding_module._MODEL_DIMENSIONS, {}, clear=True),
+        ):
+            first = embed_texts(["document"], model="stable-model")
+            with self.assertRaisesRegex(RuntimeError, "changed from 2 to 3"):
+                embed_texts(["other"], model="stable-model")
+
+        self.assertEqual(first, [[1.0, 2.0]])
+        self.assertEqual(service.embed.call_count, 3)
+
+    def test_embedding_helper_rejects_malformed_and_zero_vectors(self):
+        malformed_responses = (
+            {"embeddings": [1.0, 2.0]},
+            {"embeddings": [[True, 1.0]]},
+            {"embeddings": [[0.0, 0.0]]},
+            {"embeddings": [[1.0], [1.0, 2.0]]},
+        )
+        for index, response in enumerate(malformed_responses):
+            with self.subTest(response=index):
+                service = SimpleNamespace(
+                    coordinator=SimpleNamespace(current_context_owner=lambda: None),
+                    embed=Mock(return_value=response),
+                )
+                with (
+                    patch.object(embedding_module, "_EMBED_SERVICE", service),
+                    patch.dict(embedding_module._MODEL_DIMENSIONS, {}, clear=True),
+                ):
+                    with self.assertRaises(RuntimeError):
+                        embed_texts(
+                            ["one"] if index < 3 else ["one", "two"],
+                            model=f"malformed-{index}",
+                        )
 
     def test_linux_env_desktop_wrapper_allows_assignments_but_blocks_flags(self):
         base = {"name": "Example", "terminal": False}

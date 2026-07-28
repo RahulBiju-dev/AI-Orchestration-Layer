@@ -43,12 +43,35 @@ class SystemPromptPolicyTests(unittest.TestCase):
         external = load_external_system_prompt()
 
         self.assertIn("You are Selene, a precise local assistant", local)
-        self.assertIn("You are Selene, a precise assistant", external)
+        self.assertIn(
+            "You are Selene, a precise, capable, and genuinely friendly assistant",
+            external,
+        )
         self.assertNotEqual(local, external)
         self.assertGreater(len(external), len(local) * 2)
         self.assertIn("## Reasoning discipline", external)
         self.assertIn("## Tool-loop control and recovery", external)
         self.assertIn("## Enhanced modes", external)
+
+    def test_external_prompt_connects_personality_to_reliable_tool_use(self):
+        external = load_external_system_prompt()
+
+        self.assertIn("Match the user's energy", external)
+        self.assertIn("without pretending to have feelings", external)
+        self.assertIn(
+            "Before drafting a response, decide whether the requested outcome "
+            "requires a tool",
+            external,
+        )
+        self.assertIn("available specialist tool directly matches", external)
+        self.assertIn(
+            "Do not merely explain or recommend a tool that you can call",
+            external,
+        )
+        self.assertIn(
+            "return to the original user request",
+            external,
+        )
 
     def test_model_default_and_explicit_override_precedence(self):
         local = "LOCAL POLICY"

@@ -59,6 +59,21 @@ class FakeClient:
 
 
 class CodebaseIndexerTests(unittest.TestCase):
+    def test_discovery_does_not_silently_cap_large_supported_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            large = Path(directory, "large.py")
+            large.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+            files, skipped = indexer._discover_files(directory)
+
+        self.assertEqual(files, [large])
+        self.assertEqual(skipped, [])
+
+    def test_non_utf8_source_is_decoded_instead_of_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, "legacy.py")
+            source.write_bytes("price = '€'".encode("cp1252"))
+            self.assertEqual(indexer._read_source(source), "price = '€'")
+
     def test_empty_source_removes_its_previous_stale_chunks(self):
         old_id = "old-empty-chunk"
         collection = FakeCollection({
@@ -177,6 +192,23 @@ class CodebaseIndexerTests(unittest.TestCase):
         self.assertTrue(status["needs_refresh"])
         self.assertEqual(status["reason"], "index timestamp is invalid")
 
+    def test_incomplete_attempt_never_enters_refresh_cooldown(self):
+        with patch.object(
+            indexer,
+            "_load_state",
+            return_value={
+                "/repo": {
+                    "last_indexed_at": 99.0,
+                    "last_attempted_at": 100.0,
+                    "complete": False,
+                }
+            },
+        ):
+            status = indexer._refresh_status("/repo", 101.0, index_available=True)
+
+        self.assertTrue(status["needs_refresh"])
+        self.assertEqual(status["reason"], "previous indexing attempt was incomplete")
+
         with patch.object(
             indexer,
             "_load_state",
@@ -261,6 +293,20 @@ class CodebaseIndexerTests(unittest.TestCase):
 
         relative = {path.relative_to(root).as_posix() for path in files}
         self.assertEqual(relative, {"src/app.py"})
+
+    def test_repository_metadata_and_notebooks_are_discovered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Path(root, ".env.example").write_text("FEATURE=true", encoding="utf-8")
+            Path(root, "LICENSE").write_text("license terms", encoding="utf-8")
+            Path(root, "analysis.ipynb").write_text("{}", encoding="utf-8")
+            files, skipped = indexer._discover_files(directory)
+
+        self.assertEqual(
+            {path.name for path in files},
+            {".env.example", "LICENSE", "analysis.ipynb"},
+        )
+        self.assertEqual(skipped, [])
 
     def test_refresh_state_is_written_privately(self):
         with patch.object(indexer, "atomic_write_json") as write_json:

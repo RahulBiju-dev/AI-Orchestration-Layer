@@ -27,9 +27,15 @@ STORE_PATH = DATA_DIR / "routines.json"
 LEGACY_STORE_PATH = PROJECT_ROOT / ".selene" / "routines.json"
 MAX_ACTIONS = 50
 MAX_TRIGGERS = 25
+MAX_ROUTINES = 200
+MAX_STORE_BYTES = 2 * 1024 * 1024
 MAX_ROUTINE_NAME_CHARS = 200
 MAX_COMMAND_ARGUMENTS = 100
 MAX_ARGUMENT_CHARS = 4096
+MAX_TOOL_ARGUMENT_JSON_CHARS = 32_000
+MAX_ROUTINE_JSON_CHARS = 256_000
+MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_CAPTURE_TAIL_BYTES = 12_000
 AUTOMATIC_ACTION_TYPES = {"open_app", "delay", "tool"}
 AUTOMATIC_TOOL_NAMES = {"open_app", "launch_apps"}
 CONFIRMATION_TOOL_NAMES = {*AUTOMATIC_TOOL_NAMES, "open_terminal_at_path"}
@@ -47,6 +53,11 @@ def _active_store_path() -> Path:
 def _load() -> dict[str, dict]:
     store = _active_store_path()
     try:
+        if store.stat().st_size > MAX_STORE_BYTES:
+            raise PersistenceError(
+                f"Routine state at '{store}' exceeds the {MAX_STORE_BYTES}-byte safety limit "
+                "and was preserved without modification"
+            )
         routines = read_json_preserved(store, expected_type=dict)
     except FileNotFoundError:
         return {}
@@ -54,6 +65,11 @@ def _load() -> dict[str, dict]:
         raise PersistenceError(
             f"Routine state at '{store}' could not be read and was preserved: {exc}"
         ) from exc
+    if len(routines) > MAX_ROUTINES:
+        raise PersistenceError(
+            f"Routine state at '{store}' contains more than {MAX_ROUTINES} routines "
+            "and was preserved without modification"
+        )
     invalid = [
         name
         for name, value in routines.items()
@@ -67,11 +83,18 @@ def _load() -> dict[str, dict]:
         raise PersistenceError(
             f"Routine state at '{store}' contains invalid records and was preserved without modification"
         )
+    if store == LEGACY_STORE_PATH and not STORE_PATH.exists():
+        try:
+            atomic_write_json(STORE_PATH, routines, private=True)
+        except (OSError, TypeError, ValueError):
+            # Reading and executing a valid legacy store is still preferable to
+            # making every routine unavailable because migration is blocked.
+            pass
     return routines
 
 
 def _save(routines: dict[str, dict]) -> None:
-    atomic_write_json(_active_store_path(), routines)
+    atomic_write_json(STORE_PATH, routines, private=True)
 
 
 def _resolve(routines: dict[str, dict], name: str | None, trigger: str | None) -> tuple[str | None, dict | None]:
@@ -113,6 +136,20 @@ def _normalized_triggers(routine: dict, legacy_trigger: str | None = None) -> li
 
 def _validate(routine: dict) -> list[str]:
     errors = []
+    try:
+        serialized = json.dumps(
+            routine,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError, RecursionError):
+        serialized = ""
+        errors.append("routine must contain only finite JSON-compatible values")
+    if serialized and len(serialized) > MAX_ROUTINE_JSON_CHARS:
+        errors.append(
+            f"routine exceeds the {MAX_ROUTINE_JSON_CHARS}-character serialized limit"
+        )
     description = routine.get("description")
     if not isinstance(description, str) or not description.strip():
         errors.append("routine.description must clearly describe the routine and cannot be empty")
@@ -124,11 +161,17 @@ def _validate(routine: dict) -> list[str]:
     elif len(raw_triggers) > MAX_TRIGGERS:
         errors.append(f"A routine may contain at most {MAX_TRIGGERS} triggers")
     else:
+        normalized_triggers = set()
         for index, value in enumerate(raw_triggers):
             if not isinstance(value, str) or not value.strip():
                 errors.append(f"triggers[{index}] must be a non-empty string")
             elif len(value.strip()) > 200:
                 errors.append(f"triggers[{index}] may contain at most 200 characters")
+            else:
+                normalized = value.strip().casefold()
+                if normalized in normalized_triggers:
+                    errors.append(f"triggers[{index}] duplicates another trigger")
+                normalized_triggers.add(normalized)
     actions = routine.get("actions", [])
     if not isinstance(actions, list) or not actions:
         errors.append("routine.actions must be a non-empty array")
@@ -172,15 +215,45 @@ def _validate(routine: dict) -> list[str]:
                         errors.append(f"actions[{index}].cwd must stay inside the project workspace")
         elif item.get("type") == "open_app":
             app_name = item.get("app_name")
-            if not isinstance(app_name, str) or not app_name.strip() or len(app_name) > 128:
+            if (
+                not isinstance(app_name, str)
+                or not app_name.strip()
+                or len(app_name) > 128
+                or any(ord(character) < 32 for character in app_name)
+            ):
                 errors.append(f"actions[{index}].app_name must be an installed application display name")
         elif item.get("type") == "tool":
-            if not isinstance(item.get("tool_name"), str) or not item["tool_name"].strip():
+            tool_name = item.get("tool_name")
+            if (
+                not isinstance(tool_name, str)
+                or not tool_name.strip()
+                or len(tool_name) > 200
+                or any(ord(character) < 32 for character in tool_name)
+            ):
                 errors.append(f"actions[{index}].tool_name must be a registered tool name")
-            elif item["tool_name"] == "automated_routine_executor":
+            elif tool_name == "automated_routine_executor":
                 errors.append(f"actions[{index}] cannot recursively call automated_routine_executor")
-            if not isinstance(item.get("arguments", {}), dict):
+            arguments = item.get("arguments", {})
+            if not isinstance(arguments, dict):
                 errors.append(f"actions[{index}].arguments must be an object")
+            else:
+                try:
+                    serialized_arguments = json.dumps(
+                        arguments,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                    )
+                except (TypeError, ValueError, RecursionError):
+                    errors.append(
+                        f"actions[{index}].arguments must contain only finite JSON-compatible values"
+                    )
+                else:
+                    if len(serialized_arguments) > MAX_TOOL_ARGUMENT_JSON_CHARS:
+                        errors.append(
+                            f"actions[{index}].arguments exceeds the "
+                            f"{MAX_TOOL_ARGUMENT_JSON_CHARS}-character limit"
+                        )
         elif item.get("type") == "open_url":
             try:
                 validate_http_url(item.get("url"))
@@ -210,6 +283,38 @@ def _validate(routine: dict) -> list[str]:
                 + ", ".join(unsafe)
             )
     return errors
+
+
+def _stored_routine_errors(routine: dict) -> list[str]:
+    """Validate persisted data again before previewing or executing it."""
+    candidate = {
+        "description": routine.get("description"),
+        "triggers": routine.get("triggers"),
+        "actions": routine.get("actions"),
+    }
+    if routine.get("automatic_approved") is True:
+        candidate["allow_automatic"] = True
+    return _validate(candidate)
+
+
+def _trigger_conflicts(
+    routines: dict[str, dict],
+    candidate_name: str,
+    triggers: list[str],
+) -> dict[str, list[str]]:
+    """Find exact trigger collisions that would make deterministic dispatch ambiguous."""
+    requested = {value.strip().casefold(): value for value in triggers}
+    conflicts: dict[str, list[str]] = {}
+    for existing_name, existing in routines.items():
+        if existing_name.casefold() == candidate_name.casefold():
+            continue
+        overlap = []
+        for value in existing.get("triggers", []):
+            if isinstance(value, str) and value.strip().casefold() in requested:
+                overlap.append(requested[value.strip().casefold()])
+        if overlap:
+            conflicts[existing_name] = sorted(set(overlap), key=str.casefold)
+    return conflicts
 
 
 def _trigger_matches(routine: dict, trigger: str | None) -> bool:
@@ -255,17 +360,22 @@ def _run_registered_tool(
     # Imported lazily because registry.py imports this module while constructing
     # the shared dispatch map.
     from agent.tool_runner import execute_tool_call, normalize_tool_calls
-    from tools.registry import TOOL_DISPATCH
+    from tools.registry import TOOL_DISPATCH, TOOL_SCHEMA_BY_NAME
 
     handler = TOOL_DISPATCH.get(tool_name)
     if handler is None:
         raise ValueError(f"Unknown registered tool: {tool_name}")
 
     call_arguments = dict(arguments)
-    # Reuse the routine-level approval for tools whose only side effect is the
-    # already-previewed launch. Terminal launching is deliberately excluded
-    # from AUTOMATIC_TOOL_NAMES, so it can never bypass per-run confirmation.
-    if tool_name in CONFIRMATION_TOOL_NAMES:
+    # A confirmed manual routine run is approval for every previewed action.
+    # Persistently automatic routines are separately restricted to the two
+    # app-launch tools, so this cannot silently approve arbitrary tool effects.
+    target_schema = TOOL_SCHEMA_BY_NAME.get(tool_name, {})
+    confirmed_schema = target_schema.get("properties", {}).get("confirmed", {})
+    if (
+        tool_name in CONFIRMATION_TOOL_NAMES
+        or confirmed_schema.get("type") == "boolean"
+    ):
         call_arguments["confirmed"] = True
     spec = normalize_tool_calls([{
         "function": {"name": tool_name, "arguments": call_arguments}
@@ -347,6 +457,8 @@ def _run_action(
         )
         deadline = time.monotonic() + timeout
         timed_out = False
+        output_limit_exceeded = False
+        termination_confirmed = False
         while handle.poll() is None:
             if cancellation_token and cancellation_token.wait(0.05):
                 if not terminate_process_tree(handle):
@@ -358,23 +470,43 @@ def _run_action(
                 timed_out = True
                 termination_confirmed = terminate_process_tree(handle)
                 break
+            output_bytes = os.fstat(stdout_file.fileno()).st_size + os.fstat(
+                stderr_file.fileno()
+            ).st_size
+            if output_bytes > MAX_COMMAND_OUTPUT_BYTES:
+                output_limit_exceeded = True
+                termination_confirmed = terminate_process_tree(handle)
+                break
             if not cancellation_token:
                 time.sleep(0.05)
         returncode = handle.process.poll()
+        stdout_size = os.fstat(stdout_file.fileno()).st_size
+        stderr_size = os.fstat(stderr_file.fileno()).st_size
+        if (
+            not output_limit_exceeded
+            and stdout_size + stderr_size > MAX_COMMAND_OUTPUT_BYTES
+        ):
+            output_limit_exceeded = True
+            termination_confirmed = (
+                True if returncode is not None else terminate_process_tree(handle)
+            )
+            returncode = handle.process.poll()
 
         def output_tail(stream) -> str:
             stream.flush()
             size = stream.seek(0, os.SEEK_END)
-            stream.seek(max(0, size - 12000))
+            stream.seek(max(0, size - MAX_CAPTURE_TAIL_BYTES))
             return stream.read().decode("utf-8", errors="replace")
 
         result = {
             "type": action_type,
-            "ok": not timed_out and returncode == 0,
+            "ok": not timed_out and not output_limit_exceeded and returncode == 0,
             "argv": argv,
             "returncode": returncode,
             "stdout": output_tail(stdout_file),
             "stderr": output_tail(stderr_file),
+            "stdout_truncated": stdout_size > MAX_CAPTURE_TAIL_BYTES,
+            "stderr_truncated": stderr_size > MAX_CAPTURE_TAIL_BYTES,
         }
         if timed_out:
             if termination_confirmed:
@@ -386,6 +518,17 @@ def _run_action(
                     f"Command exceeded its {timeout:g}s timeout; termination of its owned process tree "
                     "could not be confirmed"
                 )
+        elif output_limit_exceeded:
+            if termination_confirmed:
+                result["error"] = (
+                    f"Command output exceeded the {MAX_COMMAND_OUTPUT_BYTES}-byte limit "
+                    "and its owned process tree was stopped"
+                )
+            else:
+                result["error"] = (
+                    f"Command output exceeded the {MAX_COMMAND_OUTPUT_BYTES}-byte limit; "
+                    "termination of its owned process tree could not be confirmed"
+                )
         return result
 
 
@@ -395,12 +538,21 @@ def automated_routine_executor(
     routine: dict | None = None,
     trigger: str | None = None,
     dry_run: bool = False,
+    overwrite: bool = False,
     confirmed: bool = False,
     cancellation_token: CancellationToken | None = None,
 ) -> str:
     """Manage workflow macros with per-run or narrowly scoped persistent approval."""
     if cancellation_token:
         cancellation_token.raise_if_cancelled()
+    action = str(action or "").strip().casefold()
+    for field_name, field_value in (
+        ("dry_run", dry_run),
+        ("overwrite", overwrite),
+        ("confirmed", confirmed),
+    ):
+        if not isinstance(field_value, bool):
+            return json.dumps({"error": f"{field_name} must be boolean"})
     try:
         with _STORE_LOCK:
             routines = _load()
@@ -423,6 +575,26 @@ def automated_routine_executor(
         candidate["description"] = str(candidate.get("description", "")).strip()
         candidate["triggers"] = _normalized_triggers(candidate, trigger)
         errors = _validate(candidate)
+        if not errors:
+            from agent.tool_runner import validate_tool_arguments
+            from tools.registry import TOOL_DISPATCH
+
+            for index, item in enumerate(candidate["actions"]):
+                if item.get("type") != "tool":
+                    continue
+                tool_name = item.get("tool_name")
+                if tool_name not in TOOL_DISPATCH:
+                    errors.append(
+                        f"actions[{index}].tool_name is not registered: {tool_name}"
+                    )
+                    continue
+                argument_errors = validate_tool_arguments(
+                    tool_name, item.get("arguments", {})
+                )
+                errors.extend(
+                    f"actions[{index}].arguments: {error}"
+                    for error in argument_errors
+                )
         if errors:
             return json.dumps({"error": "Invalid routine", "details": errors})
         wants_automatic = candidate.get("allow_automatic") is True
@@ -434,6 +606,45 @@ def automated_routine_executor(
         try:
             with _STORE_LOCK:
                 routines = _load()
+                matching_name = next(
+                    (
+                        existing_name
+                        for existing_name in routines
+                        if existing_name.casefold() == name.casefold()
+                    ),
+                    None,
+                )
+                if matching_name is not None:
+                    if not overwrite:
+                        return json.dumps({
+                            "error": (
+                                f"Routine '{matching_name}' already exists. Set overwrite=true "
+                                "and confirmed=true only after the user approves replacement."
+                            ),
+                            "existing": matching_name,
+                            "preserved": True,
+                        }, ensure_ascii=False)
+                    if confirmed is not True:
+                        return json.dumps({
+                            "error": "Replacing a routine requires confirmed=true",
+                            "existing": matching_name,
+                            "preserved": True,
+                        }, ensure_ascii=False)
+                    name = matching_name
+                conflicts = _trigger_conflicts(
+                    routines, name, candidate["triggers"]
+                )
+                if conflicts:
+                    return json.dumps({
+                        "error": "Routine triggers must be unique across saved routines",
+                        "conflicts": conflicts,
+                        "preserved": True,
+                    }, ensure_ascii=False)
+                if matching_name is None and len(routines) >= MAX_ROUTINES:
+                    return json.dumps({
+                        "error": f"At most {MAX_ROUTINES} routines may be stored",
+                        "preserved": True,
+                    })
                 routines[name] = {
                     "description": candidate["description"],
                     "triggers": candidate["triggers"],
@@ -470,6 +681,15 @@ def automated_routine_executor(
     resolved_name, selected = _resolve(routines, name, trigger)
     if not selected:
         return json.dumps({"error": "No unique routine matched", "name": name, "trigger": trigger})
+    stored_errors = _stored_routine_errors(selected)
+    if stored_errors:
+        return json.dumps({
+            "error": "Stored routine is invalid and was not executed",
+            "name": resolved_name,
+            "details": stored_errors,
+            "store": str(_active_store_path()),
+            "preserved": True,
+        }, ensure_ascii=False)
     automatic_trigger = (
         selected.get("automatic_approved") is True
         and _trigger_matches(selected, trigger)
@@ -505,4 +725,11 @@ def automated_routine_executor(
         if not result.get("ok") and item.get("continue_on_error") is not True:
             break
     ok = len(results) == len(selected["actions"]) and all(item.get("ok") for item in results)
-    return json.dumps({"ok": ok, "name": resolved_name, "results": results}, ensure_ascii=False)
+    return json.dumps({
+        "ok": ok,
+        "name": resolved_name,
+        "actions_planned": len(selected["actions"]),
+        "actions_executed": len(results),
+        "stopped_early": len(results) < len(selected["actions"]),
+        "results": results,
+    }, ensure_ascii=False)

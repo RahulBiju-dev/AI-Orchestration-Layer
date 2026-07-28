@@ -86,6 +86,7 @@ class OllamaCoordinatorTests(unittest.TestCase):
 
         with coordinator.operation(OperationKind.EMBEDDING, owner="index:one") as outer:
             self.assertTrue(coordinator.is_owned_by_current_context("index:one"))
+            self.assertEqual(coordinator.current_context_owner(), "index:one")
             with coordinator.operation(OperationKind.EMBEDDING, owner="index:one") as inner:
                 self.assertTrue(inner.is_reentrant)
                 self.assertEqual(inner.operation_id, outer.operation_id)
@@ -94,6 +95,7 @@ class OllamaCoordinatorTests(unittest.TestCase):
                 coordinator.operation(OperationKind.VISION, owner="another-owner")
 
         self.assertFalse(coordinator.is_owned_by_current_context())
+        self.assertIsNone(coordinator.current_context_owner())
         self.assertEqual(coordinator.active_operations(), ())
 
     def test_release_occurs_after_callback_failure(self):

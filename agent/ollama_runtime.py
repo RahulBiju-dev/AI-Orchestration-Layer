@@ -277,6 +277,11 @@ class OllamaCoordinator:
         current = self._current_context()
         return bool(current and (owner is None or current[1] == owner))
 
+    def current_context_owner(self) -> str | None:
+        """Return the active nested-operation owner on this thread, if any."""
+        current = self._current_context()
+        return current[1] if current is not None else None
+
     def _can_start(self, kind: OperationKind) -> bool:
         active = tuple(self._active.values())
         if kind is OperationKind.BUILD:
