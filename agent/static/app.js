@@ -826,6 +826,16 @@ function persistSettings() {
       state.runtime = data.runtime || state.runtime;
       reportRuntimeWarnings(state.runtime);
       syncSettingsUI();
+      if (Array.isArray(data.history)) {
+        // A model switch re-primes the conversation server-side, so the
+        // transcript on screen no longer matches what the model will read.
+        state.history = data.history;
+        renderMessages();
+      }
+      if (data.context_compaction?.compacted) {
+        const summarized = Number(data.context_compaction.summarized_messages) || 0;
+        toast(`Context compacted for the new model — ${summarized} earlier messages summarized.`);
+      }
       // Refresh after the server resolves profile defaults and session overrides.
       updateContextMeter();
       return true;
@@ -988,11 +998,24 @@ function renderMessages() {
   display.forEach((message) => {
     if (message.role === "user") {
       appendUserMessage(message.content, false);
+    } else if (message.role === "notice") {
+      appendCompactionNotice(message, false);
     } else {
       appendAssistantMessage(message, false);
     }
   });
   scrollToBottom(true);
+}
+
+function appendCompactionNotice(message, scroll = true) {
+  el.messages.querySelector(".welcome")?.remove();
+  const row = messageShell("assistant", "S");
+  row.root.classList.add("compaction-notice");
+  row.stack.appendChild(
+    detailBlock(message.label || "Context compacted", "memory", message.content, false)
+  );
+  el.messages.appendChild(row.root);
+  if (scroll) scrollToBottom(true);
 }
 
 function toDisplayMessages(history) {
@@ -1002,6 +1025,19 @@ function toDisplayMessages(history) {
     if (message.role === "system") continue;
     if (message.role === "user") {
       display.push({ role: "user", content: displayText(message.content) });
+      continue;
+    }
+    if (message.role === "assistant" && message.metadata?.compacted) {
+      // Older turns collapsed into an extractive summary. Show it as a
+      // collapsed memory block rather than a spoken assistant reply.
+      const summarized = Number(message.metadata.source_messages) || 0;
+      display.push({
+        role: "notice",
+        label: summarized
+          ? `Context compacted — ${summarized} earlier messages summarized`
+          : "Context compacted",
+        content: displayText(message.content)
+      });
       continue;
     }
     if (message.role === "assistant") {
@@ -1768,6 +1804,10 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
             appendStreamError(event.error);
           }
         }
+        // A /model switch compacts history in place, so the server can return
+        // fewer messages than are currently on screen.
+        const historyShrank =
+          Array.isArray(event.history) && event.history.length < state.history.length;
         if (event.history) state.history = event.history;
         if (event.settings) state.settings = mergeSettings(event.settings);
         if (event.runtime) {
@@ -1784,7 +1824,7 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
         ) {
           showStartupProfileDialog();
         }
-        if (generation.wasBackgrounded) {
+        if (generation.wasBackgrounded || historyShrank) {
           resetStream();
           renderMessages();
         }

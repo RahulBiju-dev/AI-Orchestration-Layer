@@ -8,6 +8,12 @@ from agent.core import (
     OUTPUT_CONTINUATION_PROMPT,
     SYSTEM_PROMPT_ANCHOR_THRESHOLD,
     TOOL_CONTINUATION_PROMPT,
+    _compaction_bounds,
+    _compaction_target_tokens,
+    _trim_history,
+    compact_history_for_model_switch,
+    effective_session_model_options,
+    reprime_outgoing_messages_for_model,
     _new_vault_index_loop_state,
     _output_limit_reached,
     _should_reexecute_turn_duplicate,
@@ -943,6 +949,198 @@ class TestContextBudget(unittest.TestCase):
             "request 3 " + ("x" * 1200),
             "request 4 " + ("x" * 1200),
         ])
+
+
+def _switch_history(turns: int = 5, *, system: str = "policy") -> list[dict]:
+    """Build a transcript long enough to clear the compaction guards."""
+    history: list[dict] = [{"role": "system", "content": system}] if system else []
+    for index in range(turns):
+        history.extend([
+            {"role": "user", "content": f"request {index} " + ("x" * 1200)},
+            {"role": "assistant", "content": f"answer {index} " + ("y" * 1200)},
+        ])
+    return history
+
+
+class TestModelSwitchCompaction(unittest.TestCase):
+    """A model change must carry context into the incoming model's window."""
+
+    def test_compaction_target_is_clamped_to_optimizer_maximum(self):
+        from tools.context_memory_optimizer import MAX_TARGET_TOKENS
+
+        target = _compaction_target_tokens({"options": {"num_ctx": 1_048_576}})
+
+        self.assertLessEqual(target, MAX_TARGET_TOKENS)
+
+    def test_large_context_session_reaches_the_optimizer(self):
+        # An unclamped quarter-window target made the optimizer reject the call
+        # outright, so compaction silently never ran for provider models.
+        from tools.context_memory_optimizer import (
+            MAX_TARGET_TOKENS,
+            context_memory_optimizer,
+        )
+
+        history = _switch_history()
+        session = {"options": {"num_ctx": 1_048_576}, "history": True}
+        calls: list[tuple[int, dict]] = []
+
+        def record(messages, **kwargs):
+            result = context_memory_optimizer(messages, **kwargs)
+            calls.append((kwargs["target_tokens"], json.loads(result)))
+            return result
+
+        with patch(
+            "tools.context_memory_optimizer.context_memory_optimizer",
+            side_effect=record,
+        ):
+            compact_history_for_model_switch(history, session)
+
+        self.assertEqual(len(calls), 1)
+        target, result = calls[0]
+        self.assertLessEqual(target, MAX_TARGET_TOKENS)
+        self.assertNotIn("error", result)
+
+    def test_switch_to_small_model_fits_the_incoming_window(self):
+        history = _switch_history(turns=8)
+        before = _estimate_messages_tokens(history)
+        session = {"model_id": "local:default", "options": {"num_ctx": 8192}, "history": True}
+
+        report = compact_history_for_model_switch(
+            history, session, previous_model_id="gemini:gemini-3.5-flash"
+        )
+
+        self.assertTrue(report["compacted"])
+        self.assertLess(report["tokens_after"], before)
+        self.assertEqual(report["previous_model_id"], "gemini:gemini-3.5-flash")
+
+    def test_switch_compaction_is_idempotent(self):
+        history = _switch_history()
+        session = {"options": {"num_ctx": 8192}, "history": True}
+
+        compact_history_for_model_switch(history, session)
+        after_first = json.loads(json.dumps(history))
+        second = compact_history_for_model_switch(history, session)
+
+        self.assertFalse(second["compacted"])
+        self.assertEqual(history, after_first)
+
+    def test_switch_compaction_is_a_noop_on_a_short_conversation(self):
+        history = [
+            {"role": "system", "content": "policy"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        original = json.loads(json.dumps(history))
+        session = {"options": {"num_ctx": 8192}, "history": True}
+
+        report = compact_history_for_model_switch(history, session)
+
+        self.assertFalse(report["compacted"])
+        # Only the system prompt is re-pointed at the incoming model; the
+        # conversation itself is left alone below the compaction threshold.
+        self.assertEqual(history[1:], original[1:])
+        self.assertEqual(history[0]["role"], "system")
+        self.assertIsNone(_compaction_bounds(history))
+
+    def test_switch_compaction_never_raises_and_preserves_history(self):
+        history = _switch_history()
+        original = json.loads(json.dumps(history))
+        session = {"options": {"num_ctx": 8192}, "history": True}
+
+        with patch(
+            "tools.context_memory_optimizer.context_memory_optimizer",
+            side_effect=RuntimeError("optimizer exploded"),
+        ):
+            report = compact_history_for_model_switch(history, session)
+
+        self.assertFalse(report["compacted"])
+        self.assertEqual(history[1:], original[1:])
+        self.assertNotIn("_is_compacting", session)
+
+    def test_switch_compaction_is_skipped_when_history_is_disabled(self):
+        history = _switch_history()
+        session = {"options": {"num_ctx": 8192}, "history": False}
+
+        report = compact_history_for_model_switch(history, session)
+
+        self.assertFalse(report["compacted"])
+
+    def test_compacted_memory_survives_trimming_for_the_new_model(self):
+        # Compaction is pointless if the summary it produces is the first thing
+        # _trim_history drops: the marker sits at the oldest end of the
+        # conversation, exactly where trimming bites.
+        history = [
+            {"role": "system", "content": "policy"},
+            {"role": "user", "content": "My deployment key is ALPHA-7."},
+            {"role": "assistant", "content": "Noted, the deployment key is ALPHA-7."},
+        ]
+        for index in range(40):
+            history.extend([
+                {"role": "user", "content": f"filler {index} " + ("x" * 1500)},
+                {"role": "assistant", "content": f"reply {index} " + ("y" * 1500)},
+            ])
+        session = {"model_id": "local:default", "options": {"num_ctx": 8192}, "history": True}
+
+        report = compact_history_for_model_switch(history, session)
+        sent = prepare_messages_for_model(history, session)
+
+        self.assertTrue(report["compacted"])
+        self.assertTrue(any(
+            (message.get("metadata") or {}).get("compacted") for message in sent
+        ))
+        self.assertTrue(any("ALPHA-7" in str(m.get("content", "")) for m in sent))
+        self.assertLessEqual(_estimate_messages_tokens(sent), 8192)
+
+    def test_pinned_memory_never_crowds_out_the_live_turn(self):
+        marker = {
+            "role": "assistant",
+            "content": "[Compacted conversation memory]\n" + ("z" * 20000),
+            "metadata": {"compacted": True, "source_messages": 40},
+        }
+        messages = [
+            {"role": "system", "content": "policy"},
+            marker,
+            {"role": "user", "content": "what is the key?"},
+        ]
+
+        trimmed = _trim_history(messages, 2048, reserved_tokens=256)
+
+        # The oversized summary is surrendered rather than starving the request.
+        self.assertEqual(trimmed[-1]["content"], "what is the key?")
+        self.assertLessEqual(_estimate_messages_tokens(trimmed), 2048)
+
+    def test_reprime_refits_a_prompt_budgeted_for_the_failed_model(self):
+        messages = _switch_history(turns=10)
+        session = {"model_id": "local:default", "options": {"num_ctx": 4096}, "history": True}
+
+        prepared = reprime_outgoing_messages_for_model(messages, session)
+
+        options = effective_session_model_options(session)[1]
+        self.assertLessEqual(
+            _estimate_messages_tokens(prepared),
+            options["num_ctx"],
+        )
+        self.assertEqual(messages, _switch_history(turns=10))  # source untouched
+
+    def test_reprime_keeps_a_tool_continuation_tail_intact(self):
+        messages = _switch_history(turns=4)
+        messages.extend([
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "web_search", "arguments": {}}}],
+            },
+            {"role": "tool", "name": "web_search", "content": "result"},
+            {"role": "user", "content": TOOL_CONTINUATION_PROMPT},
+        ])
+        session = {"model_id": "local:default", "options": {"num_ctx": 8192}, "history": True}
+
+        prepared = reprime_outgoing_messages_for_model(
+            messages, session, allow_compaction=False
+        )
+
+        self.assertEqual(prepared[-1]["content"], TOOL_CONTINUATION_PROMPT)
+        self.assertTrue(any(message.get("role") == "tool" for message in prepared))
 
 
 if __name__ == "__main__":

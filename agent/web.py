@@ -37,10 +37,12 @@ from agent.core import (
     _tool_loop_stop_message,
     _update_vault_index_loop_state,
     build_tool_continuation_prompt,
+    compact_history_for_model_switch,
     effective_session_model_options,
     guarded_options_for_call,
     load_default_system_prompt,
     prepare_messages_for_model,
+    reprime_outgoing_messages_for_model,
     tool_schemas_for_model,
     _tool_call_turn_key,
     _chunk_done_reason,
@@ -613,7 +615,11 @@ _COMMANDS_HELP_MD = """
 """
 
 
-def _model_command_web(session: dict, requested: str = "") -> str:
+def _model_command_web(
+    session: dict,
+    requested: str = "",
+    history: list[dict] | None = None,
+) -> str:
     """List or select one server-configured model for the current conversation."""
     runtime = get_runtime_config(session)
     models = available_models(runtime)
@@ -666,10 +672,23 @@ def _model_command_web(session: dict, requested: str = "") -> str:
     session.update(normalized)
     context = selected.get("context_window")
     detail = f" · maximum context {context:,}" if context else " · local profile context"
-    return (
-        f"✓ Model = **{selected['display_name']}**  \n"
-        f"`{selected['id']}` · {selected['provider']}{detail}"
-    )
+    lines = [
+        f"✓ Model = **{selected['display_name']}**  ",
+        f"`{selected['id']}` · {selected['provider']}{detail}",
+    ]
+    if history is not None and normalized.get("model_id") != current_id:
+        report = compact_history_for_model_switch(
+            history,
+            normalized,
+            previous_model_id=current_id,
+            local_prompt=load_default_system_prompt() or "",
+        )
+        if report.get("compacted"):
+            lines.append(
+                f"\nCompacted {report['summarized_messages']} earlier messages "
+                "into a summary the new model can read."
+            )
+    return "\n".join(lines)
 
 def execute_command_web(
     cmd: str,
@@ -803,7 +822,7 @@ def execute_command_web(
         return "\n".join(lines)
 
     elif base == "/model":
-        return _model_command_web(session, rest)
+        return _model_command_web(session, rest, history)
 
     elif base in AGENT_MODE_SLASH_COMMANDS:
         mode = AGENT_MODE_SLASH_COMMANDS[base]
@@ -930,7 +949,7 @@ def execute_command_web(
             lines.extend(f"⚠ {warning}" for warning in runtime.warnings)
             return "\n".join(lines)
         elif sub == "model":
-            return _model_command_web(session, args)
+            return _model_command_web(session, args, history)
         else:
             return f"Unknown /set subcommand: `{sub}`"
             
@@ -1289,8 +1308,11 @@ def _activate_error_fallback(
     session_data: dict,
     runtime: RuntimeConfig,
     attempted_model_ids: set[str],
-) -> tuple[dict, RuntimeConfig, dict]:
+    *,
+    history: list[dict] | None = None,
+) -> tuple[dict, RuntimeConfig, dict, dict | None]:
     """Persist and resolve the next model in the bounded fallback chain."""
+    previous_model = str(session_data.get("model_id") or LOCAL_MODEL_ID)
     fallback = resolve_error_fallback(
         session_data.get("model_id"),
         runtime,
@@ -1303,22 +1325,45 @@ def _activate_error_fallback(
         )
     attempted_model_ids.add(fallback.id)
     session_data["model_id"] = fallback.id
+    compaction = None
+    if history is not None:
+        # The chain can drop from a million-token provider to the local model,
+        # so the durable transcript has to be refitted before it is replayed.
+        compaction = compact_history_for_model_switch(
+            history,
+            session_data,
+            previous_model_id=previous_model,
+            local_prompt=load_default_system_prompt() or "",
+        )
     request_session = _session_for_selected_model(session_data, runtime)
     request_runtime = get_runtime_config(request_session)
-    return request_session, request_runtime, fallback.public_dict()
+    return request_session, request_runtime, fallback.public_dict(), compaction
 
 
-def _model_fallback_event(model: dict, failed_model: str) -> dict:
+def _model_fallback_event(
+    model: dict,
+    failed_model: str,
+    compaction: dict | None = None,
+) -> dict:
     display_name = str(model.get("display_name") or "fallback model")
-    return {
+    message = (
+        f"Model error on {failed_model}. Switched to {display_name} "
+        "and continuing automatically."
+    )
+    event = {
         "type": "model_fallback",
         "model": deepcopy(model),
         "failed_model_id": failed_model,
-        "message": (
-            f"Model error on {failed_model}. Switched to {display_name} "
-            "and continuing automatically."
-        ),
+        "message": message,
     }
+    if compaction and compaction.get("compacted"):
+        summarized = int(compaction.get("summarized_messages") or 0)
+        event["context_compaction"] = deepcopy(compaction)
+        event["message"] = (
+            f"{message} Earlier context was compacted "
+            f"({summarized} messages summarized) to fit the new model."
+        )
+    return event
 
 def _deep_research_plan_events(
     user_input: str,
@@ -2030,16 +2075,27 @@ def _generate_chat_events_impl(
             fallback_unavailable = ""
             failed_model = str(session_data.get("model_id") or LOCAL_MODEL_ID)
             try:
-                request_session, runtime, fallback_model = _activate_error_fallback(
+                request_session, runtime, fallback_model, fallback_compaction = _activate_error_fallback(
                     session_data,
                     runtime,
                     attempted_model_ids,
+                    history=history_data if session_data.get("history", True) else None,
                 )
             except (ModelProviderError, RuntimeConfigurationError) as fallback_exc:
                 fallback_unavailable = str(fallback_exc)
             else:
                 fallback_models.append(str(fallback_model.get("display_name") or fallback_model["id"]))
-                yield _model_fallback_event(fallback_model, failed_model)
+                # The prompt was budgeted for the model that just failed.
+                messages_to_send = reprime_outgoing_messages_for_model(
+                    messages_to_send,
+                    request_session,
+                    tools=runtime_tools,
+                    extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
+                    local_prompt=load_default_system_prompt() or "",
+                )
+                yield _model_fallback_event(
+                    fallback_model, failed_model, compaction=fallback_compaction
+                )
                 continue
             message = _model_error_response(
                 exc,
@@ -2154,10 +2210,11 @@ def _generate_chat_events_impl(
             fallback_unavailable = ""
             failed_model = str(session_data.get("model_id") or LOCAL_MODEL_ID)
             try:
-                request_session, runtime, fallback_model = _activate_error_fallback(
+                request_session, runtime, fallback_model, fallback_compaction = _activate_error_fallback(
                     session_data,
                     runtime,
                     attempted_model_ids,
+                    history=history_data if session_data.get("history", True) else None,
                 )
             except (ModelProviderError, RuntimeConfigurationError) as fallback_exc:
                 fallback_unavailable = str(fallback_exc)
@@ -2181,7 +2238,20 @@ def _generate_chat_events_impl(
                         tools=None,
                     )
                     continuing_output = True
-                yield _model_fallback_event(fallback_model, failed_model)
+                # Swap in the fallback model's system prompt and refit to its
+                # window. A continuation tail is atomic, so it is re-trimmed but
+                # never summarized.
+                messages_to_send = reprime_outgoing_messages_for_model(
+                    messages_to_send,
+                    request_session,
+                    tools=runtime_tools,
+                    extra_reserved_tokens=CONTEXT_TOOL_LOOP_RESERVE,
+                    local_prompt=load_default_system_prompt() or "",
+                    allow_compaction=not continuing_output,
+                )
+                yield _model_fallback_event(
+                    fallback_model, failed_model, compaction=fallback_compaction
+                )
                 continue
             existing_content = accumulated_content + content_buf
             error_text = _model_error_response(
@@ -3016,14 +3086,44 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 body.pop("client_id", None)
                 current = CLIENT_SESSIONS.snapshot(client_id)
                 settings = _normalize_session_settings(body, fallback=current.session)
-                CLIENT_SESSIONS.update_settings(client_id, settings)
+                previous_model = str(current.session.get("model_id") or "")
+                switch_history = None
+                compaction = None
+                if (
+                    str(settings.get("model_id") or "") != previous_model
+                    and current.history
+                    and ACTIVE_GENERATIONS.active_for_session(
+                        current.active_session_name, client_id
+                    ) is None
+                ):
+                    # Compact against a copy so the CPU-bound optimizer never
+                    # runs while the session store lock is held.
+                    switch_history = deepcopy(current.history)
+                    compaction = compact_history_for_model_switch(
+                        switch_history,
+                        settings,
+                        previous_model_id=previous_model,
+                        local_prompt=load_default_system_prompt() or "",
+                    )
+                    if not compaction.get("changed"):
+                        switch_history = None
+                view = CLIENT_SESSIONS.update_settings(
+                    client_id,
+                    settings,
+                    history=switch_history,
+                    expected_history=current.history,
+                )
                 autosave_session(client_id)
                 self._publish_legacy_view(client_id)
-                self.send_json_response(200, {
+                payload = {
                     "status": "success",
                     "settings": settings,
                     "runtime": _runtime_payload(settings),
-                })
+                }
+                if switch_history is not None:
+                    payload["history"] = view.history
+                    payload["context_compaction"] = compaction
+                self.send_json_response(200, payload)
             except Exception as exc:
                 self.send_json_response(400, {"status": "error", "error": str(exc)})
             return

@@ -169,6 +169,51 @@ class TestClientSessionStore(unittest.TestCase):
         self.assertEqual(current.session, updated_settings)
         self.assertEqual(current.history, completed_history)
 
+    def test_update_settings_without_history_preserves_the_existing_transcript(self):
+        existing = [{"role": "user", "content": "keep me"}]
+        self.store.select("client-one", "origin.json", self.default_settings, existing)
+
+        self.store.update_settings(
+            "client-one", {**self.default_settings, "model_id": "local:default"}
+        )
+
+        self.assertEqual(self.store.snapshot("client-one").history, existing)
+
+    def test_update_settings_applies_a_rewritten_history_when_unchanged(self):
+        existing = [{"role": "user", "content": "original"}]
+        self.store.select("client-one", "origin.json", self.default_settings, existing)
+        compacted = [{"role": "assistant", "content": "[Compacted conversation memory]"}]
+
+        self.store.update_settings(
+            "client-one",
+            self.default_settings,
+            history=compacted,
+            expected_history=existing,
+        )
+
+        self.assertEqual(self.store.snapshot("client-one").history, compacted)
+
+    def test_update_settings_rejects_a_history_computed_from_a_stale_snapshot(self):
+        stale = [{"role": "user", "content": "original"}]
+        self.store.select("client-one", "origin.json", self.default_settings, stale)
+        # A generation commits between the caller's snapshot and its write.
+        committed = [
+            {"role": "user", "content": "original"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        self.store.commit_generation(
+            "client-one", "origin.json", "origin.json", self.default_settings, committed
+        )
+
+        self.store.update_settings(
+            "client-one",
+            self.default_settings,
+            history=[{"role": "assistant", "content": "[Compacted conversation memory]"}],
+            expected_history=stale,
+        )
+
+        self.assertEqual(self.store.snapshot("client-one").history, committed)
+
     def test_loading_saved_session_does_not_inherit_current_overrides(self):
         from agent import web
 
@@ -1480,6 +1525,129 @@ class TestHTTPGenerationLifecycle(unittest.TestCase):
         handler.end_headers = end_headers or MagicMock()
         handler.wfile = MagicMock()
         return handler
+
+    @staticmethod
+    def _settings_handler(body):
+        from agent import web
+
+        handler = object.__new__(web.AgentHTTPRequestHandler)
+        handler.path = "/api/settings"
+        handler.headers = {
+            "Host": "127.0.0.1:5005",
+            "X-Selene-Client-ID": "client-one",
+        }
+        handler.read_json_body = MagicMock(return_value=body)
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.send_json_response = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.wfile = MagicMock()
+        handler._publish_legacy_view = MagicMock()
+        return handler
+
+    @staticmethod
+    def _long_history():
+        history = [{"role": "system", "content": "policy"}]
+        for index in range(6):
+            history.extend([
+                {"role": "user", "content": f"request {index} " + ("x" * 1500)},
+                {"role": "assistant", "content": f"answer {index} " + ("y" * 1500)},
+            ])
+        return history
+
+    _REMOTE_ENV = {
+        "GEMINI_API_KEY": "google-secret",
+        "GEMINI_MODELS": "gemini-3.1-flash-lite",
+    }
+
+    def test_model_switch_compacts_and_returns_the_reprimed_history(self):
+        from agent import web
+
+        registry = GenerationRegistry()
+        base = web._session_from_runtime(web._BASE_RUNTIME_CONFIG)
+        # The transcript was recorded against a million-token provider window.
+        stored = {**base, "model_id": "gemini:gemini-3.1-flash-lite"}
+        store = ClientSessionStore(stored)
+        history = self._long_history()
+        store.select("client-one", "conversation.json", stored, history)
+        handler = self._settings_handler({
+            "client_id": "client-one",
+            **base,
+            "model_id": "local:default",
+            "options": {"num_ctx": 4096},
+        })
+
+        with (
+            patch.dict("os.environ", self._REMOTE_ENV, clear=True),
+            patch.object(web, "ACTIVE_GENERATIONS", registry),
+            patch.object(web, "CLIENT_SESSIONS", store),
+            patch.object(web, "autosave_session", return_value=None),
+        ):
+            handler.do_POST()
+
+        status, payload = handler.send_json_response.call_args.args
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "success")
+        self.assertIn("context_compaction", payload)
+        self.assertTrue(payload["context_compaction"]["compacted"])
+        self.assertLess(len(payload["history"]), len(history))
+        # The store is the authority the next generation reads from.
+        self.assertEqual(store.snapshot("client-one").history, payload["history"])
+
+    def test_settings_write_without_a_model_change_leaves_history_alone(self):
+        from agent import web
+
+        registry = GenerationRegistry()
+        base = web._session_from_runtime(web._BASE_RUNTIME_CONFIG)
+        store = ClientSessionStore(base)
+        history = self._long_history()
+        store.select("client-one", "conversation.json", base, history)
+        handler = self._settings_handler({
+            "client_id": "client-one",
+            **base,
+            "verbose": False,
+        })
+
+        with (
+            patch.object(web, "ACTIVE_GENERATIONS", registry),
+            patch.object(web, "CLIENT_SESSIONS", store),
+            patch.object(web, "autosave_session", return_value=None),
+        ):
+            handler.do_POST()
+
+        _status, payload = handler.send_json_response.call_args.args
+        self.assertNotIn("context_compaction", payload)
+        self.assertNotIn("history", payload)
+        self.assertEqual(store.snapshot("client-one").history, history)
+
+    def test_model_switch_is_skipped_while_a_generation_owns_the_session(self):
+        from agent import web
+
+        registry = GenerationRegistry()
+        base = web._session_from_runtime(web._BASE_RUNTIME_CONFIG)
+        stored = {**base, "model_id": "gemini:gemini-3.1-flash-lite"}
+        store = ClientSessionStore(stored)
+        history = self._long_history()
+        store.select("client-one", "conversation.json", stored, history)
+        registry.begin("conversation.json", "client-one", "generation-one")
+        handler = self._settings_handler({
+            "client_id": "client-one",
+            **base,
+            "model_id": "local:default",
+            "options": {"num_ctx": 4096},
+        })
+
+        with (
+            patch.dict("os.environ", self._REMOTE_ENV, clear=True),
+            patch.object(web, "ACTIVE_GENERATIONS", registry),
+            patch.object(web, "CLIENT_SESSIONS", store),
+            patch.object(web, "autosave_session", return_value=None),
+        ):
+            handler.do_POST()
+
+        _status, payload = handler.send_json_response.call_args.args
+        self.assertNotIn("context_compaction", payload)
+        self.assertEqual(store.snapshot("client-one").history, history)
 
     def test_sse_header_disconnect_releases_generation_ownership(self):
         from agent import web

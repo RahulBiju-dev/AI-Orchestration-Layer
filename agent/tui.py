@@ -2467,6 +2467,12 @@ def build_app_class():
                         elif cmd_base == "/load" and len(user_input.strip().split(None, 1)) > 1:
                             # Rebuild transcript after a successful /load <target>.
                             self.call_from_thread(self._rebuild_transcript_from_history)
+                        elif cmd_base == "/model" or (
+                            cmd_base == "/set"
+                            and user_input.strip().split(None, 2)[1:2] == ["model"]
+                        ):
+                            # A model switch may compact history in place.
+                            self.call_from_thread(self._rebuild_transcript_from_history)
                     else:
                         self._process_turn(
                             user_input,

@@ -1208,6 +1208,17 @@ class ModelSelectorFrontendTests(unittest.TestCase):
         self.assertIn("updateModelUI();", APP)
         self.assertIn("continuing automatically", APP)
 
+    def test_model_switch_reprimes_the_visible_transcript(self):
+        self.assertIn("if (Array.isArray(data.history))", APP)
+        self.assertIn("data.context_compaction?.compacted", APP)
+        self.assertIn("historyShrank", APP)
+
+    def test_compaction_marker_is_not_rendered_as_an_assistant_reply(self):
+        self.assertIn("message.metadata?.compacted", APP)
+        self.assertIn("function appendCompactionNotice(", APP)
+        self.assertIn('role: "notice"', APP)
+        self.assertIn(".message.compaction-notice", STYLE)
+
     def test_planning_metadata_is_redirected_without_a_plan_block(self):
         self.assertIn('case "planning_start"', APP)
         self.assertIn('{ ...event, type: "thinking_start" }', APP)
@@ -1333,6 +1344,72 @@ class ModelSlashCommandTests(unittest.TestCase):
         local = {"model_id": "local:default", "options": {}}
         local_request = web._session_for_selected_model(local, get_runtime_config(local))
         self.assertEqual(local_request["options"], {})
+
+
+class ErrorFallbackContextTests(unittest.TestCase):
+    """A fallback continues the same conversation, so it must refit it."""
+
+    def _long_history(self) -> list[dict]:
+        history = [{"role": "system", "content": "policy"}]
+        for index in range(6):
+            history.extend([
+                {"role": "user", "content": f"request {index} " + ("x" * 1500)},
+                {"role": "assistant", "content": f"answer {index} " + ("y" * 1500)},
+            ])
+        return history
+
+    def test_fallback_compacts_the_durable_history_for_the_new_model(self):
+        from agent import web
+        from agent.runtime_config import get_runtime_config
+
+        session = {"model_id": "local:default", "options": {"num_ctx": 4096}, "history": True}
+        history = self._long_history()
+        before = len(history)
+
+        _request, _runtime, model, compaction = web._activate_error_fallback(
+            session,
+            get_runtime_config(session),
+            {"local:default"},
+            history=history,
+        )
+
+        self.assertIsNotNone(compaction)
+        self.assertNotEqual(model["id"], "local:default")
+        self.assertTrue(compaction["compacted"])
+        self.assertLess(len(history), before)
+
+    def test_fallback_without_history_keeps_todays_behaviour(self):
+        from agent import web
+        from agent.runtime_config import get_runtime_config
+
+        session = {"model_id": "local:default", "options": {}, "history": True}
+
+        result = web._activate_error_fallback(
+            session, get_runtime_config(session), {"local:default"}
+        )
+
+        self.assertEqual(len(result), 4)
+        self.assertIsNone(result[3])
+
+    def test_reprime_shrinks_a_prompt_budgeted_for_the_failed_model(self):
+        from agent.core import (
+            _estimate_messages_tokens,
+            reprime_outgoing_messages_for_model,
+        )
+
+        # A transcript recorded against a million-token provider window.
+        messages = self._long_history()
+        oversized = _estimate_messages_tokens(messages)
+        local_session = {
+            "model_id": "local:default",
+            "options": {"num_ctx": 4096},
+            "history": True,
+        }
+
+        prepared = reprime_outgoing_messages_for_model(messages, local_session)
+
+        self.assertLess(_estimate_messages_tokens(prepared), oversized)
+        self.assertLessEqual(_estimate_messages_tokens(prepared), 4096)
 
 
 if __name__ == "__main__":

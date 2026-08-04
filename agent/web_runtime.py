@@ -286,16 +286,35 @@ class ClientSessionStore:
                 self._views[client_id] = view
             return deepcopy(view)
 
-    def update_settings(self, client_id: str, settings: dict) -> SessionView:
+    def update_settings(
+        self,
+        client_id: str,
+        settings: dict,
+        *,
+        history: list[dict] | None = None,
+        expected_history: list[dict] | None = None,
+    ) -> SessionView:
+        """Replace a tab's settings, optionally swapping its history too.
+
+        ``history`` is applied only when ``expected_history`` still matches what
+        the store holds. A generation that committed since the caller took its
+        snapshot therefore wins, instead of being silently overwritten by a
+        rewrite computed from stale messages.
+        """
         client_id = normalize_runtime_id(client_id, fallback=LEGACY_CLIENT_ID)
         with self._lock:
             current = self._views.get(client_id)
             if current is None:
                 current = SessionView("Active Session", deepcopy(self._default_session), [])
+            replacement_history = current.history
+            if history is not None and (
+                expected_history is None or current.history == expected_history
+            ):
+                replacement_history = history
             replacement = SessionView(
                 current.active_session_name,
                 deepcopy(settings),
-                deepcopy(current.history),
+                deepcopy(replacement_history),
             )
             self._views[client_id] = replacement
         return deepcopy(replacement)

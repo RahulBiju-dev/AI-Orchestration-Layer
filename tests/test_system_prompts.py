@@ -190,5 +190,87 @@ class SystemPromptPolicyTests(unittest.TestCase):
         self.assertNotIn("## Tool selection and execution", sent)
 
 
+class ModelSwitchSystemPromptTests(unittest.TestCase):
+    """Switching models must hand the new model its own prompt immediately."""
+
+    def setUp(self):
+        from agent.core import compact_history_for_model_switch
+
+        self.switch = compact_history_for_model_switch
+        self.external = load_external_system_prompt()
+
+    def _history(self, system: str) -> list[dict]:
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+
+    def test_switch_to_remote_model_installs_the_external_prompt(self):
+        history = self._history("local modelfile prompt")
+
+        report = self.switch(
+            history,
+            {"model_id": "gemini:gemini-3.5-flash", "history": True},
+            previous_model_id="local:default",
+        )
+
+        self.assertEqual(history[0]["content"], self.external)
+        self.assertTrue(report["system_prompt_updated"])
+
+    def test_switch_to_local_model_installs_the_modelfile_prompt(self):
+        local = extract_local_system_prompt()
+        history = self._history(self.external)
+
+        self.switch(
+            history,
+            {"model_id": "local:default", "history": True},
+            previous_model_id="gemini:gemini-3.5-flash",
+            local_prompt=local,
+        )
+
+        self.assertEqual(history[0]["content"], local)
+        self.assertNotEqual(history[0]["content"], self.external)
+
+    def test_explicit_session_override_survives_a_model_switch(self):
+        history = self._history("stale")
+
+        self.switch(
+            history,
+            {
+                "model_id": "gemini:gemini-3.5-flash",
+                "system": "Answer only in haiku.",
+                "history": True,
+            },
+        )
+
+        self.assertEqual(history[0]["content"], "Answer only in haiku.")
+
+    def test_switch_inserts_a_system_message_when_none_exists(self):
+        history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+
+        self.switch(history, {"model_id": "gemini:gemini-3.5-flash", "history": True})
+
+        self.assertEqual(history[0]["role"], "system")
+        self.assertEqual(history[0]["content"], self.external)
+        self.assertEqual(len(history), 3)
+
+    def test_every_anchored_system_copy_is_rewritten(self):
+        history = [
+            {"role": "system", "content": "stale"},
+            {"role": "user", "content": "hello"},
+            {"role": "system", "content": "stale"},
+            {"role": "user", "content": "again"},
+        ]
+
+        self.switch(history, {"model_id": "gemini:gemini-3.5-flash", "history": True})
+
+        anchors = [m["content"] for m in history if m["role"] == "system"]
+        self.assertEqual(anchors, [self.external, self.external])
+
+
 if __name__ == "__main__":
     unittest.main()

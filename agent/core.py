@@ -77,6 +77,7 @@ from agent.platform_runtime import get_runtime_paths, resource_path
 from agent.runtime_config import RuntimeConfigurationError, RuntimeConfig, get_runtime_config
 from agent.system_prompts import (
     active_system_prompt_for_session,
+    apply_active_system_prompt,
     extract_local_system_prompt,
 )
 from agent.tool_runner import (
@@ -1079,13 +1080,26 @@ def _trim_history(
     # Separate system prompt from conversation to ensure it is always preserved
     system_msgs, conv_msgs = _split_system_and_conversation(messages)
 
+    # Compacted memory already stands in for turns that were dropped, and it
+    # sits at the oldest end of the conversation where trimming bites first.
+    # Dropping it would discard the only surviving record of that history, so
+    # it is pinned beside the system prompt instead.
+    pinned_msgs = [message for message in conv_msgs if _is_compacted_message(message)]
+    conv_msgs = [message for message in conv_msgs if not _is_compacted_message(message)]
+
     # Calculate system prompt cost
     system_cost = _estimate_messages_tokens(system_msgs)
-    remaining_budget = budget - system_cost
+    remaining_budget = budget - system_cost - _estimate_messages_tokens(pinned_msgs)
+
+    while pinned_msgs and remaining_budget <= 0:
+        # Summaries cannot crowd out the live turn they were meant to support.
+        # Give up the oldest memory first and re-check.
+        dropped = pinned_msgs.pop(0)
+        remaining_budget += _estimate_message_tokens(dropped)
 
     if remaining_budget <= 0:
         # System prompt alone exceeds budget; keep it + last user message as a fallback
-        return system_msgs + conv_msgs[-1:]
+        return system_msgs + pinned_msgs + conv_msgs[-1:]
 
     output_tail_start = _output_continuation_tail_start(conv_msgs)
     tail_start = _tool_continuation_tail_start(conv_msgs)
@@ -1109,7 +1123,7 @@ def _trim_history(
     if tail_cost >= remaining_budget:
         # Keep the complete continuation tail even if older history must go.
         # guarded_options_for_call will refuse cleanly if this still cannot fit.
-        return system_msgs + preserved_tail
+        return system_msgs + pinned_msgs + preserved_tail
 
     # Walk from newest to oldest, accumulating messages until the budget is hit.
     # In a tool-followup turn, never keep the continuation prompt while dropping
@@ -1124,7 +1138,7 @@ def _trim_history(
         used += cost
 
     kept.reverse()
-    return system_msgs + kept + preserved_tail
+    return system_msgs + pinned_msgs + kept + preserved_tail
 
 
 def _system_prompt_anchor_index(conv_msgs: list[dict]) -> int:
@@ -1252,68 +1266,80 @@ def guarded_options_for_call(
     return base_options or None
 
 
-def _compact_history_bg(history: list[dict], session: dict, start_idx: int, end_idx: int) -> None:
+def _compaction_target_tokens(session: dict) -> int:
+    """Size a compaction budget the extractive optimizer will actually accept.
+
+    ``context_memory_optimizer`` rejects any target above ``MAX_TARGET_TOKENS``
+    outright, so an unclamped quarter-window made compaction a silent no-op for
+    every large-context provider model.
+    """
+    from tools.context_memory_optimizer import MAX_TARGET_TOKENS
+
+    num_ctx = effective_session_model_options(session)[0].num_ctx
+    return min(MAX_TARGET_TOKENS, max(512, int(num_ctx * 0.25)))
+
+
+def _compact_history_bg(
+    history: list[dict],
+    session: dict,
+    start_idx: int,
+    end_idx: int,
+    *,
+    target_tokens: int | None = None,
+) -> dict | None:
     """Compact a stable older-history slice without another model request.
 
     The former background summarizer raced live session mutation and could load
     a second large model while chat was active. The extractive optimizer is
     bounded, deterministic, and leaves the recent complete turns untouched.
+
+    Returns the optimizer stats when the slice was replaced, otherwise ``None``.
     """
     messages_to_compact = [dict(message) for message in history[start_idx:end_idx]]
     try:
         if not messages_to_compact:
-            return
+            return None
         from tools.context_memory_optimizer import context_memory_optimizer
 
+        if target_tokens is None:
+            target_tokens = _compaction_target_tokens(session)
         optimized = json.loads(context_memory_optimizer(
             messages_to_compact,
-            target_tokens=max(
-                512,
-                int(effective_session_model_options(session)[0].num_ctx * 0.25),
-            ),
+            target_tokens=target_tokens,
             preserve_recent=2,
         ))
         replacement = optimized.get("messages")
         stats = optimized.get("stats")
         if not isinstance(replacement, list) or not replacement:
-            return
+            return None
         if not isinstance(stats, dict):
-            return
+            return None
         if (
             int(stats.get("source_messages_compacted") or 0) > 0
             and int(stats.get("selected_facts") or 0) == 0
         ):
             # Never mutate durable history into an unexplained empty summary.
-            return
+            return None
         if int(stats.get("estimated_output_tokens") or 0) >= int(
             stats.get("estimated_input_tokens") or 0
         ):
-            return
+            return None
 
         # Do not overwrite a slice that changed while compaction was running.
         if history[start_idx:end_idx] == messages_to_compact:
             history[start_idx:end_idx] = replacement
+            return stats
+        return None
     except Exception:
         # Compaction is an optimization; preserving the original history is the
         # safe failure mode.
-        return
+        return None
     finally:
         session.pop("_is_compacting", None)
 
 
-def _check_and_compact_history(history: list[dict], session: dict) -> None:
-    """Compact complete older turns once history exceeds 75% of context."""
-    if session.get("_is_compacting"):
-        return
-        
-    num_ctx = effective_session_model_options(session)[0].num_ctx
-    compact_threshold = int(num_ctx * 0.75)
-    
-    total_tokens = _estimate_messages_tokens(history)
-    
-    if total_tokens <= compact_threshold:
-        return
-
+def _compaction_bounds(history: list[dict]) -> tuple[int, int] | None:
+    """Return the older-history slice that is safe to compact, if any."""
     start_idx = 1 if history and history[0].get("role") == "system" else 0
     user_indices = [
         index for index in range(start_idx, len(history))
@@ -1322,13 +1348,183 @@ def _check_and_compact_history(history: list[dict], session: dict) -> None:
     # Keep the latest two complete user turns. Ending at a user boundary avoids
     # separating assistant tool calls from their tool results.
     if len(user_indices) < 3:
-        return
+        return None
     end_idx = user_indices[-2]
     if start_idx >= end_idx:
+        return None
+    return start_idx, end_idx
+
+
+def _is_compacted_message(message: object) -> bool:
+    """Identify a marker the extractive optimizer already produced."""
+    if not isinstance(message, dict):
+        return False
+    metadata = message.get("metadata")
+    return isinstance(metadata, dict) and bool(metadata.get("compacted"))
+
+
+def _check_and_compact_history(history: list[dict], session: dict) -> None:
+    """Compact complete older turns once history exceeds 75% of context."""
+    if session.get("_is_compacting"):
         return
+
+    num_ctx = effective_session_model_options(session)[0].num_ctx
+    compact_threshold = int(num_ctx * 0.75)
+
+    total_tokens = _estimate_messages_tokens(history)
+
+    if total_tokens <= compact_threshold:
+        return
+
+    bounds = _compaction_bounds(history)
+    if bounds is None:
+        return
+    start_idx, end_idx = bounds
 
     session["_is_compacting"] = True
     _compact_history_bg(history, session, start_idx, end_idx)
+
+
+def compact_history_for_model_switch(
+    history: list[dict],
+    session: dict,
+    *,
+    previous_model_id: str | None = None,
+    local_prompt: str = "",
+) -> dict:
+    """Re-prime a conversation so a newly selected model inherits its context.
+
+    ``session`` is the post-switch session, so the compaction budget follows the
+    incoming model's own context window rather than the one the transcript was
+    recorded under. History is rewritten in place: the durable system message
+    becomes the incoming model's prompt immediately instead of on the next turn,
+    and older complete turns collapse into an extractive summary the new model
+    can still read after ``_trim_history`` would otherwise have dropped them.
+
+    Never raises. Compaction is an optimisation, and a settings write must not
+    fail because a summary could not be produced.
+    """
+    model_id = str(session.get("model_id") or LOCAL_MODEL_ID)
+    report = {
+        "changed": False,
+        "compacted": False,
+        "model_id": model_id,
+        "previous_model_id": previous_model_id,
+        "system_prompt_updated": False,
+        "messages_before": len(history),
+        "messages_after": len(history),
+        "tokens_before": 0,
+        "tokens_after": 0,
+        "summarized_messages": 0,
+        "target_tokens": 0,
+    }
+    if not history:
+        return report
+
+    try:
+        report["tokens_before"] = _estimate_messages_tokens(history)
+        report["tokens_after"] = report["tokens_before"]
+
+        # Swap the system prompt first. ``apply_active_system_prompt`` may
+        # prepend a message when none existed, which would shift the slice
+        # indices computed below.
+        before = list(history)
+        history[:] = apply_active_system_prompt(
+            history,
+            active_system_prompt_for_session(session, local_prompt=local_prompt),
+        )
+        if history != before:
+            report["system_prompt_updated"] = True
+            report["changed"] = True
+            report["messages_after"] = len(history)
+            report["tokens_after"] = _estimate_messages_tokens(history)
+    except Exception:
+        return report
+
+    if session.get("_is_compacting") or not session.get("history", True):
+        return report
+
+    try:
+        request_session = session
+        try:
+            runtime = get_runtime_config(session)
+            request_session = session_for_model(session, runtime)
+        except (ModelProviderError, RuntimeConfigurationError):
+            # An unconfigured model falls back to the local budget, which is the
+            # conservative direction: a smaller target compacts more, not less.
+            request_session = session
+        target = _compaction_target_tokens(request_session)
+        report["target_tokens"] = target
+
+        bounds = _compaction_bounds(history)
+        if bounds is None:
+            return report
+        start_idx, end_idx = bounds
+
+        # A slice that is already nothing but summaries has no fidelity left to
+        # trade. A mixed slice still compacts; the optimizer refuses any result
+        # that is not smaller than its input, so this cannot grow unbounded.
+        if all(_is_compacted_message(message) for message in history[start_idx:end_idx]):
+            return report
+
+        session["_is_compacting"] = True
+        stats = _compact_history_bg(
+            history, session, start_idx, end_idx, target_tokens=target
+        )
+        if stats is not None:
+            report["compacted"] = True
+            report["changed"] = True
+            report["summarized_messages"] = int(
+                stats.get("source_messages_compacted") or 0
+            )
+        report["messages_after"] = len(history)
+        report["tokens_after"] = _estimate_messages_tokens(history)
+    except Exception:
+        session.pop("_is_compacting", None)
+    return report
+
+
+def reprime_outgoing_messages_for_model(
+    messages: list[dict],
+    session: dict,
+    *,
+    tools: list[dict] | None = None,
+    extra_reserved_tokens: int = 0,
+    local_prompt: str = "",
+    allow_compaction: bool = True,
+) -> list[dict]:
+    """Refit an in-flight prompt after the model changed mid-generation.
+
+    A fallback continues the same request with a prompt that was budgeted for
+    the model that just failed. Rebuilding here swaps in the new model's system
+    prompt and re-trims to its window, which is what keeps a large-context
+    transcript from being sent verbatim to a small local model.
+    """
+    prepared = apply_active_system_prompt(
+        messages,
+        active_system_prompt_for_session(session, local_prompt=local_prompt),
+    )
+    if allow_compaction:
+        bounds = _compaction_bounds(prepared)
+        if bounds is not None:
+            start_idx, end_idx = bounds
+            if not all(
+                _is_compacted_message(message)
+                for message in prepared[start_idx:end_idx]
+            ):
+                _compact_history_bg(
+                    prepared,
+                    dict(session),
+                    start_idx,
+                    end_idx,
+                    target_tokens=_compaction_target_tokens(session),
+                )
+    return prepare_messages_for_model(
+        prepared,
+        session,
+        tools,
+        extra_reserved_tokens=extra_reserved_tokens,
+    )
 
 
 def _activate_terminal_error_fallback(
@@ -2429,9 +2625,14 @@ def _print_model_catalog(session: dict) -> None:
     _console.print()
 
 
-def _apply_model(session: dict, requested: str) -> None:
+def _apply_model(
+    session: dict,
+    requested: str,
+    history: list[dict] | None = None,
+) -> None:
     """Resolve and persist one configured provider model for CLI/TUI chat."""
     query = str(requested or "").strip()
+    previous_id = str(session.get("model_id") or LOCAL_MODEL_ID)
     rows = _configured_model_rows(session)
     if not query:
         _print_model_catalog(session)
@@ -2482,6 +2683,18 @@ def _apply_model(session: dict, requested: str) -> None:
         f"Model · {definition.display_name}",
         detail=f"{definition.provider} · {definition.id}",
     )
+    if history is not None and definition.id != previous_id:
+        report = compact_history_for_model_switch(
+            history,
+            session,
+            previous_model_id=previous_id,
+            local_prompt=load_default_system_prompt() or "",
+        )
+        if report.get("compacted"):
+            print_info(
+                f"Compacted {report['summarized_messages']} earlier messages "
+                "into a summary for the new model"
+            )
     if definition.id == LOCAL_MODEL_ID:
         print_info("Local runtime profile settings are active")
     elif definition.context_window:
@@ -2770,7 +2983,7 @@ def _handle_set(args: str, session: dict, history: list[dict]) -> None:
         return
 
     if sub == "model":
-        _apply_model(session, rest)
+        _apply_model(session, rest, history)
         return
 
     # ── /set parameter <name> <value> ─────────────────────────────────
@@ -3663,7 +3876,7 @@ def _handle_command(cmd: str, session: dict, history: list[dict]) -> bool | None
         return True
 
     if base == "/model":
-        _apply_model(session, rest)
+        _apply_model(session, rest, history)
         return True
 
     if base == "/show":
