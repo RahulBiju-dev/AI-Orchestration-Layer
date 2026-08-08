@@ -3026,7 +3026,7 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         # favicon.png was ever shipped, so every page load took a 404. The
         # brand mark is the correct icon.
         if path in ("/favicon.ico", "/favicon.png"):
-            return "avatar.png", _STATIC_CONTENT_TYPES[".png"], _STATIC_NO_STORE
+            return "favicon.png", _STATIC_CONTENT_TYPES[".png"], _STATIC_NO_STORE
 
         relative = path.lstrip("/")
         if not relative:
