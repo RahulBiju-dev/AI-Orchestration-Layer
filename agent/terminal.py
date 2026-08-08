@@ -904,45 +904,6 @@ def print_tool_event(
     print_lab_status(styled, kind=kind if kind != "tool" else "run", detail=detail)
 
 
-def print_research_sources(sources: list[dict]) -> None:
-    """Show the citations a Deep Research answer was built from.
-
-    The TUI mounts an expandable fold; classic scrollback has no live widget,
-    so it prints a compact numbered list instead of hiding the evidence.
-    """
-    cited = [
-        source for source in (sources or [])
-        if isinstance(source, dict) and source.get("url")
-    ]
-    if not cited:
-        return
-
-    sink = get_display_sink()
-    if sink is not None and getattr(sink, "is_tui", False):
-        sink.research_sources(cited)
-        return
-
-    from rich.markup import escape
-
-    from agent.modes import research_sources_summary
-
-    _section_rule(f"sources  ·  {research_sources_summary(cited)}", style=THEME.accent_soft)
-    for index, source in enumerate(cited, 1):
-        title = str(source.get("title") or source.get("host") or source.get("url") or "")
-        _console.print(
-            f"  [{THEME.meta}]{index:>2}.[/] [{THEME.label}]{escape(title)}[/]"
-        )
-        _console.print(f"      [{THEME.accent_soft}]{escape(str(source.get('url') or ''))}[/]")
-        meta = "  ".join(part for part in (
-            str(source.get("host") or ""),
-            "page read" if source.get("fetched") else "",
-            f"“{source.get('query')}”" if source.get("query") else "",
-        ) if part)
-        if meta:
-            _console.print(f"      [{THEME.meta}]{escape(meta)}[/]")
-    _console.print()
-
-
 def print_generation_stats(
     *,
     elapsed: float,

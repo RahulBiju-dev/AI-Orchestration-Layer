@@ -25,7 +25,6 @@ from agent.terminal import (
     print_info,
     print_lab_status,
     print_ok,
-    print_research_sources,
     print_thinking_delta,
     print_thinking_footer,
     print_thinking_header,
@@ -41,7 +40,6 @@ import sys
 import threading
 import time
 import itertools
-from copy import deepcopy
 from datetime import datetime, timezone
 try:
     import readline
@@ -69,10 +67,8 @@ from agent.modes import (
     AGENT_MODE_ULTRA,
     DEEP_RESEARCH_TERMINAL_PROMPT,
     ULTRA_TERMINAL_PROMPT,
-    extract_research_sources,
     force_hard_web_search_schema,
     force_high_tool_difficulty,
-    merge_research_sources,
     normalize_agent_mode,
     tool_call_round_signature,
 )
@@ -2379,25 +2375,6 @@ def _tool_call_turn_key(call: dict) -> str | None:
     return f"{name}:{encoded_args}"
 
 
-def _collect_research_sources(
-    tool_calls: list[dict],
-    tool_results: list[dict],
-    collected: list[dict],
-) -> list[dict]:
-    """Record the citable web sources one tool round produced (in order).
-
-    ``tool_results`` is index-aligned with ``tool_calls`` by the turn guard, so
-    each result is credited to the exact call — including its search query —
-    that produced it.
-    """
-    for spec, result in zip(normalize_tool_calls(tool_calls), tool_results):
-        merge_research_sources(
-            collected,
-            extract_research_sources(spec.name, spec.arguments, result.get("content")),
-        )
-    return collected
-
-
 def _process_tool_calls_with_turn_guard(tool_calls: list[dict], executed_tool_calls: dict[str, dict]) -> list[dict]:
     """Execute tool calls while preventing duplicate calls in one turn."""
     pending_calls: list[dict] = []
@@ -4122,7 +4099,6 @@ def process_user_turn(
     # ── Tool-call loop (iterative, in case of chained calls) ──────
     executed_tool_calls: dict[str, dict] = {}
     vault_index_loop_state = _new_vault_index_loop_state()
-    research_sources: list[dict] = []
     tool_rounds = 0
     unbounded_last_tool_signature = ""
     unbounded_repeated_tool_rounds = 0
@@ -4196,12 +4172,6 @@ def process_user_turn(
         tool_results = _process_tool_calls_with_turn_guard(
             assistant_msg["tool_calls"], executed_tool_calls
         )
-        if agent_mode == AGENT_MODE_DEEP_RESEARCH:
-            _collect_research_sources(
-                assistant_msg["tool_calls"],
-                tool_results,
-                research_sources,
-            )
         _update_vault_index_loop_state(
             vault_index_loop_state,
             assistant_msg["tool_calls"],
@@ -4283,18 +4253,6 @@ def process_user_turn(
         )
         if session["history"]:
             history.append(assistant_msg)
-
-    if research_sources:
-        # Citations belong to the answer, so they are shown after it and kept
-        # on the answer message for anything that replays this conversation.
-        if (
-            session["history"]
-            and history
-            and history[-1].get("role") == "assistant"
-            and not history[-1].get("tool_calls")
-        ):
-            history[-1]["research_sources"] = deepcopy(research_sources)
-        print_research_sources(research_sources)
 
     if session["history"]:
         _check_and_compact_history(history, request_session)

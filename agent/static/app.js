@@ -163,9 +163,7 @@ const state = {
     thinkingText: "",
     renderFrame: null,
     modeStatusLine: null,
-    activeToolBlocks: new Map(),
-    sourcesBlock: null,
-    sources: []
+    activeToolBlocks: new Map()
   },
   slash: {
     open: false,
@@ -1051,7 +1049,6 @@ function toDisplayMessages(history) {
         role: "assistant",
         content: displayText(message.content),
         error: Boolean(message.error),
-        sources: normalizeSources(message.research_sources),
         thoughtItems: [
           ...(message.planning ? [{ type: "thinking", text: displayText(message.planning) }] : []),
           ...(message.thinking ? [{ type: "thinking", text: displayText(message.thinking) }] : []),
@@ -1065,7 +1062,6 @@ function toDisplayMessages(history) {
       if (previous?.role === "assistant" && !previous.content) {
         previous.content = entry.content;
         previous.error ||= entry.error;
-        if (entry.sources.length) previous.sources = entry.sources;
         previous.thoughtItems.push(...entry.thoughtItems);
       } else {
         display.push(entry);
@@ -1123,7 +1119,7 @@ function startWelcomeSky() {
     height: 0,
     lastFrame: now,
     shootingStar: null,
-    nextShootingStar: now + randomBetween(1000, 4000),
+    nextShootingStar: now + randomBetween(6000, 12000),
     stars: Array.from({ length: 36 }, () => newCanvasStar(now, true))
   };
   refreshWelcomeSkyPalette(scene);
@@ -1182,8 +1178,8 @@ function newCanvasStar(now, initial = false) {
   return {
     x: Math.random(),
     y: Math.random(),
-    radius: randomBetween(1.0, 2.5),
-    brightness: randomBetween(.50, .95),
+    radius: randomBetween(.5, 1.28),
+    brightness: randomBetween(.24, .62),
     born: now + (initial ? randomBetween(-5000, 900) : randomBetween(350, 1800)),
     duration: randomBetween(5000, 10000)
   };
@@ -1279,7 +1275,7 @@ function drawWelcomeSky(scene, now, delta) {
 
   if (shot.age >= shot.duration || shot.x > width + shot.trail || shot.y > height + shot.trail) {
     scene.shootingStar = null;
-    scene.nextShootingStar = now + randomBetween(2000, 6000);
+    scene.nextShootingStar = now + randomBetween(12000, 24000);
   }
 }
 
@@ -1330,10 +1326,8 @@ function appendAssistantMessage(message, scroll = true) {
     const responseBubble = bubble(message.content, true);
     if (message.error) responseBubble.classList.add("error");
     row.stack.appendChild(responseBubble);
+    appendMessageActions(row.stack, "copy");
   }
-  const sources = normalizeSources(message.sources);
-  if (sources.length) row.stack.appendChild(sourcesBlock(sources));
-  if (message.content) appendMessageActions(row.stack, "copy");
   el.messages.appendChild(row.root);
   if (scroll) scrollToBottom(true);
 }
@@ -1344,11 +1338,14 @@ function messageShell(role, avatarText) {
 
   const avatar = document.createElement("div");
   avatar.className = "avatar";
-  
-  const image = document.createElement("img");
-  image.src = role === "assistant" ? "/assets/avatar.png" : "/assets/user_avatar.png";
-  image.alt = role === "assistant" ? "Selene" : "You";
-  avatar.appendChild(image);
+  if (role === "assistant") {
+    const image = document.createElement("img");
+    image.src = "/avatar.png";
+    image.alt = "Selene";
+    avatar.appendChild(image);
+  } else {
+    avatar.textContent = avatarText;
+  }
 
   const stack = document.createElement("div");
   stack.className = "message-stack";
@@ -1451,111 +1448,6 @@ function thinkingContent(text = "") {
   content.className = "block-content";
   content.textContent = displayText(text);
   return content;
-}
-
-function safeSourceURL(value) {
-  try {
-    const parsed = new URL(String(value || ""));
-    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "";
-  } catch {
-    return "";
-  }
-}
-
-function normalizeSources(sources) {
-  if (!Array.isArray(sources)) return [];
-  return sources
-    .map((source) => ({ ...source, url: safeSourceURL(source?.url) }))
-    .filter((source) => source.url);
-}
-
-function sourcesSummary(sources) {
-  const hosts = new Set(sources.map((source) => source.host).filter(Boolean));
-  const label = `${sources.length} link${sources.length === 1 ? "" : "s"}`;
-  return hosts.size && hosts.size !== sources.length
-    ? `${label} · ${hosts.size} site${hosts.size === 1 ? "" : "s"}`
-    : label;
-}
-
-function sourceItem(source, index) {
-  const item = document.createElement("li");
-  item.className = "source-item";
-
-  const link = document.createElement("a");
-  link.className = "source-link";
-  link.href = source.url;
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  link.title = source.url;
-
-  const marker = document.createElement("span");
-  marker.className = "source-index";
-  marker.textContent = String(index);
-
-  const title = document.createElement("span");
-  title.className = "source-title";
-  title.textContent = displayText(source.title || source.host || source.url);
-  link.append(marker, title);
-
-  const meta = document.createElement("div");
-  meta.className = "source-meta";
-  if (source.host) {
-    const host = document.createElement("span");
-    host.className = "source-host";
-    host.textContent = displayText(source.host);
-    meta.appendChild(host);
-  }
-  if (source.fetched) {
-    const read = document.createElement("span");
-    read.className = "pill";
-    read.textContent = "page read";
-    meta.appendChild(read);
-  }
-  if (source.query) {
-    const query = document.createElement("span");
-    query.className = "source-query";
-    query.textContent = `“${displayText(source.query)}”`;
-    meta.appendChild(query);
-  }
-
-  item.append(link, meta);
-  if (source.snippet) {
-    const snippet = document.createElement("p");
-    snippet.className = "source-snippet";
-    snippet.textContent = displayText(source.snippet);
-    item.appendChild(snippet);
-  }
-  return item;
-}
-
-function sourcesBlock(sources) {
-  const cited = normalizeSources(sources);
-  const block = detailBlock("Sources", sourcesSummary(cited), "", false);
-  block.classList.add("sources-block");
-  const body = block.querySelector(".block-body");
-  if (body) {
-    body.textContent = "";
-    const list = document.createElement("ol");
-    list.className = "source-list";
-    cited.forEach((source, index) => list.appendChild(sourceItem(source, index + 1)));
-    body.appendChild(list);
-  }
-  return block;
-}
-
-function upsertStreamSources(sources) {
-  const cited = normalizeSources(sources);
-  state.stream.sources = cited;
-  state.stream.sourcesBlock?.remove();
-  state.stream.sourcesBlock = null;
-  if (!cited.length || !state.stream.assistantStack) return;
-  const block = sourcesBlock(cited);
-  state.stream.sourcesBlock = block;
-  // Citations always trail the answer, even when a later tool round appends
-  // more of the response above them.
-  const actions = state.stream.assistantStack.querySelector(":scope > .message-actions");
-  if (actions) state.stream.assistantStack.insertBefore(block, actions);
-  else state.stream.assistantStack.appendChild(block);
 }
 
 function scrollThinkingToBottom(block) {
@@ -1888,17 +1780,10 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
         state.stream.thinkingContent = null;
         state.stream.thinkingText = "";
         state.stream.activeToolBlocks.clear();
-        // Keep the citation dropdown below the answer it belongs to.
-        if (state.stream.sources.length) upsertStreamSources(state.stream.sources);
       }
       state.stream.assistantText += displayText(event.text ?? event.content);
       scheduleStreamRender();
       if (event.error) state.stream.assistantBubble.classList.add("error");
-      break;
-    case "research_sources":
-      if (!visible) break;
-      ensureAssistantStack();
-      upsertStreamSources(event.sources);
       break;
     case "token_usage":
       if (!visible) break;
@@ -2023,8 +1908,6 @@ function resetStream() {
   state.stream.renderFrame = null;
   state.stream.modeStatusLine = null;
   state.stream.activeToolBlocks.clear();
-  state.stream.sourcesBlock = null;
-  state.stream.sources = [];
 }
 
 function settleModeStatus() {
