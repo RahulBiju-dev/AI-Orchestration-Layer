@@ -35,7 +35,10 @@ from agent.runtime_config import RuntimeConfigurationError
 ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / "agent" / "static" / "app.js").read_text(encoding="utf-8")
 HTML = (ROOT / "agent" / "static" / "index.html").read_text(encoding="utf-8")
-STYLE = (ROOT / "agent" / "static" / "style.css").read_text(encoding="utf-8")
+STYLE = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in sorted((ROOT / "agent" / "static" / "css").glob("*.css"))
+)
 WEB = (ROOT / "agent" / "web.py").read_text(encoding="utf-8")
 
 

@@ -56,6 +56,9 @@ GEMINI_CONTEXT_WINDOWS = {
 }
 DEFAULT_REMOTE_CONTEXT_WINDOW = 131_072
 MAX_REMOTE_CONTEXT_WINDOW = 1_048_576
+NVIDIA_CONTEXT_WINDOWS: dict[str, int] = {
+    "nvidia/nemotron-3-ultra-550b-a55b": 262_144,
+}
 LOCAL_MODEL_DISPLAY_NAME = "Gemma 4 E4B"
 SELENE_IDENTITY = (
     "You are Selene, a precise assistant with calm, subtle warmth. Always identify "
@@ -417,6 +420,9 @@ def _configured_nvidia_models(environ: Mapping[str, str]) -> list[ModelDefinitio
             default_endpoint="https://integrate.api.nvidia.com/v1/chat/completions",
             api_key_env="NVIDIA_API_KEY",
             required_env=("NVIDIA_API_KEY",),
+            context_window=NVIDIA_CONTEXT_WINDOWS.get(
+                model, DEFAULT_REMOTE_CONTEXT_WINDOW
+            ),
             context_window_env="NVIDIA_CONTEXT_WINDOW",
         )
         for model in models
@@ -1030,8 +1036,11 @@ def _openai_chunk(
     tool_calls = []
     for call in message.get("tool_calls") or []:
         function = call.get("function") or {}
+        call_name = str(function.get("name") or "")
+        if call_name in ("google_search", "googleSearch"):
+            call_name = "web_search"
         tool_calls.append(NormalizedToolCall(NormalizedFunction(
-            name=str(function.get("name") or ""),
+            name=call_name,
             arguments=_json_arguments(function.get("arguments")),
         )))
     result = NormalizedChunk(
@@ -1255,10 +1264,12 @@ def _openai_stream(
             "The free endpoint may be warming up; try again shortly or select another model.",
             code="empty_response",
         )
-    tool_calls = [
-        NormalizedToolCall(NormalizedFunction(item["name"], _json_arguments(item["arguments"])))
-        for _, item in sorted(pending.items())
-    ]
+    tool_calls = []
+    for _, item in sorted(pending.items()):
+        call_name = item["name"]
+        if call_name in ("google_search", "googleSearch"):
+            call_name = "web_search"
+        tool_calls.append(NormalizedToolCall(NormalizedFunction(call_name, _json_arguments(item["arguments"]))))
     if not saw_output and not tool_calls:
         raise MalformedProviderResponse(
             f"{definition.provider} completed the request without generating content. "
@@ -1461,9 +1472,12 @@ def _gemini_chunk(payload: Mapping[str, Any]) -> NormalizedChunk:
             metadata = {}
             if part.get("thoughtSignature"):
                 metadata["thought_signature"] = str(part["thoughtSignature"])
+            call_name = str(call.get("name") or "")
+            if call_name in ("google_search", "googleSearch"):
+                call_name = "web_search"
             calls.append(NormalizedToolCall(
                 NormalizedFunction(
-                    str(call.get("name") or ""),
+                    call_name,
                     _json_arguments(call.get("args")),
                 ),
                 id=str(call.get("id") or ""),

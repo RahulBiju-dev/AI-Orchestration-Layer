@@ -1,0 +1,202 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    radial-gradient(circle at 86% 7%, color-mix(in srgb, var(--text) 5.5%, transparent), transparent 30rem),
+    radial-gradient(circle at 12% 92%, color-mix(in srgb, var(--muted) 4.5%, transparent), transparent 28rem),
+    linear-gradient(180deg, color-mix(in srgb, var(--bg) 88%, black) 0%, var(--bg) 58%, color-mix(in srgb, var(--bg) 78%, black) 100%);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+textarea,
+select,
+input {
+  font: inherit;
+}
+
+button {
+  border: 0;
+}
+
+button:focus-visible,
+select:focus-visible,
+input:focus-visible {
+  outline: 1px solid var(--line-focus);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--select-fg);
+}
+
+.sky {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.moon {
+  position: absolute;
+  top: 50px;
+  right: 66px;
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  background: var(--text-soft);
+  box-shadow: 0 0 54px color-mix(in srgb, var(--accent) 12%, transparent);
+  opacity: 0.24;
+}
+
+.moon::after {
+  content: "";
+  position: absolute;
+  top: -7px;
+  left: 23px;
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--bg) 86%, black);
+}
+
+.star {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 42%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 28%, transparent);
+  animation: ambient-star 8s ease-in-out infinite;
+}
+
+.star-a { top: 14%; left: 18%; }
+.star-b { top: 30%; left: 58%; opacity: 0.4; animation-delay: -2.5s; }
+.star-c { right: 18%; bottom: 17%; opacity: 0.5; animation-delay: -5s; }
+
+@keyframes ambient-star {
+  0%, 100% { opacity: 0.18; }
+  50% { opacity: 0.52; }
+}
+
+.app-shell {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 286px minmax(0, 1fr);
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  gap: 12px;
+  overflow: hidden;
+  padding: 12px;
+  background: transparent;
+}
+
+.sidebar,
+.chat-shell {
+  border: 1px solid var(--line-strong);
+  background: var(--glass);
+  box-shadow: var(--shadow);
+}
+
+
+/* ── Shared motion primitives ─────────────────────────────────────────
+   Built once and reused by the thinking block, tool rows and the vault
+   panel. The disclosure uses grid-template-rows 0fr→1fr rather than a
+   max-height guess, so arbitrarily tall content animates to its real
+   height instead of clipping at a magic pixel cap.
+
+   The grid item MUST keep min-height: 0 and the wrapper overflow: hidden,
+   or the row collapses to its content height and never animates. */
+.disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows var(--dur-3) var(--ease-in-out);
+}
+
+.disclosure > * {
+  min-height: 0;
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+
+.is-open > .disclosure,
+.disclosure.is-open {
+  grid-template-rows: 1fr;
+}
+
+.is-open > .disclosure > *,
+.disclosure.is-open > * {
+  opacity: 1;
+  transition-delay: 60ms;
+}
+
+/* Entrance used by message rows, settings cards and menu items. The
+   stagger is applied inline via --enter-index, capped by the caller. */
+@keyframes selene-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes selene-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* fill-mode is `backwards`, never `both`: the resting state must be the
+   element's own style, so content stays visible if the animation is skipped,
+   interrupted, or never gets a frame (e.g. animated while the tab is hidden).
+   `backwards` still suppresses a flash of the final state during the delay. */
+.enter-rise {
+  animation: selene-rise var(--dur-4) var(--ease-out) backwards;
+  animation-delay: calc(var(--enter-index, 0) * 18ms);
+}
+
+.enter-pop {
+  animation: selene-pop var(--dur-3) var(--ease-out) backwards;
+}
+
+/* Any internally scrollable region needs this. Without it, reaching the
+   end of a nested scroller chains the wheel event up to .messages, whose
+   handler clears followOutput — which the user experiences as streaming
+   mysteriously freezing. */
+.scroll-contain {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}

@@ -114,6 +114,26 @@ from tools.registry import TOOL_DISPATCH, TOOL_SCHEMAS, get_tool_metadata
 STATIC_DIR = str(resource_path("agent/static"))
 _SESSIONS_DIR = str(get_runtime_paths().data_dir / "sessions")
 
+# Static asset serving. The web UI is split across agent/static/{css,fonts}, so a
+# single generic route replaces what used to be a handful of hardcoded literals.
+# Because the route is generic, every request must be validated against these
+# allowlists and then containment-checked against STATIC_DIR (see
+# HTTPRequestHandler.serve_static_file) before anything is read off disk.
+_STATIC_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
+}
+# Allowed first path segments. "" means a file sitting directly in STATIC_DIR.
+_STATIC_SUBDIRECTORIES = frozenset({"", "css", "fonts", "assets"})
+# Font filenames carry their weight, so a given URL always names the same bytes.
+_STATIC_IMMUTABLE_SUBDIRECTORIES = frozenset({"fonts"})
+_STATIC_NO_STORE = "no-store, no-cache, must-revalidate"
+_STATIC_IMMUTABLE = "public, max-age=31536000, immutable"
+
 
 def _session_from_runtime(runtime: RuntimeConfig) -> dict:
     return {
@@ -690,6 +710,28 @@ def _model_command_web(
             )
     return "\n".join(lines)
 
+
+class CommandOutput(str):
+    """Markdown command output that can carry an optional structured payload.
+
+    Subclasses ``str`` so every existing caller — all of which treat the return
+    value as text — keeps working byte-for-byte, including ``json.dumps``. The
+    payload is a side channel the web UI uses to render richer output, and is
+    always optional: if it is missing the markdown alone is the whole result.
+
+    NOTE: the payload survives only as long as the object itself. Any refactor
+    that normalises this value (``str(...)``, a copy, a JSON round-trip) will
+    silently drop it and the UI will fall back to the markdown.
+    """
+
+    __slots__ = ("payload",)
+
+    def __new__(cls, text: str, payload: dict | None = None):
+        obj = super().__new__(cls, text)
+        obj.payload = payload
+        return obj
+
+
 def execute_command_web(
     cmd: str,
     session: dict,
@@ -1070,7 +1112,7 @@ def execute_command_web(
                 chunk_count = vault.get("indexed_chunks")
                 count_text = f"{chunk_count} chunk{'s' if chunk_count != 1 else ''}" if isinstance(chunk_count, int) else "unknown chunks"
                 out.append(f"- `{name}` ({count_text})")
-            return "\n".join(out)
+            return CommandOutput("\n".join(out), {"kind": "vault.list", "vaults": vaults})
             
         elif sub == "aliases":
             data = call_tool("list_vault_aliases")
@@ -1080,18 +1122,26 @@ def execute_command_web(
             if not aliases:
                 return "No registered vault aliases found."
             out = ["### Vault Aliases"]
+            alias_rows: list[dict] = []
             if isinstance(aliases, dict):
                 for name, coll in aliases.items():
                     out.append(f"- `{name}` → `{coll}`")
+                    alias_rows.append({"alias": name, "collection": coll})
             else:
                 for entry in aliases:
                     if isinstance(entry, dict):
                         out.append(
                             f"- `{entry.get('alias', '?')}` → `{entry.get('collection', '?')}`"
                         )
+                        alias_rows.append({
+                            "alias": entry.get("alias", "?"),
+                            "collection": entry.get("collection", "?"),
+                            "file_path": entry.get("file_path"),
+                        })
                     else:
                         out.append(f"- `{entry}`")
-            return "\n".join(out)
+                        alias_rows.append({"alias": str(entry), "collection": ""})
+            return CommandOutput("\n".join(out), {"kind": "vault.aliases", "aliases": alias_rows})
             
         elif sub == "alias":
             if len(tokens) < 2:
@@ -1240,7 +1290,21 @@ def execute_command_web(
                 except (TypeError, ValueError):
                     score_text = str(score)
                 out.append(f"{idx}. **{src}** (score: {score_text})\n>{snippet}\n")
-            return "\n".join(out)
+            payload_results = [
+                {
+                    "source": res.get("source") or res.get("source_path") or "unknown",
+                    "score": res.get("score", 0.0),
+                    "text": res.get("text") or res.get("document") or "",
+                }
+                for res in results
+                if isinstance(res, dict)
+            ]
+            return CommandOutput("\n".join(out), {
+                "kind": "vault.search",
+                "query": query,
+                "collection": collection,
+                "results": payload_results,
+            })
             
         elif sub == "delete":
             delete_all = False
@@ -1659,6 +1723,12 @@ def _generate_chat_events_impl(
             cancellation_token,
         )
         yield {"type": "content_chunk", "content": output}
+        # CommandOutput subclasses str, so the frame above serialises exactly as
+        # it always did. Commands that return a plain str simply have no payload
+        # and the client keeps the markdown it already rendered.
+        command_payload = getattr(output, "payload", None)
+        if command_payload:
+            yield {"type": "command_result", "payload": command_payload}
         yield {
             "type": "done",
             "state": "completed",
@@ -2937,26 +3007,82 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             raise ValueError("JSON request body must be an object")
         return value
 
-    def serve_static_file(self, filename: str, content_type: str):
-        """Serve a static file from the STATIC_DIR.
-        
+    @staticmethod
+    def resolve_static_request(path: str):
+        """Map a URL path onto a file inside STATIC_DIR.
+
         Args:
-            filename (str): The name of the file to serve.
-            content_type (str): The MIME type of the file.
+            path (str): The request path, with any query string already stripped.
+
+        Returns:
+            tuple[str, str, str] | None: ``(relative_path, content_type, cache)``
+            for a valid static request, or ``None`` when the path is not a
+            static asset (in which case the caller falls through to the API
+            routes and ultimately a 404).
         """
-        filepath = os.path.join(STATIC_DIR, filename)
-        if not os.path.isfile(filepath):
+        if path in ("/", "/index.html"):
+            return "index.html", _STATIC_CONTENT_TYPES[".html"], _STATIC_NO_STORE
+        # The favicon has always been requested at these two paths, but no
+        # favicon.png was ever shipped, so every page load took a 404. The
+        # brand mark is the correct icon.
+        if path in ("/favicon.ico", "/favicon.png"):
+            return "avatar.png", _STATIC_CONTENT_TYPES[".png"], _STATIC_NO_STORE
+
+        relative = path.lstrip("/")
+        if not relative:
+            return None
+        # Reject traversal, Windows separators, NUL, and anything nested deeper
+        # than one directory. This runs before the path ever touches the disk.
+        if ".." in relative or "\\" in relative or "\0" in relative:
+            return None
+        segments = relative.split("/")
+        if len(segments) > 2 or not all(segments):
+            return None
+
+        subdirectory = segments[0] if len(segments) == 2 else ""
+        if subdirectory not in _STATIC_SUBDIRECTORIES:
+            return None
+        content_type = _STATIC_CONTENT_TYPES.get(os.path.splitext(segments[-1])[1].lower())
+        if content_type is None:
+            return None
+
+        cache = (
+            _STATIC_IMMUTABLE
+            if subdirectory in _STATIC_IMMUTABLE_SUBDIRECTORIES
+            else _STATIC_NO_STORE
+        )
+        return relative, content_type, cache
+
+    def serve_static_file(self, filename: str, content_type: str, cache: str = _STATIC_NO_STORE):
+        """Serve a static file from the STATIC_DIR.
+
+        Args:
+            filename (str): The path of the file to serve, relative to STATIC_DIR.
+            content_type (str): The MIME type of the file.
+            cache (str): The Cache-Control header value.
+        """
+        # Second line of defence behind resolve_static_request: resolve symlinks
+        # and prove the target really lives under STATIC_DIR before opening it.
+        static_root = os.path.realpath(STATIC_DIR)
+        filepath = os.path.realpath(os.path.join(static_root, filename))
+        try:
+            contained = os.path.commonpath([static_root, filepath]) == static_root
+        except ValueError:
+            # Raised when the paths sit on different drives; treat as a miss.
+            contained = False
+        if not contained or not os.path.isfile(filepath):
             self.send_error(404, "File Not Found")
             return
-            
+
         try:
             with open(filepath, 'rb') as f:
                 content = f.read()
             self.send_response(200)
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(content)))
-            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
-            self.send_header('Pragma', 'no-cache')
+            self.send_header('Cache-Control', cache)
+            if cache == _STATIC_NO_STORE:
+                self.send_header('Pragma', 'no-cache')
 
             allowed_origin = os.environ.get('ALLOWED_ORIGIN')
             if allowed_origin:
@@ -2973,18 +3099,13 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
         # 1. Routing for Home and Assets
-        if path == '/' or path == '/index.html':
-            self.serve_static_file('index.html', 'text/html')
+        static_request = self.resolve_static_request(path)
+        if static_request is not None:
+            self.serve_static_file(*static_request)
             return
-        elif path == '/style.css':
-            self.serve_static_file('style.css', 'text/css')
-            return
-        elif path == '/app.js':
-            self.serve_static_file('app.js', 'application/javascript')
-            return
-            
+
         # 2. Routing for Settings/State load
-        elif path == '/api/settings':
+        if path == '/api/settings':
             try:
                 client_id = self._client_id(query=query)
             except ValueError as exc:
@@ -3028,15 +3149,52 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             ]
             self.send_json_response(200, {"active_operations": operations})
             return
-            
-        elif path == '/favicon.ico' or path == '/favicon.png':
-            self.serve_static_file('favicon.png', 'image/png')
+
+        elif path == '/api/vaults':
+            # Read-only. Every vault write path stays in the /vault slash
+            # commands. Always answers 200: an absent or broken ChromaDB is a
+            # normal state for this app, not a server error, and the sidebar
+            # degrades to "unavailable" rather than throwing.
+            payload = {
+                "available": False,
+                "vaults": [],
+                "aliases": [],
+                "vault_count": 0,
+                "alias_count": 0,
+                "error": None,
+            }
+            try:
+                # Imported lazily: pulling in ChromaDB costs seconds on the
+                # first call, and most sessions never open the vault panel.
+                from tools.vault_indexer import list_vaults, list_vault_aliases
+                vaults_raw = json.loads(list_vaults())
+                aliases_raw = json.loads(list_vault_aliases())
+            except Exception as exc:
+                payload["error"] = str(exc)
+                self.send_json_response(200, payload)
+                return
+
+            raw_aliases = aliases_raw.get("aliases", [])
+            if isinstance(raw_aliases, dict):
+                aliases = [
+                    {"alias": name, "collection": collection}
+                    for name, collection in raw_aliases.items()
+                ]
+            else:
+                aliases = [entry for entry in raw_aliases if isinstance(entry, dict)]
+
+            vaults = vaults_raw.get("vaults", [])
+            payload.update({
+                "available": True,
+                "vaults": vaults,
+                "vault_count": vaults_raw.get("vault_count", len(vaults)),
+                "aliases": aliases,
+                "alias_count": aliases_raw.get("alias_count", len(aliases)),
+                "error": vaults_raw.get("error") or aliases_raw.get("error"),
+            })
+            self.send_json_response(200, payload)
             return
-            
-        elif path == '/avatar.png':
-            self.serve_static_file('avatar.png', 'image/jpeg')
-            return
-            
+
         else:
             self.send_error(404, "Not Found")
 

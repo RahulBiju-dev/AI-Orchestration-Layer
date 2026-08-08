@@ -1,0 +1,1342 @@
+.chat-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 16px;
+}
+
+.chat-topbar {
+  display: flex;
+  align-items: center;
+  min-height: 74px;
+  padding: 13px clamp(24px, 4vw, 58px);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.chat-topbar > div:first-child {
+  min-width: 0;
+}
+
+.chat-topbar h2 {
+  max-width: min(72vw, 680px);
+  overflow: hidden;
+  color: var(--text-soft);
+  font-family: var(--display);
+  font-size: var(--fs-h2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-label {
+  margin: 0 0 4px;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.topbar-theme-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-low);
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--ui-label);
+  font-size: var(--fs-xs);
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.topbar-theme-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: var(--primary);
+}
+
+.topbar-theme-btn:hover,
+.topbar-theme-btn:focus-visible,
+.topbar-theme-btn[aria-expanded="true"] {
+  border-color: var(--line-focus);
+  background: var(--elevated);
+  color: var(--text);
+}
+
+.ghost-btn {
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--ui-label);
+  font-size: var(--fs-xs);
+}
+
+.ghost-btn:hover {
+  border-color: var(--line-focus);
+  color: var(--text);
+}
+
+.ghost-btn.danger {
+  color: var(--danger);
+}
+
+.messages {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: clamp(28px, 5vh, 54px) clamp(24px, 5vw, 70px);
+  overscroll-behavior: contain;
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.messages::-webkit-scrollbar,
+.session-list::-webkit-scrollbar,
+.settings-body::-webkit-scrollbar,
+.block-body::-webkit-scrollbar,
+.slash-menu::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.messages::-webkit-scrollbar-thumb,
+.session-list::-webkit-scrollbar-thumb,
+.settings-body::-webkit-scrollbar-thumb,
+.block-body::-webkit-scrollbar-thumb,
+.slash-menu::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+}
+
+.messages:has(.welcome) {
+  overflow: hidden;
+}
+
+.welcome {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 100%;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.welcome > * {
+  position: relative;
+  z-index: 1;
+}
+
+.welcome-sky {
+  position: absolute;
+  z-index: 0 !important;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  contain: layout;
+  pointer-events: none;
+}
+
+.welcome-core {
+  display: grid;
+  justify-items: center;
+  width: 100%;
+  animation: selene-rise var(--dur-4) var(--ease-out) backwards;
+}
+
+.welcome h3 {
+  position: relative;
+  margin: 0 0 var(--s-7);
+  color: transparent;
+  background: linear-gradient(168deg,
+    var(--text) 0%,
+    var(--text) 38%,
+    color-mix(in srgb, var(--text) 62%, var(--primary)) 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-family: var(--display);
+  width: fit-content;
+  font-size: var(--fs-display);
+  font-weight: 600;
+  letter-spacing: var(--ls-display);
+  line-height: var(--lh-tight);
+}
+
+/* A single specular sweep on mount. It used to loop forever, which reads as a
+   loading state rather than an arrival. */
+.welcome h3::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  color: transparent;
+  background: linear-gradient(100deg,
+    transparent 34%,
+    color-mix(in srgb, var(--accent) 22%, transparent) 44%,
+    var(--text) 50%,
+    color-mix(in srgb, var(--accent) 24%, transparent) 56%,
+    transparent 66%);
+  background-repeat: no-repeat;
+  background-size: 34% 100%;
+  background-position: -70% 50%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: welcome-sweep 1.6s var(--ease-out) 260ms 1 backwards;
+}
+
+@keyframes welcome-sweep {
+  from { background-position: -70% 50%; }
+  to { background-position: 175% 50%; }
+}
+
+.suggestions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(100%, 620px);
+  gap: var(--s-3);
+  border: 0;
+}
+
+.suggestion {
+  position: relative;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: var(--s-3);
+  min-width: 0;
+  padding: var(--s-4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--surface-high);
+  color: var(--text-soft);
+  text-align: left;
+  box-shadow: var(--elev-1);
+  animation: selene-rise var(--dur-4) var(--ease-out) backwards;
+  animation-delay: calc(120ms + var(--enter-index, 0) * 60ms);
+  transition: transform var(--dur-2) var(--ease-out),
+              border-color var(--dur-2) var(--ease-out),
+              box-shadow var(--dur-2) var(--ease-out),
+              color var(--dur-2) var(--ease-out);
+}
+
+.suggestion:nth-child(1) { --enter-index: 0; }
+.suggestion:nth-child(2) { --enter-index: 1; }
+.suggestion:nth-child(3) { --enter-index: 2; }
+.suggestion:nth-child(4) { --enter-index: 3; }
+
+.suggestion:hover,
+.suggestion:focus-visible {
+  transform: translateY(-3px);
+  border-color: var(--edge-primary);
+  box-shadow: var(--elev-3);
+  color: var(--text);
+}
+
+.suggestion:active {
+  transform: translateY(-1px);
+}
+
+.suggestion-index {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: var(--fs-eyebrow);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.7;
+  transition: color var(--dur-2) var(--ease-out);
+}
+
+.suggestion:hover .suggestion-index,
+.suggestion:focus-visible .suggestion-index {
+  color: var(--primary);
+}
+
+.suggestion-copy {
+  display: block;
+  min-width: 0;
+}
+
+.suggestion-copy strong,
+.suggestion-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestion-copy strong {
+  font-size: var(--fs-h3);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.suggestion-copy small {
+  margin-top: var(--s-1);
+  color: var(--muted);
+  font-family: var(--ui-label);
+  font-size: var(--fs-sm);
+}
+
+.message {
+  display: block;
+  width: min(100%, var(--content-width));
+  margin: 0 auto var(--s-6);
+  animation: selene-rise var(--dur-3) var(--ease-out) backwards;
+}
+
+.avatar {
+  display: none;
+}
+
+.message-stack {
+  min-width: 0;
+  width: 100%;
+}
+
+.message.assistant .message-stack {
+  max-width: 90ch;
+  font-size: 16px;
+}
+
+/* The assistant speaks as page prose with no container at all; only the user's
+   own words get a card. That asymmetry is what makes a transcript readable —
+   two competing bubble styles just fight each other. */
+.bubble {
+  overflow-wrap: anywhere;
+  color: var(--text-soft);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+
+.message.assistant .bubble {
+  padding: var(--s-4) var(--s-5);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xs) var(--r-lg) var(--r-lg) var(--r-lg);
+  background: var(--surface-high);
+  color: var(--text);
+  box-shadow: var(--elev-1);
+}
+
+.message.user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.message.user .message-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  width: auto;
+  max-width: min(100%, 60ch);
+}
+
+.message.user .bubble {
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg);
+  background: var(--surface-high);
+  color: var(--text);
+  box-shadow: var(--elev-1);
+}
+
+/* Errors: a left edge wipes down, then the tint fades in. No shake — that
+   reads as alarm rather than as information. */
+.bubble.error {
+  position: relative;
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-md);
+  background: var(--tint-danger);
+  color: var(--ink-danger);
+}
+
+.message.assistant .bubble.error {
+  padding-left: var(--s-5);
+  animation: error-tint var(--dur-3) var(--ease-out) 80ms backwards;
+}
+
+.bubble.error::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  border-radius: var(--r-full);
+  background: var(--edge-danger);
+  transform-origin: top;
+  animation: error-edge var(--dur-2) var(--ease-out) backwards;
+}
+
+@keyframes error-edge {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+
+@keyframes error-tint {
+  from { background-color: transparent; }
+}
+
+.bubble.error::before {
+  content: "error";
+  display: block;
+  margin-bottom: var(--s-2);
+  color: var(--danger);
+  font-family: var(--ui-label);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: var(--ls-eyebrow);
+  text-transform: uppercase;
+}
+
+/* Kept focus-reachable: opacity only, never display:none, so Tab still lands
+   on Copy/Edit. NOTE: .message-actions must stay the immediate next sibling of
+   the node carrying dataset.messageText — messageActionText() walks that link. */
+.message-actions {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  padding: var(--s-1) 0 0;
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+
+.message:hover .message-actions,
+.message:focus-within .message-actions {
+  opacity: 1;
+}
+
+.message.user .message-actions {
+  justify-content: flex-end;
+}
+
+.message-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 22px;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--ui-label);
+  font-size: var(--fs-eyebrow);
+  line-height: 1;
+  transition: color 100ms ease, background 100ms ease;
+}
+
+.message-action:hover,
+.message-action:focus-visible {
+  background: var(--elevated);
+  color: var(--text-soft);
+}
+
+.message-action.copied {
+  color: var(--success);
+}
+
+.message-action svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.bubble :first-child {
+  margin-top: 0;
+}
+
+.bubble :last-child {
+  margin-bottom: 0;
+}
+
+.bubble p {
+  margin: 0.72em 0;
+}
+
+.bubble pre,
+.block-body pre {
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--code-bg);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.bubble code,
+.block-body code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+}
+
+.bubble :not(pre) > code {
+  padding: 0.12em 0.34em;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: var(--surface-low);
+  color: var(--text);
+}
+
+.bubble a {
+  color: var(--text);
+  text-decoration-color: var(--faint);
+  text-underline-offset: 3px;
+}
+
+.bubble a:hover {
+  text-decoration-color: var(--text);
+}
+
+.bubble h1,
+.bubble h2,
+.bubble h3,
+.bubble h4 {
+  margin: 1.25em 0 0.5em;
+  color: var(--text);
+  font-weight: 550;
+  line-height: 1.25;
+}
+
+.bubble h1 { font-size: var(--fs-h1); }
+.bubble h2 { font-size: var(--fs-h2); }
+.bubble h3 { font-size: var(--fs-h3); }
+.bubble ul,
+.bubble ol { padding-left: 1.5em; }
+.bubble li + li { margin-top: 0.35em; }
+.bubble blockquote {
+  margin: 1em 0;
+  padding: 0.15em 0 0.15em 1em;
+  border-left: 2px solid var(--muted);
+  color: var(--muted);
+}
+
+.bubble .table-wrap {
+  width: 100%;
+  margin: 1em 0;
+  overflow-x: auto;
+  border: 1px solid var(--line-strong);
+}
+
+.bubble table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface-low);
+  font-size: var(--fs-sm);
+}
+
+.bubble th,
+.bubble td {
+  min-width: 90px;
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: top;
+}
+
+.bubble th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-row);
+  color: var(--muted);
+  font-family: var(--ui-label);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: var(--ls-eyebrow);
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.bubble tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface) 92%, var(--panel));
+}
+
+.bubble tr:last-child td { border-bottom: 0; }
+.bubble .align-left { text-align: left; }
+.bubble .align-center { text-align: center; }
+.bubble .align-right { text-align: right; }
+.bubble .task-list-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  list-style: none;
+}
+.bubble .task-list-item input { margin: 0.22em 0 0; accent-color: var(--accent); }
+
+.bubble .code-block {
+  position: relative;
+  margin: 1em 0;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--code-bg);
+}
+
+.bubble .code-block pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.bubble .code-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--hairline);
+  background: var(--panel);
+  color: var(--muted);
+  font-family: var(--ui-label);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: var(--ls-eyebrow);
+  text-transform: uppercase;
+}
+
+/* Revealed on hover/focus so the toolbar stays quiet while reading. */
+.bubble .code-copy-btn {
+  padding: 3px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--ui-label);
+  font-size: var(--fs-xs);
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out),
+              border-color var(--dur-2) var(--ease-out),
+              color var(--dur-2) var(--ease-out);
+}
+
+.bubble .code-block:hover .code-copy-btn,
+.bubble .code-block:focus-within .code-copy-btn {
+  opacity: 1;
+}
+
+.bubble .code-copy-btn:hover {
+  border-color: var(--line-focus);
+  color: var(--text);
+}
+
+.bubble .code-copy-btn.copied {
+  border-color: var(--edge-success);
+  color: var(--ink-success);
+  animation: selene-pop var(--dur-2) var(--ease-spring);
+}
+
+.mode-activity-inline,
+.mode-picker.active #mode-label {
+  --mode-shine: var(--accent);
+  color: var(--mode-shine);
+  font-weight: 680;
+}
+
+.mode-activity-inline[data-mode="deep-research"],
+.mode-picker[data-mode="deep-research"] #mode-label {
+  --mode-shine: var(--primary);
+}
+
+.mode-activity-inline.running,
+.mode-picker.active.running #mode-label {
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--mode-shine) 56%, var(--muted)) 12%,
+    var(--text) 38%,
+    var(--mode-shine) 54%,
+    var(--text) 68%,
+    color-mix(in srgb, var(--mode-shine) 56%, var(--muted)) 88%
+  );
+  background-size: 240% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: mode-text-shine 2.1s linear infinite, mode-text-flash 1.4s ease-in-out infinite;
+}
+
+.mode-activity-inline {
+  min-width: 0;
+  margin-left: 4px;
+  overflow: hidden;
+  font-family: var(--sans);
+  font-size: var(--fs-eyebrow);
+  font-weight: 580;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+@keyframes mode-text-shine {
+  from { background-position: 180% 0; }
+  to { background-position: -80% 0; }
+}
+
+@keyframes mode-text-flash {
+  0%, 100% { opacity: 0.72; filter: drop-shadow(0 0 0 transparent); }
+  50% { opacity: 1; filter: drop-shadow(0 0 7px color-mix(in srgb, var(--mode-shine) 48%, transparent)); }
+}
+
+.detail-block {
+  position: relative;
+  margin-bottom: var(--s-3);
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface-row);
+  transition: border-color var(--dur-2) var(--ease-out);
+}
+
+.detail-block:hover {
+  border-color: var(--line-strong);
+}
+
+.block-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  padding: var(--s-3) var(--s-4);
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--ui-label);
+  font-size: var(--fs-sm);
+  text-align: left;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
+}
+
+.block-toggle:hover {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  color: var(--text-soft);
+}
+
+.block-toggle > * {
+  pointer-events: none;
+}
+
+.block-chevron {
+  display: inline-flex;
+  color: var(--faint);
+  transition: transform var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
+}
+
+.block-chevron svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.detail-block.open .block-chevron {
+  transform: rotate(90deg);
+  color: var(--text-soft);
+}
+
+.block-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+  font-weight: 500;
+}
+
+/* Tail of the live reasoning, shown only while collapsed. */
+.block-preview {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+
+.detail-block.open .block-preview {
+  opacity: 0;
+}
+
+.pill {
+  padding: 2px 7px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-full);
+  color: var(--faint);
+  font-family: var(--ui-label);
+  font-size: var(--fs-eyebrow);
+  font-weight: 500;
+  letter-spacing: var(--ls-eyebrow);
+  text-transform: lowercase;
+}
+
+/* Height animation lives on the wrapper; the body stays the scroll container
+   so scrollThinkingToBottom keeps working. */
+.block-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows var(--dur-3) var(--ease-in-out);
+}
+
+.detail-block.open .block-reveal {
+  grid-template-rows: 1fr;
+}
+
+.block-body {
+  min-height: 0;
+  max-height: 300px;
+  overflow-y: auto;
+  /* Without this, hitting the end of the reasoning chains the wheel event to
+     .messages, whose handler clears followOutput and freezes autoscroll. */
+  overscroll-behavior: contain;
+  padding: 0 var(--s-4) var(--s-4);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+
+.detail-block.open .block-body {
+  opacity: 1;
+  transition-delay: 60ms;
+}
+
+.detail-block.running {
+  border-color: color-mix(in srgb, var(--primary) 32%, var(--line));
+}
+
+/* A slow shimmer along the top edge reads as "still thinking" without the
+   jitter of a spinner. */
+.detail-block.running::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--primary) 28%, transparent) 50%,
+    transparent 100%);
+  background-size: 45% 100%;
+  background-repeat: no-repeat;
+  animation: block-shimmer 2.4s linear infinite;
+}
+
+@keyframes block-shimmer {
+  from { background-position: -60% 0; }
+  to { background-position: 160% 0; }
+}
+
+.detail-block.running .block-title::after {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: thinking-dot-pulse 1.4s var(--ease-in-out) infinite;
+}
+
+/* Streaming caret. Only the caret animates — scheduleStreamRender rebuilds the
+   whole bubble each frame, so any per-token animation would restart every
+   frame and read as a flicker. */
+.bubble.streaming::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  border-radius: 1px;
+  background: var(--primary);
+  vertical-align: text-bottom;
+  animation: caret-blink 1.05s linear infinite;
+}
+
+@keyframes caret-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.15; }
+}
+
+/* Meta events in the transcript — status lines and compaction notices — read
+   as a centred rule rather than as something the assistant said. */
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  width: min(100%, var(--content-width));
+  margin: 0 auto var(--s-5);
+  color: var(--muted);
+  font-family: var(--ui-label);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: var(--ls-eyebrow);
+  text-transform: uppercase;
+  animation: selene-rise var(--dur-3) var(--ease-out) backwards;
+}
+
+.status-line::before,
+.status-line::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--hairline);
+}
+
+/* Compacted older turns are session bookkeeping, not a spoken reply. */
+.message.compaction-notice .avatar {
+  visibility: hidden;
+}
+
+.message.compaction-notice .detail-block {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  background: transparent;
+  opacity: 0.85;
+}
+
+.message.compaction-notice .detail-block:hover {
+  opacity: 1;
+}
+
+/* Tinted from --primary rather than a hardcoded amber, so the pulse belongs to
+   whichever of the 14 themes is active. */
+@keyframes thinking-dot-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 50%, transparent); opacity: 1; }
+  70% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--primary) 0%, transparent); opacity: 0.75; }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 0%, transparent); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .detail-block.running,
+  .detail-block.running::before,
+  .detail-block.running .block-toggle,
+  .detail-block.running .block-title::after,
+  .mode-activity-inline.running,
+  .mode-picker.active.running #mode-label {
+    animation: none;
+  }
+
+  .detail-block.running::before {
+    display: none;
+  }
+}
+
+/* ── Tool calls ───────────────────────────────────────────────────────
+   A collapsible row per call: status, name, elapsed time, expanding to the
+   arguments and the result. Both already ride on the tool_start/tool_end
+   events and used to be discarded. */
+.tool-row {
+  margin-top: var(--s-2);
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface-row);
+  white-space: normal;
+  transition: border-color var(--dur-2) var(--ease-out);
+}
+
+.tool-row:hover {
+  border-color: var(--line-strong);
+}
+
+.block-content:empty {
+  display: none;
+}
+
+.block-content:empty + .tool-row {
+  margin-top: 0;
+}
+
+.tool-row-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+.tool-row-head:hover {
+  color: var(--text-soft);
+}
+
+.tool-row-name {
+  overflow: hidden;
+  color: var(--text-soft);
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-row-time {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  animation: selene-pop var(--dur-2) var(--ease-out) backwards;
+}
+
+.tool-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--r-full);
+  background: var(--faint);
+  transition: background-color var(--dur-2) var(--ease-out);
+}
+
+.tool-row[data-status="ok"] .tool-status-dot { background: var(--success); }
+.tool-row[data-status="error"] .tool-status-dot { background: var(--danger); }
+
+.tool-row[data-status="running"] .tool-status-dot {
+  background: var(--primary);
+  animation: tool-dot-pulse 1.6s var(--ease-in-out) infinite;
+}
+
+@keyframes tool-dot-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 55%, transparent); }
+  70% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--primary) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 0%, transparent); }
+}
+
+.tool-row[data-status="error"] {
+  border-color: var(--edge-danger);
+  background: var(--tint-danger);
+}
+
+.tool-row[data-status="error"] .tool-row-name {
+  color: var(--ink-danger);
+}
+
+/* Historical rows never animate: there is nothing live about them, and the
+   duration they would show was never persisted. */
+.tool-row[data-historical] .tool-status-dot,
+.tool-row[data-historical] .tool-row-time {
+  animation: none;
+}
+
+.tool-row-chevron {
+  display: inline-flex;
+  color: var(--faint);
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.tool-row-chevron svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tool-row.open .tool-row-chevron {
+  transform: rotate(90deg);
+}
+
+.tool-row-detail {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows var(--dur-3) var(--ease-in-out);
+}
+
+.tool-row.open .tool-row-detail {
+  grid-template-rows: 1fr;
+}
+
+.tool-row-detail > * {
+  min-height: 0;
+}
+
+.tool-row-detail-inner {
+  min-height: 0;
+}
+
+.tool-row-section {
+  padding: 0 var(--s-3) var(--s-3);
+}
+
+.tool-row-section::before {
+  content: attr(data-label);
+  display: block;
+  margin-bottom: var(--s-1);
+  color: var(--faint);
+  font-family: var(--ui-label);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: var(--ls-eyebrow);
+  text-transform: uppercase;
+}
+
+.tool-row-section pre {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--code-bg);
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tool-row-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-top: var(--s-1);
+  color: var(--faint);
+  font-family: var(--ui-label);
+  font-size: var(--fs-xs);
+}
+
+.tool-row-copy {
+  padding: 2px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--ui-label);
+  font-size: var(--fs-xs);
+  transition: border-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
+}
+
+.tool-row-copy:hover {
+  border-color: var(--line-focus);
+  color: var(--text);
+}
+
+
+/* ── Vault result cards ───────────────────────────────────────────────
+   Rendered from the structured payload the backend sends alongside the
+   markdown, so nothing is parsed. If the payload never arrives, the
+   markdown that already rendered simply stays. */
+.vault-card {
+  margin: var(--s-2) 0;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface-row);
+}
+
+.vault-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--hairline);
+  background: var(--panel);
+  color: var(--muted);
+  font-family: var(--ui-label);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: var(--ls-eyebrow);
+  text-transform: uppercase;
+}
+
+.vault-card-count {
+  padding: 1px 7px;
+  border-radius: var(--r-full);
+  background: var(--surface-low);
+  color: var(--text-soft);
+  font-family: var(--mono);
+  letter-spacing: 0;
+}
+
+.vault-card-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 90px auto;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.vault-card-row:last-child {
+  border-bottom: 0;
+}
+
+.vault-card-row.alias {
+  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-areas: "name arrow target" "path path path";
+}
+
+.vault-card-row.alias .vault-card-name { grid-area: name; }
+.vault-card-row.alias .vault-card-arrow { grid-area: arrow; color: var(--faint); }
+.vault-card-row.alias .vault-card-target { grid-area: target; }
+.vault-card-row.alias .vault-card-path { grid-area: path; }
+
+.vault-card-name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-card-target {
+  overflow: hidden;
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Truncated from the left so the filename stays visible. */
+.vault-card-path {
+  direction: rtl;
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-card-count-text {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.vault-result {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.vault-result:last-child {
+  border-bottom: 0;
+}
+
+.vault-result-index {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: var(--fs-eyebrow);
+  font-variant-numeric: tabular-nums;
+}
+
+.vault-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-1);
+}
+
+.vault-result-source {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-score {
+  display: block;
+  width: 54px;
+  height: 3px;
+  flex: 0 0 54px;
+  overflow: hidden;
+  border-radius: var(--r-full);
+  background: var(--surface-low);
+}
+
+.vault-score-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+}
+
+.vault-result-text {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.vault-result-text.expanded {
+  display: block;
+  overflow: visible;
+}
+
+.vault-more {
+  margin-top: var(--s-1);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  cursor: pointer;
+  font-family: var(--ui-label);
+  font-size: var(--fs-xs);
+}
+
+.vault-more:hover {
+  text-decoration: underline;
+}
+
+/* display:inline-flex on the button would otherwise win over the hidden
+   attribute, leaving "Back to chat" visible in the chat view. */
+.topbar-theme-btn[hidden] {
+  display: none;
+}

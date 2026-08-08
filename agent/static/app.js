@@ -154,6 +154,8 @@ const state = {
   generations: new Map(),
   viewVersion: 0,
   clientId: CLIENT_ID,
+  ollama: { status: "", reason: "" },
+  vaults: { data: null, loaded: false, loading: false, error: "" },
   stream: {
     assistantStack: null,
     assistantBubble: null,
@@ -163,7 +165,10 @@ const state = {
     thinkingText: "",
     renderFrame: null,
     modeStatusLine: null,
-    activeToolBlocks: new Map()
+    // Keyed `${round}:${id}` -> { row, startedAt, name }. tool_start ids are a
+    // per-batch index that restarts every round, so a bare id collides.
+    activeToolBlocks: new Map(),
+    toolRound: 0
   },
   slash: {
     open: false,
@@ -183,6 +188,7 @@ const state = {
     frame: null,
     watchdog: null,
     resizeObserver: null,
+    detachPointer: null,
     scene: null
   }
 };
@@ -258,8 +264,19 @@ const el = {};
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
   bindEvents();
+  restoreVaultPanel();
   loadState();
 });
+
+// Restores the panel's remembered open state. Expanding is what triggers the
+// (potentially slow) first /api/vaults call, never page load itself.
+function restoreVaultPanel() {
+  const section = el.vaultToggle?.closest(".vault-section");
+  if (!section || !vaultPanelOpen()) return;
+  section.classList.add("open");
+  el.vaultToggle.setAttribute("aria-expanded", "true");
+  loadVaults();
+}
 
 function bindElements() {
   el.messages = document.getElementById("messages");
@@ -285,8 +302,18 @@ function bindElements() {
   el.profileRuntimeSummary = document.getElementById("profile-runtime-summary");
   el.profileApply = document.getElementById("profile-apply");
   el.system = document.getElementById("setting-system");
-  el.settingsPanel = document.getElementById("settings-panel");
+  el.chatShell = document.querySelector(".chat-shell");
+  el.settingsView = document.getElementById("settings-view");
+  el.settingsBtn = document.getElementById("settings-btn");
   el.settingsBackdrop = document.getElementById("settings-backdrop");
+  el.settingsClose = document.getElementById("settings-close");
+  el.topbarLabel = document.getElementById("topbar-label");
+  el.ollamaStatus = document.getElementById("ollama-status");
+  el.ollamaDot = document.getElementById("ollama-dot");
+  el.ollamaReason = document.getElementById("ollama-reason");
+  el.vaultToggle = document.getElementById("vault-toggle");
+  el.vaultList = document.getElementById("vault-list");
+  el.vaultCount = document.getElementById("vault-count");
   el.slashMenu = document.getElementById("slash-menu");
   el.modePicker = document.getElementById("mode-picker");
   el.modeTrigger = document.getElementById("mode-trigger");
@@ -370,8 +397,10 @@ function bindEvents() {
 
   document.getElementById("new-chat-btn")?.addEventListener("click", newConversation);
   document.getElementById("settings-btn")?.addEventListener("click", openSettings);
-  document.getElementById("settings-close")?.addEventListener("click", closeSettings);
+  el.settingsClose?.addEventListener("click", closeSettings);
   el.settingsBackdrop?.addEventListener("click", closeSettings);
+  el.vaultToggle?.addEventListener("click", toggleVaultPanel);
+  el.settingsView?.addEventListener("scroll", syncSettingsNav, { passive: true });
   el.themeButton?.addEventListener("click", () => openThemeDialog(el.themeButton));
   document.getElementById("theme-close")?.addEventListener("click", closeThemeDialog);
   el.themeBackdrop?.addEventListener("click", (event) => {
@@ -388,7 +417,7 @@ function bindEvents() {
       handleThemeDialogKeydown(event);
       return;
     }
-    if (event.key === "Escape" && el.settingsPanel?.classList.contains("open")) closeSettings();
+    if (event.key === "Escape" && settingsOpen()) closeSettings();
   });
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
@@ -433,6 +462,7 @@ function bindEvents() {
     state.settings.options = state.settings.options || {};
     state.settings.options.temperature = value;
     el.temperatureValue.textContent = value.toFixed(2);
+    updateRangeFill(el.temperature);
     persistSettings();
   });
 
@@ -563,6 +593,7 @@ async function loadState() {
     reportRuntimeWarnings(state.runtime);
     selectConversationView(data.active_session_name || "New conversation");
     state.modelName = data.model_name || "selene";
+    state.ollama = { status: data.ollama_status || "", reason: data.ollama_reason || "" };
     state.models = Array.isArray(data.models) && data.models.length
       ? data.models
       : state.models;
@@ -662,6 +693,14 @@ function syncSettingsUI() {
   if (el.history) el.history.checked = state.settings.history !== false;
   if (el.think) el.think.checked = state.settings.think !== false;
   if (el.system) el.system.value = state.settings.system || "";
+  if (el.profileSetting) {
+    const profile = String(state.settings.runtime_profile || "manual");
+    // Assigning an unknown value silently sets selectedIndex = -1, which
+    // renders as a blank control.
+    const known = [...el.profileSetting.options].some((option) => option.value === profile);
+    el.profileSetting.value = known ? profile : "manual";
+  }
+  applyOllamaStatus();
   updateModelUI();
   updateModeUI();
 
@@ -670,7 +709,10 @@ function syncSettingsUI() {
       ?? state.runtime?.effective_options?.temperature
       ?? FALLBACK_MODEL_OPTIONS.temperature
   );
-  if (el.temperature) el.temperature.value = String(temp);
+  if (el.temperature) {
+    el.temperature.value = String(temp);
+    updateRangeFill(el.temperature);
+  }
   if (el.temperatureValue) el.temperatureValue.textContent = temp.toFixed(2);
 
   const budget = contextBudget();
@@ -981,7 +1023,7 @@ function renderActiveConversation() {
   resetStream();
   renderMessages();
   for (const event of generation.events) {
-    handleStreamEvent(event, generation, { record: false, forceVisible: true });
+    handleStreamEvent(event, generation, { record: false, forceVisible: true, replay: true });
   }
 }
 
@@ -1041,8 +1083,13 @@ function toDisplayMessages(history) {
       continue;
     }
     if (message.role === "assistant") {
+      // Collect the tool results instead of skipping past them. as_tool_message
+      // carries no tool_call_id, so pairing is positional — which is reliable
+      // because web.py emits tool_results ordered by call index.
+      const toolMessages = [];
       let j = i + 1;
       while (history[j]?.role === "tool") {
+        toolMessages.push(history[j]);
         j += 1;
       }
       const entry = {
@@ -1052,9 +1099,14 @@ function toDisplayMessages(history) {
         thoughtItems: [
           ...(message.planning ? [{ type: "thinking", text: displayText(message.planning) }] : []),
           ...(message.thinking ? [{ type: "thinking", text: displayText(message.thinking) }] : []),
-          ...(message.tool_calls || []).map((call) => ({
+          ...(message.tool_calls || []).map((call, index) => ({
             type: "tool",
-            name: call.function?.name || "tool"
+            name: call.function?.name || toolMessages[index]?.tool_name || "tool",
+            args: call.function?.arguments,
+            // Null when the turn was interrupted after the assistant message
+            // was saved but before its tool message was.
+            result: toolMessages[index]?.content ?? null,
+            historical: true
           }))
         ]
       };
@@ -1076,20 +1128,22 @@ function renderWelcome() {
   el.messages.innerHTML = `
     <div class="welcome">
       <canvas class="welcome-sky" aria-hidden="true"></canvas>
-      <h3 data-text="Selene">Selene</h3>
-      <div class="suggestions">
-        <button class="suggestion" type="button" data-prompt="Summarize this project and identify the most important files.">
-          <span class="suggestion-index">01</span><span class="suggestion-copy"><strong>Project summary</strong><small>Understand the workspace</small></span>
-        </button>
-        <button class="suggestion" type="button" data-prompt="Search the web for the latest AI developer tooling news.">
-          <span class="suggestion-index">02</span><span class="suggestion-copy"><strong>Web research</strong><small>Use tools when needed</small></span>
-        </button>
-        <button class="suggestion" type="button" data-prompt="Help me debug a Python error step by step.">
-          <span class="suggestion-index">03</span><span class="suggestion-copy"><strong>Debug with me</strong><small>Reason through a problem</small></span>
-        </button>
-        <button class="suggestion" type="button" data-prompt="/help">
-          <span class="suggestion-index">04</span><span class="suggestion-copy"><strong>Commands</strong><small>Show slash commands</small></span>
-        </button>
+      <div class="welcome-core">
+        <h3 data-text="Selene">Selene</h3>
+        <div class="suggestions">
+          <button class="suggestion" type="button" data-prompt="Summarize this project and identify the most important files.">
+            <span class="suggestion-index">01</span><span class="suggestion-copy"><strong>Project summary</strong><small>Understand the workspace</small></span>
+          </button>
+          <button class="suggestion" type="button" data-prompt="Search the web for the latest AI developer tooling news.">
+            <span class="suggestion-index">02</span><span class="suggestion-copy"><strong>Web research</strong><small>Use tools when needed</small></span>
+          </button>
+          <button class="suggestion" type="button" data-prompt="Help me debug a Python error step by step.">
+            <span class="suggestion-index">03</span><span class="suggestion-copy"><strong>Debug with me</strong><small>Reason through a problem</small></span>
+          </button>
+          <button class="suggestion" type="button" data-prompt="/help">
+            <span class="suggestion-index">04</span><span class="suggestion-copy"><strong>Commands</strong><small>Show slash commands</small></span>
+          </button>
+        </div>
       </div>
     </div>
   `;
@@ -1103,6 +1157,19 @@ function renderWelcome() {
     });
   });
   startWelcomeSky();
+}
+
+// The blanket prefers-reduced-motion rule in CSS only silences transitions and
+// keyframes. Anything driven from JS — the canvas below, scrollIntoView — has
+// to consult the query itself.
+function prefersReducedMotion() {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+}
+
+// Star count follows the area the canvas actually occupies, so a narrow window
+// does not end up with the same 36 stars crammed into a fraction of the space.
+function welcomeStarCount(width, height) {
+  return Math.round(Math.min(150, Math.max(40, (width * height) / 8000)));
 }
 
 function startWelcomeSky() {
@@ -1119,8 +1186,12 @@ function startWelcomeSky() {
     height: 0,
     lastFrame: now,
     shootingStar: null,
-    nextShootingStar: now + randomBetween(6000, 12000),
-    stars: Array.from({ length: 36 }, () => newCanvasStar(now, true))
+    nextShootingStar: now + randomBetween(2000, 6000),
+    pointerX: 0,
+    pointerY: 0,
+    targetX: 0,
+    targetY: 0,
+    stars: Array.from({ length: 80 }, () => newCanvasStar(now, true))
   };
   refreshWelcomeSkyPalette(scene);
   state.sky.scene = scene;
@@ -1133,10 +1204,33 @@ function startWelcomeSky() {
     canvas.width = Math.round(scene.width * ratio);
     canvas.height = Math.round(scene.height * ratio);
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+    const target = welcomeStarCount(scene.width, scene.height);
+    while (scene.stars.length < target) scene.stars.push(newCanvasStar(performance.now(), true));
+    if (scene.stars.length > target) scene.stars.length = target;
   };
   resize();
+
+  if (prefersReducedMotion()) {
+    // Paint a single settled frame: every star at mid-brightness, no shooting
+    // star, no animation loop and no watchdog scheduled at all.
+    scene.nextShootingStar = Infinity;
+    scene.stars.forEach((star) => { star.born = now - star.duration / 2; });
+    scene.reducedMotion = true;
+    drawWelcomeSky(scene, now, 0);
+    state.sky.resizeObserver = new ResizeObserver(() => {
+      resize();
+      scene.stars.forEach((star) => { star.born = performance.now() - star.duration / 2; });
+      drawWelcomeSky(scene, performance.now(), 0);
+    });
+    state.sky.resizeObserver.observe(canvas);
+    return;
+  }
+
   state.sky.resizeObserver = new ResizeObserver(resize);
   state.sky.resizeObserver.observe(canvas);
+
+  // Parallax has been removed per user request.
 
   const drawFrame = (timestamp) => {
     if (!canvas.isConnected || state.sky.scene !== scene) return;
@@ -1168,9 +1262,11 @@ function stopWelcomeSky() {
   if (state.sky.frame !== null) cancelAnimationFrame(state.sky.frame);
   if (state.sky.watchdog !== null) clearInterval(state.sky.watchdog);
   state.sky.resizeObserver?.disconnect();
+  state.sky.detachPointer?.();
   state.sky.frame = null;
   state.sky.watchdog = null;
   state.sky.resizeObserver = null;
+  state.sky.detachPointer = null;
   state.sky.scene = null;
 }
 
@@ -1178,8 +1274,9 @@ function newCanvasStar(now, initial = false) {
   return {
     x: Math.random(),
     y: Math.random(),
-    radius: randomBetween(.5, 1.28),
+    radius: randomBetween(0.8, 1.8),
     brightness: randomBetween(.24, .62),
+    depth: randomBetween(.35, 1),
     born: now + (initial ? randomBetween(-5000, 900) : randomBetween(350, 1800)),
     duration: randomBetween(5000, 10000)
   };
@@ -1198,6 +1295,44 @@ function refreshWelcomeSkyPalette(scene) {
   if (!scene) return;
   scene.starRgb = cssVariableRgb("--accent", [232, 232, 232]);
   scene.shineRgb = cssVariableRgb("--text", [242, 242, 242]);
+  scene.auroraRgb = cssVariableRgb("--primary", [207, 207, 207]);
+  // A theme switch while reduced motion is on has no frame loop to repaint it.
+  if (scene.reducedMotion) drawWelcomeSky(scene, performance.now(), 0);
+}
+
+// Two very low-alpha washes drifting on slow, mutually-prime periods so the
+// backdrop never visibly repeats. Alpha stays under .05 — this should read as
+// depth in the page, not as a gradient someone applied.
+function drawWelcomeAurora(scene, now) {
+  const { context, width, height } = scene;
+  const primary = scene.auroraRgb || [207, 207, 207];
+  const accent = scene.starRgb || [232, 232, 232];
+  const seconds = now / 1000;
+  const blobs = [
+    {
+      rgb: primary,
+      x: (0.5 + Math.sin((seconds / 40) * Math.PI * 2) * 0.22) * width,
+      y: (0.36 + Math.cos((seconds / 55) * Math.PI * 2) * 0.16) * height,
+      radius: Math.max(width, height) * 0.62,
+      alpha: 0.05
+    },
+    {
+      rgb: accent,
+      x: (0.5 + Math.cos((seconds / 55) * Math.PI * 2 + 1.6) * 0.26) * width,
+      y: (0.64 + Math.sin((seconds / 40) * Math.PI * 2 + 0.8) * 0.14) * height,
+      radius: Math.max(width, height) * 0.54,
+      alpha: 0.038
+    }
+  ];
+
+  blobs.forEach((blob) => {
+    const gradient = context.createRadialGradient(blob.x, blob.y, 0, blob.x, blob.y, blob.radius);
+    gradient.addColorStop(0, rgba(blob.rgb, blob.alpha));
+    gradient.addColorStop(0.55, rgba(blob.rgb, blob.alpha * 0.35));
+    gradient.addColorStop(1, rgba(blob.rgb, 0));
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, width, height);
+  });
 }
 
 function rgba(rgb, opacity) {
@@ -1210,6 +1345,8 @@ function drawWelcomeSky(scene, now, delta) {
   const shineRgb = scene.shineRgb || [242, 242, 242];
   context.clearRect(0, 0, width, height);
 
+
+
   stars.forEach((star, index) => {
     const progress = (now - star.born) / star.duration;
     if (progress >= 1) {
@@ -1220,8 +1357,7 @@ function drawWelcomeSky(scene, now, delta) {
     const x = star.x * width;
     const y = star.y * height;
     const opacity = Math.pow(Math.sin(Math.PI * progress), 1.55)
-      * star.brightness
-      * welcomeSkyVignette(x, y, width, height);
+      * star.brightness;
     if (opacity <= .01) return;
     context.beginPath();
     context.arc(x, y, star.radius, 0, Math.PI * 2);
@@ -1239,7 +1375,7 @@ function drawWelcomeSky(scene, now, delta) {
       vy: Math.sin(angle) * speed,
       age: 0,
       duration: randomBetween(2.1, 2.8),
-      trail: randomBetween(60, 90)
+      trail: randomBetween(100, 150)
     };
   }
 
@@ -1253,9 +1389,7 @@ function drawWelcomeSky(scene, now, delta) {
   const uy = shot.vy / speed;
   const fadeIn = Math.min(1, shot.age / .32);
   const fadeOut = Math.min(1, Math.max(0, (shot.duration - shot.age) / 1.1));
-  const opacity = Math.min(fadeIn, fadeOut)
-    * .5
-    * welcomeSkyVignette(shot.x, shot.y, width, height);
+  const opacity = Math.min(fadeIn, fadeOut) * .5;
   const tailX = shot.x - ux * shot.trail;
   const tailY = shot.y - uy * shot.trail;
   const streak = context.createLinearGradient(tailX, tailY, shot.x, shot.y);
@@ -1265,11 +1399,11 @@ function drawWelcomeSky(scene, now, delta) {
   context.beginPath();
   context.moveTo(tailX, tailY);
   context.lineTo(shot.x, shot.y);
-  context.lineWidth = .8;
+  context.lineWidth = 1.8;
   context.strokeStyle = streak;
   context.stroke();
   context.beginPath();
-  context.arc(shot.x, shot.y, .9, 0, Math.PI * 2);
+  context.arc(shot.x, shot.y, 2.2, 0, Math.PI * 2);
   context.fillStyle = rgba(shineRgb, opacity);
   context.fill();
 
@@ -1280,10 +1414,10 @@ function drawWelcomeSky(scene, now, delta) {
 }
 
 function welcomeSkyVignette(x, y, width, height) {
-  const normalizedX = (x - width / 2) / Math.max(1, width * .56);
-  const normalizedY = (y - height / 2) / Math.max(1, height * .58);
+  const normalizedX = (x - width / 2) / Math.max(1, width * .7);
+  const normalizedY = (y - height / 2) / Math.max(1, height * .72);
   const distance = Math.hypot(normalizedX, normalizedY);
-  const edgeFade = Math.max(0, Math.min(1, (1 - distance) / .24));
+  const edgeFade = Math.max(0, Math.min(1, (1 - distance) / .38));
   return edgeFade * edgeFade * (3 - 2 * edgeFade);
 }
 
@@ -1314,7 +1448,15 @@ function appendAssistantMessage(message, scroll = true) {
     const body = thinkingBlock.querySelector(".block-body");
     thoughtItems.forEach((item) => {
       if (item.type === "tool") {
-        body?.appendChild(toolIndicator(item.name));
+        const row = toolCallRow({
+          name: item.name,
+          args: item.args,
+          result: item.result,
+          historical: true
+        });
+        // Duration is never persisted, so a historical row shows status only.
+        row.dataset.status = item.result == null ? "unknown" : classifyToolResult(item.result);
+        body?.appendChild(row);
       } else if (item.text) {
         body?.appendChild(thinkingContent(item.text));
       }
@@ -1424,10 +1566,20 @@ function detailBlock(title, label, content, running) {
   const toggle = document.createElement("button");
   toggle.type = "button";
   toggle.className = "block-toggle";
+  toggle.setAttribute("aria-expanded", "false");
   toggle.innerHTML = `
     <span class="block-title">${escapeHTML(title)} <span class="pill">${escapeHTML(label)}</span></span>
-    <span aria-hidden="true">+</span>
+    <span class="block-preview" aria-hidden="true"></span>
+    <span class="block-chevron" aria-hidden="true">
+      <svg viewBox="0 0 16 16"><path d="m6 4 4 4-4 4"/></svg>
+    </span>
   `;
+
+  // The reveal wraps the body rather than replacing it, so every existing
+  // querySelector(".block-body") append site keeps working unchanged while the
+  // wrapper handles the 0fr->1fr height animation.
+  const reveal = document.createElement("div");
+  reveal.className = "block-reveal";
 
   const body = document.createElement("div");
   body.className = "block-body";
@@ -1436,11 +1588,22 @@ function detailBlock(title, label, content, running) {
 
   toggle.addEventListener("click", () => {
     const isOpen = block.classList.toggle("open");
+    toggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
     if (isOpen) scrollThinkingToBottom(block);
   });
   body.appendChild(blockContent);
-  block.append(toggle, body);
+  reveal.appendChild(body);
+  block.append(toggle, reveal);
   return block;
+}
+
+// A one-line tail of the reasoning shown while the block is collapsed, so the
+// stream is legible without forcing it open.
+function updateBlockPreview(block, text) {
+  const preview = block?.querySelector(".block-preview");
+  if (!preview) return;
+  const flat = String(text || "").replace(/\s+/g, " ").trim();
+  preview.textContent = flat.length > 90 ? `…${flat.slice(-90)}` : flat;
 }
 
 function thinkingContent(text = "") {
@@ -1457,20 +1620,182 @@ function scrollThinkingToBottom(block) {
   body.scrollTop = body.scrollHeight;
 }
 
+// Chars rendered into the DOM, and chars kept in dataset for "copy full".
+const TOOL_INLINE_LIMIT = 8000;
+const TOOL_STORE_LIMIT = 120000;
+
+// Tool failures are structured: tool_runner._error_content emits
+// {"ok": false, "error": ..., "error_code": ...}. Detection is therefore exact
+// for our own tools, with a text heuristic only for non-JSON output.
+function classifyToolResult(raw) {
+  const text = displayText(raw);
+  if (!text) return "unknown";
+  try {
+    const data = JSON.parse(text);
+    if (data && typeof data === "object") {
+      if (data.ok === false || data.error) return "error";
+      return "ok";
+    }
+  } catch {
+    /* not JSON — fall through to the text heuristic */
+  }
+  return /^(error|traceback|exception)\b/i.test(text.trim()) ? "error" : "ok";
+}
+
+function safeStringify(value) {
+  const seen = new WeakSet();
+  try {
+    return JSON.stringify(value, (key, item) => {
+      if (item && typeof item === "object") {
+        if (seen.has(item)) return "[circular]";
+        seen.add(item);
+      }
+      return item;
+    }, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatToolPayload(value) {
+  if (value == null) return "";
+  if (typeof value === "object") return safeStringify(value);
+  const text = displayText(value);
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
+function formatToolDuration(ms) {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`;
+}
+
+// Sections are built on first expand, so a transcript with dozens of tool calls
+// does not carry dozens of large <pre> nodes it may never show.
+function buildToolSection(label, text) {
+  const section = document.createElement("div");
+  section.className = "tool-row-section";
+  section.dataset.label = label;
+
+  const pre = document.createElement("pre");
+  const full = String(text || "");
+  pre.textContent = full.length > TOOL_INLINE_LIMIT ? full.slice(0, TOOL_INLINE_LIMIT) : full;
+  section.appendChild(pre);
+
+  if (full.length > TOOL_INLINE_LIMIT) {
+    const footer = document.createElement("div");
+    footer.className = "tool-row-footer";
+    const note = document.createElement("span");
+    note.textContent =
+      `Showing first ${TOOL_INLINE_LIMIT.toLocaleString()} of ${full.length.toLocaleString()} characters`;
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "tool-row-copy";
+    copy.textContent = "Copy full";
+    copy.addEventListener("click", async () => {
+      try {
+        await writeClipboardText(full);
+        copy.textContent = "Copied";
+        setTimeout(() => { if (copy.isConnected) copy.textContent = "Copy full"; }, 1400);
+      } catch {
+        toast("Could not copy that tool output.");
+      }
+    });
+    footer.append(note, copy);
+    section.appendChild(footer);
+  }
+  return section;
+}
+
+function expandToolRow(row) {
+  const detail = row.querySelector(".tool-row-detail");
+  if (!detail || detail.dataset.built === "true") return;
+  detail.dataset.built = "true";
+  const inner = detail.querySelector(".tool-row-detail-inner");
+  if (row.dataset.args) inner.appendChild(buildToolSection("arguments", row.dataset.args));
+  if (row.dataset.result) inner.appendChild(buildToolSection("result", row.dataset.result));
+}
+
+function setToolRowPayload(row, key, value) {
+  const text = formatToolPayload(value);
+  if (!text) return;
+  // Truncate at store time too, so a tool that returns megabytes cannot pin
+  // that much string data in a dataset attribute for the life of the page.
+  row.dataset[key] = text.length > TOOL_STORE_LIMIT ? text.slice(0, TOOL_STORE_LIMIT) : text;
+  const detail = row.querySelector(".tool-row-detail");
+  if (detail?.dataset.built === "true") {
+    detail.dataset.built = "false";
+    const inner = detail.querySelector(".tool-row-detail-inner");
+    if (inner) inner.replaceChildren();
+    if (row.classList.contains("open")) expandToolRow(row);
+  }
+}
+
+function toolCallRow({ id, name, args, result, running = false, historical = false } = {}) {
+  const row = document.createElement("section");
+  row.className = `tool-row${running ? " running" : ""}`;
+  if (id != null) row.dataset.toolId = String(id);
+  if (historical) row.dataset.historical = "true";
+  row.dataset.status = running ? "running" : "unknown";
+
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "tool-row-head";
+  head.setAttribute("aria-expanded", "false");
+  head.innerHTML = `
+    <span class="tool-status-dot" aria-hidden="true"></span>
+    <span class="tool-row-name"></span>
+    <span class="tool-row-time"></span>
+    <span class="tool-row-chevron" aria-hidden="true">
+      <svg viewBox="0 0 16 16"><path d="m6 4 4 4-4 4"/></svg>
+    </span>
+  `;
+  head.querySelector(".tool-row-name").textContent = humanizeToolName(name);
+
+  const detail = document.createElement("div");
+  detail.className = "tool-row-detail";
+  detail.dataset.built = "false";
+  const inner = document.createElement("div");
+  inner.className = "tool-row-detail-inner";
+  detail.appendChild(inner);
+
+  head.addEventListener("click", () => {
+    const isOpen = row.classList.toggle("open");
+    head.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    if (isOpen) expandToolRow(row);
+  });
+
+  row.append(head, detail);
+  if (args != null) setToolRowPayload(row, "args", args);
+  if (result != null) {
+    setToolRowPayload(row, "result", result);
+    row.dataset.status = classifyToolResult(result);
+  }
+  return row;
+}
+
+// Kept as a shim so historical replay and any other caller can migrate
+// independently of the live streaming path.
 function toolIndicator(name, running = false) {
-  const indicator = document.createElement("div");
-  indicator.className = `tool-indicator${running ? " running" : ""}`;
+  return toolCallRow({ name, running });
+}
 
-  const label = document.createElement("span");
-  label.className = "pill";
-  label.textContent = "tool";
-
-  const status = document.createElement("span");
-  status.className = "tool-indicator-status";
-  status.textContent = running ? `Using ${humanizeToolName(name)}…` : `Used ${humanizeToolName(name)}`;
-
-  indicator.append(label, status);
-  return indicator;
+function settleToolRow(row, { status = "unknown", duration = null, result = null } = {}) {
+  if (!row) return;
+  row.classList.remove("running");
+  row.dataset.status = status;
+  if (result != null) setToolRowPayload(row, "result", result);
+  const time = row.querySelector(".tool-row-time");
+  if (time && duration != null) time.textContent = formatToolDuration(duration);
+  // A failing tool opens itself — that is the one case where the detail is the
+  // point rather than an aside.
+  if (status === "error" && !row.classList.contains("open")) {
+    row.classList.add("open");
+    row.querySelector(".tool-row-head")?.setAttribute("aria-expanded", "true");
+    expandToolRow(row);
+  }
 }
 
 function humanizeToolName(name) {
@@ -1480,6 +1805,7 @@ function humanizeToolName(name) {
 }
 
 async function sendMessage() {
+  if (settingsOpen()) closeSettings();
   if (generationForSession()) return;
   const text = el.input.value.trim();
   if (!text) return;
@@ -1638,7 +1964,7 @@ async function readEventStream(response, generation) {
   if (!sawDone) throw new Error("The response stream ended before the model completed its reply.");
 }
 
-function handleStreamEvent(event, generation, { record = true, forceVisible = false } = {}) {
+function handleStreamEvent(event, generation, { record = true, forceVisible = false, replay = false } = {}) {
   if (record) recordGenerationEvent(generation, event);
   const visible = forceVisible || isGenerationVisible(generation);
   switch (event.type) {
@@ -1729,6 +2055,13 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
         { record: false, forceVisible: visible }
       );
       break;
+    // Both are emitted by the backend and were previously ignored. They mark
+    // the boundary between tool rounds, which is what makes the per-round
+    // tool ids unambiguous.
+    case "tool_calls_start":
+    case "tool_parallel_start":
+      state.stream.toolRound += 1;
+      break;
     case "tool_start":
       if (!visible) break;
       ensureAssistantStack();
@@ -1739,10 +2072,32 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
       }
       state.stream.thinkingBlock.classList.add("running");
       {
-        const toolId = String(event.id ?? `${event.name || "tool"}-${state.stream.activeToolBlocks.size}`);
-        const block = toolIndicator(event.name || "tool", true);
-        state.stream.activeToolBlocks.set(toolId, block);
-        state.stream.thinkingBlock.querySelector(".block-body")?.appendChild(block);
+        const rawId = String(event.id ?? state.stream.activeToolBlocks.size);
+        let key = `${state.stream.toolRound}:${rawId}`;
+        // A serial multi-round loop emits neither round event, so the same id
+        // can arrive again while the previous one is still open. Settle the
+        // stale row and start a new round rather than overwriting it.
+        if (state.stream.activeToolBlocks.has(key)) {
+          const stale = state.stream.activeToolBlocks.get(key);
+          settleToolRow(stale.row, { status: "unknown" });
+          state.stream.activeToolBlocks.delete(key);
+          state.stream.toolRound += 1;
+          key = `${state.stream.toolRound}:${rawId}`;
+        }
+        const row = toolCallRow({
+          id: rawId,
+          name: event.name || "tool",
+          args: event.arguments,
+          running: true
+        });
+        state.stream.activeToolBlocks.set(key, {
+          row,
+          name: event.name || "tool",
+          // Omitted on replay: the clock would measure from replay time, not
+          // from when the tool actually ran.
+          startedAt: replay ? null : performance.now()
+        });
+        state.stream.thinkingBlock.querySelector(".block-body")?.appendChild(row);
       }
       scrollThinkingToBottom(state.stream.thinkingBlock);
       scrollToBottom();
@@ -1750,17 +2105,37 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
     case "tool_end":
       if (!visible) break;
       {
-        const toolId = String(event.id ?? "");
-        const fallbackEntry = state.stream.activeToolBlocks.entries().next().value;
-        const block = state.stream.activeToolBlocks.get(toolId) || fallbackEntry?.[1];
-        if (!block) break;
-        block.classList.remove("running");
-        const status = block.querySelector(".tool-indicator-status");
-        if (status) status.textContent = `Used ${humanizeToolName(event.name || "tool")}`;
-        if (state.stream.activeToolBlocks.has(toolId)) {
-          state.stream.activeToolBlocks.delete(toolId);
-        } else if (fallbackEntry) {
-          state.stream.activeToolBlocks.delete(fallbackEntry[0]);
+        const rawId = String(event.id ?? "");
+        let key = `${state.stream.toolRound}:${rawId}`;
+        let entry = state.stream.activeToolBlocks.get(key);
+        if (!entry) {
+          // The round may have advanced between start and end.
+          for (const candidate of state.stream.activeToolBlocks.keys()) {
+            if (candidate.endsWith(`:${rawId}`)) {
+              key = candidate;
+              entry = state.stream.activeToolBlocks.get(candidate);
+              break;
+            }
+          }
+        }
+        if (entry) {
+          settleToolRow(entry.row, {
+            status: classifyToolResult(event.result),
+            duration: entry.startedAt == null ? null : performance.now() - entry.startedAt,
+            result: event.result
+          });
+          state.stream.activeToolBlocks.delete(key);
+        } else {
+          // Cache hits emit tool_end with no preceding tool_start. Render them
+          // as their own completed row instead of hijacking an unrelated
+          // running one, which is what the old fallback did.
+          const row = toolCallRow({
+            id: rawId,
+            name: event.name || "tool",
+            result: event.result
+          });
+          settleToolRow(row, { status: classifyToolResult(event.result), result: event.result });
+          state.stream.thinkingBlock?.querySelector(".block-body")?.appendChild(row);
         }
       }
       if (!state.stream.activeToolBlocks.size) state.stream.thinkingBlock?.classList.remove("running");
@@ -1773,7 +2148,9 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
         scheduleStreamRender({ immediate: true });
         state.stream.thinkingBlock?.classList.remove("open", "running");
         state.stream.assistantBubble = document.createElement("div");
-        state.stream.assistantBubble.className = "bubble";
+        // .streaming drives the blinking caret; settleStreamActivity clears it
+        // on every terminal path, including abort and transport failure.
+        state.stream.assistantBubble.className = "bubble streaming";
         state.stream.assistantStack.appendChild(state.stream.assistantBubble);
         appendMessageActions(state.stream.assistantStack, "copy");
         state.stream.thinkingBlock = null;
@@ -1782,8 +2159,13 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
         state.stream.activeToolBlocks.clear();
       }
       state.stream.assistantText += displayText(event.text ?? event.content);
+      state.stream.assistantBubble.classList.remove("has-cards");
       scheduleStreamRender();
       if (event.error) state.stream.assistantBubble.classList.add("error");
+      break;
+    case "command_result":
+      if (!visible) break;
+      renderCommandResultCards(event.payload);
       break;
     case "token_usage":
       if (!visible) break;
@@ -1879,9 +2261,10 @@ function scheduleStreamRender({ immediate = false } = {}) {
     state.stream.renderFrame = null;
     if (state.stream.thinkingContent) {
       state.stream.thinkingContent.textContent = state.stream.thinkingText;
+      updateBlockPreview(state.stream.thinkingBlock, state.stream.thinkingText);
       scrollThinkingToBottom(state.stream.thinkingBlock);
     }
-    if (state.stream.assistantBubble) {
+    if (state.stream.assistantBubble && !state.stream.assistantBubble.classList.contains("has-cards")) {
       renderResponseInto(state.stream.assistantBubble, state.stream.assistantText);
     }
     scrollToBottom();
@@ -1908,6 +2291,7 @@ function resetStream() {
   state.stream.renderFrame = null;
   state.stream.modeStatusLine = null;
   state.stream.activeToolBlocks.clear();
+  state.stream.toolRound = 0;
 }
 
 function settleModeStatus() {
@@ -1920,13 +2304,11 @@ function settleStreamActivity(interrupted = false) {
   // aborted or the connection fails. Settle the DOM before resetStream drops
   // the only references to these still-visible elements.
   state.stream.thinkingBlock?.classList.remove("open", "running");
+  state.stream.assistantBubble?.classList.remove("streaming");
   settleModeStatus();
-  for (const block of state.stream.activeToolBlocks.values()) {
-    block.classList.remove("running");
-    if (interrupted) {
-      const status = block.querySelector(".tool-indicator-status");
-      if (status) status.textContent = "Tool use stopped";
-    }
+  for (const entry of state.stream.activeToolBlocks.values()) {
+    settleToolRow(entry.row, { status: interrupted ? "unknown" : "ok" });
+    if (interrupted) entry.row.dataset.status = "unknown";
   }
 }
 
@@ -2057,6 +2439,7 @@ async function clearConversation() {
 }
 
 async function newConversation() {
+  if (settingsOpen()) closeSettings();
   await waitForPendingConversationIdentity();
   markCurrentGenerationBackgrounded();
   const requestedView = ++state.viewVersion;
@@ -2134,22 +2517,370 @@ async function refreshSessions() {
   renderSessions();
 }
 
-function openSettings() {
-  el.settingsBackdrop.hidden = false;
-  requestAnimationFrame(() => {
-    el.settingsBackdrop.classList.add("open");
-    el.settingsPanel.classList.add("open");
-    el.settingsPanel.setAttribute("aria-hidden", "false");
+// ── Vaults ──────────────────────────────────────────────────────────────
+// The panel is read-only; every write still goes through the /vault slash
+// commands, which are unchanged.
+const VAULT_PANEL_KEY = "selene-vault-panel";
+
+function vaultPanelOpen() {
+  try {
+    return localStorage.getItem(VAULT_PANEL_KEY) === "open";
+  } catch {
+    return false;
+  }
+}
+
+function setVaultPanelOpen(open) {
+  try {
+    localStorage.setItem(VAULT_PANEL_KEY, open ? "open" : "closed");
+  } catch {
+    /* private browsing — the panel just won't remember across reloads */
+  }
+}
+
+function toggleVaultPanel() {
+  const section = el.vaultToggle?.closest(".vault-section");
+  if (!section) return;
+  const open = !section.classList.contains("open");
+  section.classList.toggle("open", open);
+  el.vaultToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  setVaultPanelOpen(open);
+  // Fetched on first expand, never during loadState: the first call has to
+  // import ChromaDB and can take seconds.
+  if (open && !state.vaults.loaded) loadVaults();
+}
+
+async function loadVaults() {
+  if (state.vaults.loading) return;
+  state.vaults.loading = true;
+  renderVaultList();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch("/api/vaults", { headers: apiHeaders(), signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    state.vaults.data = await response.json();
+    state.vaults.loaded = true;
+    state.vaults.error = "";
+  } catch (error) {
+    state.vaults.error = error.name === "AbortError" ? "Timed out." : String(error.message || error);
+  } finally {
+    clearTimeout(timeout);
+    state.vaults.loading = false;
+    renderVaultList();
+  }
+}
+
+function renderVaultList() {
+  if (!el.vaultList) return;
+  el.vaultList.innerHTML = "";
+  const data = state.vaults.data;
+
+  const note = (text) => {
+    const row = document.createElement("p");
+    row.className = "vault-empty";
+    row.textContent = text;
+    el.vaultList.appendChild(row);
+  };
+
+  if (state.vaults.loading) {
+    for (let i = 0; i < 3; i += 1) {
+      const skeleton = document.createElement("div");
+      skeleton.className = "vault-skeleton";
+      el.vaultList.appendChild(skeleton);
+    }
+    return;
+  }
+  if (state.vaults.error) return note(state.vaults.error);
+  if (!data) return;
+  // Only the backend's own error string is shown — nothing is invented here.
+  if (!data.available || data.error) return note(data.error || "Vaults unavailable.");
+
+  const vaults = data.vaults || [];
+  const aliases = data.aliases || [];
+  if (el.vaultCount) {
+    el.vaultCount.textContent = String(vaults.length);
+    el.vaultCount.hidden = vaults.length === 0;
+  }
+  if (!vaults.length && !aliases.length) return note("No indexed vaults.");
+
+  const maxChunks = Math.max(1, ...vaults.map((v) => Number(v.indexed_chunks) || 0));
+  const byCollection = new Map();
+
+  vaults.forEach((vault) => {
+    const name = vault.collection || "unknown";
+    const chunks = Number(vault.indexed_chunks);
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "vault-row";
+    row.setAttribute("role", "listitem");
+    row.innerHTML = `
+      <span class="vault-row-main">
+        <span class="vault-row-name"></span>
+        <span class="vault-row-count"></span>
+      </span>
+      <span class="vault-bar"><span class="vault-bar-fill"></span></span>
+    `;
+    row.querySelector(".vault-row-name").textContent = name;
+    row.querySelector(".vault-row-count").textContent =
+      Number.isFinite(chunks) ? chunks.toLocaleString() : "—";
+    row.querySelector(".vault-bar-fill").style.width =
+      `${Math.round(((Number.isFinite(chunks) ? chunks : 0) / maxChunks) * 100)}%`;
+    row.addEventListener("click", () => insertVaultQuery(name));
+    el.vaultList.appendChild(row);
+    byCollection.set(name, row);
   });
-  document.getElementById("settings-close")?.focus();
+
+  const orphans = [];
+  aliases.forEach((entry) => {
+    const collection = entry.collection || "";
+    const row = document.createElement("div");
+    row.className = "vault-alias";
+    row.innerHTML = `<span class="vault-alias-name"></span><span class="vault-alias-target"></span>`;
+    row.querySelector(".vault-alias-name").textContent = entry.alias || "?";
+    row.querySelector(".vault-alias-target").textContent = collection || "—";
+    if (byCollection.has(collection)) {
+      byCollection.get(collection).after(row);
+    } else {
+      // An alias whose collection is not indexed. Flagged, not hidden.
+      row.classList.add("orphan");
+      orphans.push(row);
+    }
+  });
+  orphans.forEach((row) => el.vaultList.appendChild(row));
+}
+
+// Reuses the slash-insertion semantics: trailing space, caret at the end, and
+// it never sends on the user's behalf.
+function insertVaultQuery(collection) {
+  if (!el.input) return;
+  if (settingsOpen()) closeSettings();
+  el.input.value = `/vault search --collection ${collection} `;
+  el.input.focus();
+  el.input.setSelectionRange(el.input.value.length, el.input.value.length);
+  resizeComposer();
+  updateComposerState();
+  updateSlashMenu();
+}
+
+// Structured command output is an upgrade over the markdown that already
+// rendered — never a requirement. Any failure leaves the markdown standing.
+function renderCommandResultCards(payload) {
+  const bubble = state.stream.assistantBubble;
+  if (!bubble || !payload?.kind) return;
+  let card = null;
+  try {
+    if (payload.kind === "vault.list") card = vaultListCard(payload);
+    else if (payload.kind === "vault.aliases") card = vaultAliasesCard(payload);
+    else if (payload.kind === "vault.search") card = vaultSearchCard(payload);
+  } catch {
+    card = null;
+  }
+  if (!card) return;
+  // dataset.messageText is left intact so Copy still yields the raw markdown.
+  bubble.replaceChildren(card);
+  bubble.classList.add("has-cards");
+  scrollToBottom();
+}
+
+function vaultCardShell(title, count) {
+  const section = document.createElement("section");
+  section.className = "vault-card";
+  const header = document.createElement("header");
+  header.className = "vault-card-head";
+  const heading = document.createElement("span");
+  heading.textContent = title;
+  header.appendChild(heading);
+  if (count != null) {
+    const badge = document.createElement("span");
+    badge.className = "vault-card-count";
+    badge.textContent = String(count);
+    header.appendChild(badge);
+  }
+  section.appendChild(header);
+  return section;
+}
+
+function vaultListCard(payload) {
+  const vaults = payload.vaults || [];
+  if (!vaults.length) return null;
+  const card = vaultCardShell("Indexed vaults", vaults.length);
+  const max = Math.max(1, ...vaults.map((v) => Number(v.indexed_chunks) || 0));
+  vaults.forEach((vault) => {
+    const chunks = Number(vault.indexed_chunks);
+    const row = document.createElement("div");
+    row.className = "vault-card-row";
+    row.innerHTML = `
+      <span class="vault-card-name"></span>
+      <span class="vault-bar"><span class="vault-bar-fill"></span></span>
+      <span class="vault-card-count-text"></span>
+    `;
+    row.querySelector(".vault-card-name").textContent = vault.collection || "unknown";
+    row.querySelector(".vault-card-count-text").textContent =
+      Number.isFinite(chunks) ? `${chunks.toLocaleString()} chunks` : "unknown";
+    row.querySelector(".vault-bar-fill").style.width =
+      `${Math.round(((Number.isFinite(chunks) ? chunks : 0) / max) * 100)}%`;
+    card.appendChild(row);
+  });
+  return card;
+}
+
+function vaultAliasesCard(payload) {
+  const aliases = payload.aliases || [];
+  if (!aliases.length) return null;
+  const card = vaultCardShell("Vault aliases", aliases.length);
+  aliases.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "vault-card-row alias";
+    row.innerHTML = `
+      <span class="vault-card-name"></span>
+      <span class="vault-card-arrow" aria-hidden="true">→</span>
+      <span class="vault-card-target"></span>
+      <span class="vault-card-path"></span>
+    `;
+    row.querySelector(".vault-card-name").textContent = entry.alias || "?";
+    row.querySelector(".vault-card-target").textContent = entry.collection || "—";
+    const path = row.querySelector(".vault-card-path");
+    if (entry.file_path) path.textContent = entry.file_path;
+    else path.remove();
+    card.appendChild(row);
+  });
+  return card;
+}
+
+function vaultSearchCard(payload) {
+  const results = payload.results || [];
+  if (!results.length) return null;
+  const card = vaultCardShell(`Results for “${payload.query || ""}”`, results.length);
+  card.classList.add("vault-search");
+  results.forEach((result, index) => {
+    const row = document.createElement("div");
+    row.className = "vault-result";
+    row.innerHTML = `
+      <span class="vault-result-index"></span>
+      <div class="vault-result-body">
+        <div class="vault-result-head">
+          <span class="vault-result-source"></span>
+          <span class="vault-score"><span class="vault-score-fill"></span></span>
+        </div>
+        <p class="vault-result-text"></p>
+      </div>
+    `;
+    row.querySelector(".vault-result-index").textContent = String(index + 1).padStart(2, "0");
+    row.querySelector(".vault-result-source").textContent = result.source || "unknown";
+    const score = Number(result.score);
+    row.querySelector(".vault-score-fill").style.width =
+      `${Math.round(Math.min(1, Math.max(0, Number.isFinite(score) ? score : 0)) * 100)}%`;
+
+    const text = row.querySelector(".vault-result-text");
+    const full = String(result.text || "");
+    text.textContent = full;
+    if (full.length > 240) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "vault-more";
+      more.textContent = "Show more";
+      more.addEventListener("click", () => {
+        const expanded = text.classList.toggle("expanded");
+        more.textContent = expanded ? "Show less" : "Show more";
+      });
+      row.querySelector(".vault-result-body").appendChild(more);
+    } else {
+      text.classList.add("expanded");
+    }
+    card.appendChild(row);
+  });
+  return card;
+}
+
+// Drives the filled portion of a range track, which CSS cannot derive alone.
+function updateRangeFill(input) {
+  if (!input) return;
+  const min = Number(input.min || 0);
+  const max = Number(input.max || 100);
+  const span = max - min || 1;
+  const ratio = (Number(input.value) - min) / span;
+  input.style.setProperty("--fill", `${Math.min(100, Math.max(0, ratio * 100))}%`);
+}
+
+function settingsOpen() {
+  return el.settingsView?.classList.contains("open") === true;
+}
+
+// Keeps the settings sub-nav in step with what is actually on screen. Without
+// it the rail highlight is frozen on the first section.
+function syncSettingsNav() {
+  if (!el.settingsView || !settingsOpen()) return;
+  const links = [...el.settingsView.querySelectorAll(".settings-nav-link")];
+  if (!links.length) return;
+  const top = el.settingsView.getBoundingClientRect().top;
+  let current = links[0];
+  links.forEach((link) => {
+    const section = el.settingsView.querySelector(link.getAttribute("href"));
+    if (!section) return;
+    // 24px of slack so a section counts as current just before it hits the top.
+    if (section.getBoundingClientRect().top - top <= 24) current = link;
+  });
+  links.forEach((link) => link.classList.toggle("active", link === current));
+}
+
+function openSettings() {
+  if (!el.settingsView) return;
+  el.settingsView.hidden = false;
+  el.settingsView.classList.add("open");
+  if (el.settingsBackdrop) {
+    el.settingsBackdrop.hidden = false;
+    requestAnimationFrame(() => el.settingsBackdrop.classList.add("open"));
+  }
+  el.settingsBtn?.setAttribute("aria-pressed", "true");
+  refreshOllamaStatus();
+  syncSettingsNav();
 }
 
 function closeSettings() {
-  el.settingsBackdrop?.classList.remove("open");
-  el.settingsPanel?.classList.remove("open");
-  el.settingsPanel?.setAttribute("aria-hidden", "true");
-  setTimeout(() => { if (el.settingsBackdrop) el.settingsBackdrop.hidden = true; }, 180);
-  document.getElementById("settings-btn")?.focus();
+  if (!el.settingsView) return;
+  el.settingsView.classList.remove("open");
+  if (el.settingsBackdrop) el.settingsBackdrop.classList.remove("open");
+  el.settingsBtn?.setAttribute("aria-pressed", "false");
+  setTimeout(() => {
+    if (!settingsOpen()) {
+      el.settingsView.hidden = true;
+      if (el.settingsBackdrop) el.settingsBackdrop.hidden = true;
+    }
+  }, 380);
+  el.settingsBtn?.focus();
+}
+
+// ollama_status/ollama_reason are returned by GET /api/settings and were never
+// read. They are status, not settings, so they are surfaced read-only.
+// POST /api/settings does not echo them — never clear the card from a POST.
+async function refreshOllamaStatus() {
+  applyOllamaStatus();
+  try {
+    // Awaiting the write chain first means this GET cannot interleave with an
+    // in-flight settings POST. Only these two fields are read.
+    await settingsWriteChain;
+    const response = await fetch("/api/settings", { headers: apiHeaders() });
+    if (!response.ok) return;
+    const data = await response.json();
+    state.ollama = { status: data.ollama_status || "", reason: data.ollama_reason || "" };
+    applyOllamaStatus();
+  } catch {
+    /* status is a nicety; a failure here must not disturb the page */
+  }
+}
+
+function applyOllamaStatus() {
+  const status = state.ollama?.status || "";
+  const reason = state.ollama?.reason || "";
+  if (el.ollamaStatus) el.ollamaStatus.textContent = status || "—";
+  if (el.ollamaDot) {
+    el.ollamaDot.dataset.state = status === "Online" ? "online" : status ? "offline" : "unknown";
+  }
+  if (el.ollamaReason) {
+    el.ollamaReason.textContent = reason;
+    el.ollamaReason.hidden = !reason;
+  }
 }
 
 function renderThemeOptions() {
@@ -2191,7 +2922,7 @@ function openThemeDialog(trigger = document.activeElement) {
     themeCloseTimer = null;
   }
   themeTriggerElement = trigger instanceof HTMLElement ? trigger : el.input;
-  if (el.settingsPanel?.classList.contains("open")) closeSettings();
+  if (settingsOpen()) closeSettings();
   renderThemeOptions();
   el.themeBackdrop.hidden = false;
   el.themeDialog.setAttribute("aria-hidden", "false");
@@ -2345,6 +3076,7 @@ async function saveSession() {
 }
 
 async function loadSession(name) {
+  if (settingsOpen()) closeSettings();
   if (name === state.activeSessionName) {
     renderActiveConversation();
     updateComposerState();

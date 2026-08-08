@@ -1,0 +1,444 @@
+/* ── Webfonts ─────────────────────────────────────────────────────────
+   Vendored under agent/static/fonts/ so the desktop app renders correctly
+   offline. Each file is the variable font for its family, so one file covers
+   every weight the UI uses. See ../fonts/README.md for licensing.
+   ──────────────────────────────────────────────────────────────────── */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/inter-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/inter-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('/fonts/grotesk-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('/fonts/grotesk-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('/fonts/jbmono-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('/fonts/jbmono-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  color-scheme: dark;
+  --bg: #101010;
+  --surface: #171717;
+  --panel: #1f1f1f;
+  --elevated: #1c1c1c;
+  --primary: #cfcfcf;
+  --line: #2a2a2a;
+  --line-strong: #333333;
+  --line-focus: #9a9a9a;
+  --text: #f2f2f2;
+  --text-soft: #d8d8d8;
+  --muted: #7a7a7a;
+  --faint: #555555;
+  --accent: #e8e8e8;
+  --danger: #c08080;
+  --warning: #c8c8a0;
+  --success: #6a8a6a;
+  --select-fg: #0a0a0a;
+  --glass: var(--surface);
+  --glass-strong: var(--elevated);
+  --surface-low: color-mix(in srgb, var(--surface) 56%, var(--bg));
+  --surface-high: color-mix(in srgb, var(--surface) 74%, var(--panel));
+  --surface-row: color-mix(in srgb, var(--surface) 88%, var(--panel));
+  --code-bg: color-mix(in srgb, var(--bg) 82%, black);
+  --content-width: 1040px;
+
+  /* ── Type ───────────────────────────────────────────────────────────
+     Three families, three jobs. --display carries every title; --sans is
+     body copy; --mono is reserved for genuinely technical text (code,
+     numerals, identifiers). --ui-label exists because eyebrows, pills and
+     button labels used to borrow --mono, which is what made the type read
+     as inconsistent — they are label text, so they belong to --sans. */
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --display: "Space Grotesk", var(--sans);
+  --ui-label: var(--sans);
+
+  --fs-display: clamp(52px, 8vw, 80px);
+  --fs-h1: 24px;
+  --fs-h2: 18px;
+  --fs-h3: 15px;
+  --fs-body: 15px;
+  --fs-sm: 13px;
+  --fs-xs: 12px;
+  --fs-eyebrow: 11px;
+  --ls-eyebrow: 0.14em;
+  --ls-display: -0.02em;
+  --lh-body: 1.62;
+  --lh-tight: 1.24;
+
+  /* ── Elevation ──────────────────────────────────────────────────────
+     Shadows are tinted from --bg rather than pure black, so they read as
+     native in all 14 themes instead of as grey haze over a coloured page. */
+  --shadow-color: color-mix(in srgb, var(--bg) 40%, black);
+  --elev-0: none;
+  --elev-1: 0 1px 2px -1px color-mix(in srgb, var(--shadow-color) 55%, transparent);
+  --elev-2: 0 2px 6px -2px color-mix(in srgb, var(--shadow-color) 60%, transparent),
+            0 1px 2px -1px color-mix(in srgb, var(--shadow-color) 45%, transparent);
+  --elev-3: 0 12px 28px -12px color-mix(in srgb, var(--shadow-color) 70%, transparent),
+            0 2px 6px -3px color-mix(in srgb, var(--shadow-color) 55%, transparent);
+  --elev-4: 0 28px 64px -20px color-mix(in srgb, var(--shadow-color) 82%, transparent),
+            0 4px 12px -6px color-mix(in srgb, var(--shadow-color) 60%, transparent);
+  /* Legacy alias: the two rules that already consume var(--shadow) upgrade
+     from `none` to a real one-step lift without being touched. */
+  --shadow: var(--elev-1);
+
+  /* ── Edges, rings, glow ─────────────────────────────────────────── */
+  --hairline: color-mix(in srgb, var(--line) 72%, transparent);
+  --ring-inset: inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+  --focus-ring: 0 0 0 2px color-mix(in srgb, var(--bg) 80%, transparent),
+                0 0 0 4px color-mix(in srgb, var(--line-focus) 78%, transparent);
+  --glow-primary: 0 0 0 1px color-mix(in srgb, var(--primary) 26%, transparent),
+                  0 10px 34px -14px color-mix(in srgb, var(--primary) 50%, transparent);
+
+  /* ── Semantic tints ─────────────────────────────────────────────────
+     One triplet per status: a background wash, a border, and an ink. */
+  --tint-danger: color-mix(in srgb, var(--danger) 13%, transparent);
+  --edge-danger: color-mix(in srgb, var(--danger) 44%, var(--line));
+  --ink-danger: color-mix(in srgb, var(--danger) 78%, var(--text));
+  --tint-success: color-mix(in srgb, var(--success) 13%, transparent);
+  --edge-success: color-mix(in srgb, var(--success) 44%, var(--line));
+  --ink-success: color-mix(in srgb, var(--success) 78%, var(--text));
+  --tint-warning: color-mix(in srgb, var(--warning) 13%, transparent);
+  --edge-warning: color-mix(in srgb, var(--warning) 44%, var(--line));
+  --ink-warning: color-mix(in srgb, var(--warning) 78%, var(--text));
+  --tint-primary: color-mix(in srgb, var(--primary) 13%, transparent);
+  --edge-primary: color-mix(in srgb, var(--primary) 44%, var(--line));
+  --ink-primary: color-mix(in srgb, var(--primary) 78%, var(--text));
+  --tint-accent: color-mix(in srgb, var(--accent) 13%, transparent);
+  --edge-accent: color-mix(in srgb, var(--accent) 44%, var(--line));
+  --ink-accent: color-mix(in srgb, var(--accent) 78%, var(--text));
+
+  --scrim: color-mix(in srgb, var(--bg) 58%, transparent);
+  --scrim-blur: 14px;
+
+  /* ── Radii and spacing ──────────────────────────────────────────── */
+  --r-xs: 6px;
+  --r-sm: 9px;
+  --r-md: 13px;
+  --r-lg: 18px;
+  --r-xl: 24px;
+  --r-full: 999px;
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --s-8: 64px;
+
+  /* ── Motion ─────────────────────────────────────────────────────────
+     1 micro (hover, press) · 2 control (chip, toggle) ·
+     3 surface (menu, disclosure) · 4 overlay (view swap, drawer). */
+  --dur-1: 90ms;
+  --dur-2: 160ms;
+  --dur-3: 240ms;
+  --dur-4: 380ms;
+  --ease-out: cubic-bezier(0.22, 0.85, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.42, 0.5, 1);
+
+  --z-menu: 40;
+  --z-view: 50;
+  --z-drawer: 60;
+  --z-dialog: 70;
+  --z-toast: 90;
+}
+
+:root[data-theme="tokyo"] {
+  --bg: #070b14;
+  --surface: #0c1220;
+  --panel: #111a2c;
+  --elevated: #152038;
+  --primary: #5ec8ff;
+  --line: #152038;
+  --line-strong: #1e3048;
+  --line-focus: #5ec8ff;
+  --text: #d0e8ff;
+  --text-soft: #a8c8e8;
+  --muted: #4a6a90;
+  --faint: #2a3d5c;
+  --accent: #7dcfff;
+  --danger: #f7768e;
+  --warning: #e0af68;
+  --success: #7fd4a8;
+  --select-fg: #070b14;
+}
+
+:root[data-theme="rome"] {
+  --bg: #120e18;
+  --surface: #1a1424;
+  --panel: #241c30;
+  --elevated: #2a2038;
+  --primary: #d4af37;
+  --line: #2a2038;
+  --line-strong: #3a3048;
+  --line-focus: #d4af37;
+  --text: #f5efe0;
+  --text-soft: #e0d4b8;
+  --muted: #8b7355;
+  --faint: #5c4a60;
+  --accent: #f0d78c;
+  --danger: #c06070;
+  --warning: #e8c060;
+  --success: #8aaa70;
+  --select-fg: #120e18;
+}
+
+:root[data-theme="amazon"] {
+  --bg: #0a120c;
+  --surface: #101a12;
+  --panel: #162418;
+  --elevated: #1a2e1c;
+  --primary: #6dbf6d;
+  --line: #1a2e1c;
+  --line-strong: #243828;
+  --line-focus: #6dbf6d;
+  --text: #e4f0e4;
+  --text-soft: #b8d0b8;
+  --muted: #5a7a5a;
+  --faint: #3a4a3a;
+  --accent: #a8d4a0;
+  --danger: #c07070;
+  --warning: #d4c070;
+  --success: #6dbf6d;
+  --select-fg: #0a120c;
+}
+
+:root[data-theme="cairo"] {
+  --bg: #14100c;
+  --surface: #1c1610;
+  --panel: #261e16;
+  --elevated: #2e2418;
+  --primary: #c4a574;
+  --line: #2e2418;
+  --line-strong: #3a3020;
+  --line-focus: #c4a574;
+  --text: #f5ead8;
+  --text-soft: #d4c4a8;
+  --muted: #8a7050;
+  --faint: #5c4a38;
+  --accent: #e0c898;
+  --danger: #c07060;
+  --warning: #e0af68;
+  --success: #8aaa60;
+  --select-fg: #14100c;
+}
+
+:root[data-theme="kyoto"] {
+  --bg: #141018;
+  --surface: #1c1620;
+  --panel: #241e2c;
+  --elevated: #2a2234;
+  --primary: #d4a0c0;
+  --line: #2a2234;
+  --line-strong: #3a3048;
+  --line-focus: #d4a0c0;
+  --text: #f0e8f0;
+  --text-soft: #c8b8c8;
+  --muted: #7a6a80;
+  --faint: #524858;
+  --accent: #ebbcba;
+  --danger: #e07090;
+  --warning: #f0c480;
+  --success: #90c0b0;
+  --select-fg: #141018;
+}
+
+:root[data-theme="bergen"] {
+  --bg: #121820;
+  --surface: #1a222c;
+  --panel: #222c38;
+  --elevated: #283440;
+  --primary: #88c0d0;
+  --line: #283440;
+  --line-strong: #304050;
+  --line-focus: #88c0d0;
+  --text: #e8eef4;
+  --text-soft: #c0d0d8;
+  --muted: #6a8090;
+  --faint: #445060;
+  --accent: #a3d4e0;
+  --danger: #bf7078;
+  --warning: #ebcb8b;
+  --success: #8fbc8f;
+  --select-fg: #121820;
+}
+
+:root[data-theme="marrakech"] {
+  --bg: #140e0c;
+  --surface: #1c1410;
+  --panel: #261c16;
+  --elevated: #2e2018;
+  --primary: #e08860;
+  --line: #2e2018;
+  --line-strong: #3a2820;
+  --line-focus: #e08860;
+  --text: #f8ece4;
+  --text-soft: #e0c8b8;
+  --muted: #8a6050;
+  --faint: #5c4038;
+  --accent: #f0b090;
+  --danger: #d06060;
+  --warning: #e0af68;
+  --success: #90a860;
+  --select-fg: #140e0c;
+}
+
+:root[data-theme="shanghai"] {
+  --bg: #0a0814;
+  --surface: #12101c;
+  --panel: #1a1628;
+  --elevated: #221c34;
+  --primary: #e060c0;
+  --line: #221c34;
+  --line-strong: #302848;
+  --line-focus: #e060c0;
+  --text: #f0e8f8;
+  --text-soft: #c8b8e0;
+  --muted: #7060a0;
+  --faint: #484060;
+  --accent: #60d0f0;
+  --danger: #f06080;
+  --warning: #f0c060;
+  --success: #50d0a0;
+  --select-fg: #0a0814;
+}
+
+:root[data-theme="reykjavik"] {
+  --bg: #080e12;
+  --surface: #0e161c;
+  --panel: #141e26;
+  --elevated: #1a2830;
+  --primary: #60e0b8;
+  --line: #1a2830;
+  --line-strong: #243840;
+  --line-focus: #60e0b8;
+  --text: #e0f4f0;
+  --text-soft: #b0d8d0;
+  --muted: #508080;
+  --faint: #385058;
+  --accent: #a080e0;
+  --danger: #e07080;
+  --warning: #e0c070;
+  --success: #60e0b8;
+  --select-fg: #080e12;
+}
+
+:root[data-theme="venice"] {
+  --bg: #0c1214;
+  --surface: #141c1e;
+  --panel: #1c2628;
+  --elevated: #243032;
+  --primary: #50b0b8;
+  --line: #243032;
+  --line-strong: #2c3c40;
+  --line-focus: #50b0b8;
+  --text: #e8f0f0;
+  --text-soft: #b8d0d0;
+  --muted: #608088;
+  --faint: #405058;
+  --accent: #e0a0a8;
+  --danger: #d07070;
+  --warning: #e0c080;
+  --success: #70b890;
+  --select-fg: #0c1214;
+}
+
+:root[data-theme="seoul"] {
+  --bg: #0c0a14;
+  --surface: #14101e;
+  --panel: #1c182a;
+  --elevated: #242036;
+  --primary: #a070f0;
+  --line: #242036;
+  --line-strong: #302848;
+  --line-focus: #a070f0;
+  --text: #ece8f8;
+  --text-soft: #c0b8e0;
+  --muted: #6860a0;
+  --faint: #484060;
+  --accent: #c0a0ff;
+  --danger: #f07090;
+  --warning: #e0b070;
+  --success: #70d0b0;
+  --select-fg: #0c0a14;
+}
+
+:root[data-theme="santorini"] {
+  --bg: #0a1018;
+  --surface: #121a24;
+  --panel: #1a2430;
+  --elevated: #223040;
+  --primary: #60b0e8;
+  --line: #223040;
+  --line-strong: #2a3c50;
+  --line-focus: #60b0e8;
+  --text: #f0f6fa;
+  --text-soft: #c0d8e8;
+  --muted: #6088a8;
+  --faint: #405868;
+  --accent: #e8f0f8;
+  --danger: #e08080;
+  --warning: #e0c070;
+  --success: #70c0a0;
+  --select-fg: #0a1018;
+}
+
+:root[data-theme="havana"] {
+  --bg: #120c0c;
+  --surface: #1a1212;
+  --panel: #241a18;
+  --elevated: #2c201c;
+  --primary: #e07070;
+  --line: #2c201c;
+  --line-strong: #3c2c28;
+  --line-focus: #e07070;
+  --text: #f8ece8;
+  --text-soft: #e0c8c0;
+  --muted: #887060;
+  --faint: #584840;
+  --accent: #70d0b0;
+  --danger: #e05050;
+  --warning: #e0b060;
+  --success: #70d0b0;
+  --select-fg: #120c0c;
+}
+

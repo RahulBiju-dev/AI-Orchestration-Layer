@@ -1,0 +1,448 @@
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 24px 20px 20px;
+  border-radius: 14px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 52px;
+  padding: 0 5px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand-mark {
+  display: block;
+  width: 46px;
+  height: 46px;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  object-fit: cover;
+}
+
+.brand h1,
+.chat-topbar h2,
+.settings-header h2 {
+  margin: 0;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.brand h1 {
+  font-family: var(--display);
+  font-size: var(--fs-h2);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.eyebrow,
+.topbar-label {
+  margin: 3px 0 0;
+  color: var(--faint);
+  font-family: var(--ui-label);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+}
+
+.primary-btn,
+.ghost-btn,
+.send-btn,
+.settings-trigger,
+.icon-btn,
+.mic-btn,
+.session-open,
+.session-delete,
+.suggestion,
+.slash-item,
+.block-toggle,
+.code-copy-btn,
+.profile-apply-btn {
+  cursor: pointer;
+}
+
+.primary-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 48px;
+  margin: 20px 0 26px;
+  padding: 13px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-high);
+  color: var(--text-soft);
+  font-family: var(--ui-label);
+  font-size: var(--fs-sm);
+  text-align: left;
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
+}
+
+.primary-btn span {
+  color: var(--muted);
+}
+
+.primary-btn:hover {
+  border-color: var(--line-focus);
+  background: var(--elevated);
+  color: var(--text);
+}
+
+.side-section {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.section-title {
+  margin: 0 6px 8px;
+  color: var(--faint);
+  font-family: var(--ui-label);
+  font-size: var(--fs-eyebrow);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.session-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+  min-height: 72px;
+  overflow: auto;
+}
+
+.empty-sessions {
+  padding: 9px 7px;
+  color: var(--faint);
+  font-family: var(--ui-label);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.session-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 46px;
+  border-left: 2px solid transparent;
+  border-radius: 7px;
+  background: var(--surface-row);
+  color: var(--muted);
+  transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+
+.session-item:hover {
+  background: var(--elevated);
+  color: var(--text-soft);
+}
+
+.session-item.active {
+  border-left-color: var(--accent);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.session-open,
+.session-delete {
+  border: 0;
+  background: inherit;
+  color: inherit;
+}
+
+.session-open {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px 9px 12px 12px;
+  overflow: hidden;
+  font-size: var(--fs-sm);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-running {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+  animation: session-running-pulse 1.35s ease-in-out infinite;
+}
+
+.session-item.running:not(.active) {
+  color: var(--text-soft);
+}
+
+@keyframes session-running-pulse {
+  0%, 100% { opacity: 0.42; transform: scale(0.82); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-running { animation: none; opacity: 0.85; }
+}
+
+.session-delete {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 6px;
+  color: var(--danger);
+  opacity: 0;
+  transition: opacity 100ms ease, background 100ms ease;
+}
+
+.session-delete svg,
+.settings-trigger svg {
+  width: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.session-item:hover .session-delete,
+.session-delete:focus-visible {
+  opacity: 0.8;
+}
+
+.session-delete:hover {
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  opacity: 1;
+}
+
+.settings-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 12px;
+  min-height: 46px;
+  padding: 13px 10px;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--ui-label);
+  font-size: var(--fs-sm);
+  text-align: left;
+  transition: color 100ms ease, background 100ms ease;
+}
+
+.settings-trigger:hover {
+  background: var(--elevated);
+  color: var(--text-soft);
+}
+
+
+/* ── Vault panel ──────────────────────────────────────────────────────
+   Read-only view of the indexed collections. Clicking a row stages a
+   /vault search command in the composer; it never sends. */
+.vault-section {
+  /* .side-section is flex: 1 1 0%, which would make Vaults split the column
+     evenly with Sessions. Vaults sizes to its content; Sessions takes the
+     remaining space. */
+  flex: 0 0 auto;
+  margin-top: var(--s-2);
+}
+
+.vault-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  padding: var(--s-2) 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.vault-toggle .section-title {
+  margin: 0;
+  flex: 1;
+}
+
+.vault-count {
+  padding: 1px 7px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-full);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fs-eyebrow);
+  font-variant-numeric: tabular-nums;
+}
+
+.vault-count[hidden] {
+  display: none;
+}
+
+.vault-chevron {
+  display: inline-flex;
+  color: var(--faint);
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.vault-chevron svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.vault-section.open .vault-chevron {
+  transform: rotate(90deg);
+}
+
+.vault-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows var(--dur-3) var(--ease-in-out);
+}
+
+.vault-section.open .vault-reveal {
+  grid-template-rows: 1fr;
+}
+
+.vault-list {
+  min-height: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.vault-row {
+  display: grid;
+  gap: var(--s-1);
+  width: 100%;
+  padding: var(--s-2);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color var(--dur-2) var(--ease-out);
+}
+
+.vault-row:hover {
+  background: var(--surface-row);
+}
+
+.vault-row-main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.vault-row-name {
+  overflow: hidden;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-row-count {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.vault-bar {
+  display: block;
+  height: 3px;
+  overflow: hidden;
+  border-radius: var(--r-full);
+  background: var(--surface-low);
+}
+
+.vault-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--primary) 60%, transparent);
+  transition: width var(--dur-4) var(--ease-out);
+}
+
+.vault-alias {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  padding: var(--s-1) var(--s-2) var(--s-1) var(--s-4);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+.vault-alias-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-alias-target {
+  color: var(--faint);
+  font-family: var(--mono);
+}
+
+.vault-alias-target::before {
+  content: "→ ";
+}
+
+/* An alias pointing at a collection that is not indexed. */
+.vault-alias.orphan .vault-alias-name::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: var(--s-2);
+  border-radius: var(--r-full);
+  background: var(--warning);
+  vertical-align: middle;
+}
+
+.vault-empty {
+  margin: 0;
+  padding: var(--s-2);
+  color: var(--faint);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+.vault-skeleton {
+  height: 30px;
+  margin-bottom: var(--s-1);
+  border-radius: var(--r-sm);
+  background: linear-gradient(90deg,
+    var(--surface-row) 0%,
+    var(--surface-high) 50%,
+    var(--surface-row) 100%);
+  background-size: 220% 100%;
+  animation: vault-skeleton 1.4s linear infinite;
+}
+
+@keyframes vault-skeleton {
+  from { background-position: 140% 0; }
+  to { background-position: -40% 0; }
+}
