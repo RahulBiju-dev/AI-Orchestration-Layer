@@ -7,8 +7,9 @@
   <meta name="description" content="Selene is a local AI chatbot with thinking and tool-call visibility.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="icon" href="/favicon.png" type="image/png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@400;500;600&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/>
+  <link rel="icon" href="/assets/favicon.jpg" type="image/jpeg">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -143,7 +144,7 @@
         <h3>Model</h3>
         <label class="field-row"><span>Runtime profile</span><small>Manual is the default. Choose Auto for hardware detection or select a fixed profile.</small><select id="setting-profile"><option value="manual" selected>Manual — Modelfile defaults</option><option value="auto">Auto — detect this device</option><option value="low-vram">Low VRAM — about 4 GiB</option><option value="balanced">Balanced — more headroom</option></select></label>
         <label class="field-row"><span>Temperature <output id="temperature-value">0.25</output></span><small>Higher values produce more varied answers.</small><input id="setting-temperature" type="range" min="0" max="2" step="0.05" value="0.25"></label>
-        <label class="field-row"><span>Context window</span><small>Maximum tokens available to prompts and responses.</small><select id="setting-context" disabled><option value="" selected>Loading…</option><option value="4096">4k</option><option value="8192">8k</option><option value="16384">16k</option><option value="32768">32k</option><option value="65536">64k</option><option value="131072">128k</option></select></label>
+        <label class="field-row"><span>Context window</span><small>Maximum tokens available to prompts and responses.</small><select id="setting-context" disabled><option value="" selected>Loading…</option><option value="4096">4k</option><option value="8192">8k</option><option value="16384">16k</option><option value="32768">32k</option><option value="65536">64k</option><option value="131072">128k</option><option value="262144">256k</option></select></label>
       </section>
     </div>
   </aside>

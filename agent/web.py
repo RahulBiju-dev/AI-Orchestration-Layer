@@ -101,8 +101,10 @@ from agent.modes import (
     ULTRA_MODE_PROMPT,
     ULTRA_REVIEW_PROMPT,
     compact_deep_research_messages,
+    extract_research_sources,
     force_hard_web_search_schema,
     force_high_tool_difficulty,
+    merge_research_sources,
     normalize_agent_mode,
     parse_research_queries,
     research_query_count,
@@ -1472,9 +1474,19 @@ def _deep_research_plan_events(
     return queries
 
 
+def _research_sources_event(sources: list[dict]) -> dict:
+    """Terminal-safe snapshot of the turn's citations for the UI dropdown."""
+    return {
+        "type": "research_sources",
+        "mode": AGENT_MODE_DEEP_RESEARCH,
+        "sources": deepcopy(sources),
+    }
+
+
 def _deep_research_search_events(
     queries: list[str],
     cancellation_token: CancellationToken,
+    research_sources: list[dict],
 ):
     """Execute the planned hard-difficulty searches and return transcript messages."""
     calls = [
@@ -1513,6 +1525,7 @@ def _deep_research_search_events(
         )
     }
     tool_messages: list[dict] = []
+    found_sources = False
     for index, spec in enumerate(specs):
         result = results_by_raw_id[id(spec.raw)]
         yield {
@@ -1521,7 +1534,19 @@ def _deep_research_search_events(
             "name": result.spec.name,
             "result": result.content,
         }
+        before = len(research_sources)
+        merge_research_sources(
+            research_sources,
+            extract_research_sources(
+                result.spec.name,
+                result.spec.arguments,
+                result.content,
+            ),
+        )
+        found_sources = found_sources or len(research_sources) > before
         tool_messages.append(result.as_tool_message())
+    if found_sources:
+        yield _research_sources_event(research_sources)
     return calls, tool_messages
 
 
@@ -1884,6 +1909,7 @@ def _generate_chat_events_impl(
 
     initial_research_calls: list[dict] = []
     initial_research_results: list[dict] = []
+    research_sources: list[dict] = []
     deep_research_search_count = 0
     deep_research_next_compaction = DEEP_RESEARCH_COMPACT_INTERVAL
     deep_research_scrape_count = 0
@@ -1927,6 +1953,7 @@ def _generate_chat_events_impl(
         initial_research_calls, initial_research_results = yield from _deep_research_search_events(
             queries,
             cancellation_token,
+            research_sources,
         )
         research_assistant = {
             "role": "assistant",
@@ -2274,6 +2301,8 @@ def _generate_chat_events_impl(
             }
             if thinking_buf:
                 assistant_msg["thinking"] = accumulated_thinking + thinking_buf
+            if research_sources:
+                assistant_msg["research_sources"] = deepcopy(research_sources)
             if session_data.get("history", True):
                 history_data.append(assistant_msg)
                 save_session_snapshot(
@@ -2366,6 +2395,11 @@ def _generate_chat_events_impl(
             assistant_msg["provider_metadata"] = response_provider_metadata
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
+        elif research_sources:
+            # UI-only citation record for the answer this turn produced. Stored
+            # on the answer message so a reloaded conversation still shows the
+            # sources the response was actually built from.
+            assistant_msg["research_sources"] = deepcopy(research_sources)
             
         if session_data.get("history", True):
             history_data.append(assistant_msg)
@@ -2528,7 +2562,10 @@ def _generate_chat_events_impl(
                 terminal_content = "\n\n".join(
                     part for part in (content_buf.strip(), message) if part
                 )
-                history_data.append({"role": "assistant", "content": terminal_content})
+                terminal_message = {"role": "assistant", "content": terminal_content}
+                if research_sources:
+                    terminal_message["research_sources"] = deepcopy(research_sources)
+                history_data.append(terminal_message)
             save_session_snapshot(
                 origin_name,
                 session_data,
@@ -2608,6 +2645,7 @@ def _generate_chat_events_impl(
 
         # The shared executor owns timeout uncertainty, side-effect ordering,
         # deterministic result order, cancellation, and resource guards.
+        new_research_sources = False
         for result in execute_tool_calls(
             calls_to_execute,
             cancellation_token=cancellation_token,
@@ -2619,6 +2657,17 @@ def _generate_chat_events_impl(
                 "name": result.spec.name,
                 "result": result.content,
             }
+            if agent_mode == AGENT_MODE_DEEP_RESEARCH:
+                before = len(research_sources)
+                merge_research_sources(
+                    research_sources,
+                    extract_research_sources(
+                        result.spec.name,
+                        result.spec.arguments,
+                        result.content,
+                    ),
+                )
+                new_research_sources = new_research_sources or len(research_sources) > before
             tool_message = result.as_tool_message()
             tool_results_by_index[original_index] = tool_message
             if original_index in pending_key_by_index:
@@ -2633,6 +2682,9 @@ def _generate_chat_events_impl(
                 "name": cached.get("tool_name") or cached.get("name") or "tool",
                 "result": cached.get("content", ""),
             }
+
+        if new_research_sources:
+            yield _research_sources_event(research_sources)
 
         tool_results = [tool_results_by_index[index] for index in sorted(tool_results_by_index)]
         _update_vault_index_loop_state(
@@ -3029,12 +3081,18 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_json_response(200, {"active_operations": operations})
             return
             
-        elif path == '/favicon.ico' or path == '/favicon.png':
-            self.serve_static_file('favicon.png', 'image/png')
+        elif path == '/favicon.ico':
+            self.serve_static_file('assets/favicon.jpg', 'image/jpeg')
             return
             
-        elif path == '/avatar.png':
-            self.serve_static_file('avatar.png', 'image/jpeg')
+        elif path.startswith('/assets/'):
+            filename = path[len('/assets/'):]
+            # Simple security check against path traversal
+            if not filename or '/' in filename or '\\' in filename or '..' in filename:
+                self.send_error(400, "Bad Request")
+                return
+            content_type = 'image/png' if filename.endswith('.png') else 'image/jpeg'
+            self.serve_static_file(os.path.join('assets', filename), content_type)
             return
             
         else:

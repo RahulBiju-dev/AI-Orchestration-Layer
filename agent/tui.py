@@ -118,6 +118,9 @@ class TuiDisplaySink:
     def content_final(self, text: str) -> None:
         self._call("ui_content_final", text)
 
+    def research_sources(self, sources: list[dict]) -> None:
+        self._call("ui_research_sources", list(sources or []))
+
     def generation_stats(
         self,
         *,
@@ -416,6 +419,107 @@ def build_app_class():
 
         def action_toggle(self) -> None:
             if not self._full_text.strip():
+                return
+            self._expanded = not self._expanded
+            self.set_class(self._expanded, "-expanded")
+            self.update(self._render_view())
+
+        def on_click(self, event) -> None:  # noqa: ANN001
+            event.stop()
+            self.action_toggle()
+
+    class SourcesFold(Static):
+        """Collapsed citation list shown under a Deep Research response.
+
+        Mirrors ThinkingFold's interaction (click / enter / space) so the
+        sources a research answer was built from stay one keystroke away
+        without pushing the answer itself off screen.
+        """
+
+        can_focus = True
+        DEFAULT_CSS = """
+        SourcesFold {
+            width: 100%;
+            color: $primary 40%;
+            border-left: solid $accent 40%;
+            padding: 0 1 0 2;
+            margin: 0 0 1 0;
+            background: transparent;
+        }
+        SourcesFold:hover {
+            background: $surface;
+            color: $secondary;
+        }
+        SourcesFold:focus {
+            background: $surface;
+            border-left: solid $accent;
+            color: $secondary;
+        }
+        SourcesFold.-expanded {
+            color: $secondary;
+            max-height: 24;
+            overflow-y: auto;
+            background: $boost;
+            padding: 1 2;
+        }
+        """
+
+        BINDINGS = [
+            Binding("enter", "toggle", "Expand/collapse", show=False),
+            Binding("space", "toggle", "Expand/collapse", show=False),
+        ]
+
+        def __init__(self, sources: list[dict], **kwargs) -> None:
+            self._sources = [
+                source for source in (sources or []) if isinstance(source, dict) and source.get("url")
+            ]
+            self._expanded = False
+            super().__init__(self._render_view(), **kwargs)
+
+        def _header(self) -> Text:
+            from agent.modes import research_sources_summary
+
+            chevron = "▾" if self._expanded else "▸"
+            line = Text()
+            line.append(f"{chevron}  ", style="#6b6b6b")
+            line.append(f"{GLYPH_SECTION} sources", style="#7aa2c8")
+            line.append(f"  ·  {research_sources_summary(self._sources)}", style="#555555")
+            if self._sources:
+                hint = "click to collapse" if self._expanded else "click to expand"
+                line.append(f"  ·  {hint}", style="#555555")
+            return line
+
+        def _body(self) -> Text:
+            body = Text()
+            for index, source in enumerate(self._sources, 1):
+                title = str(source.get("title") or source.get("host") or source.get("url") or "")
+                body.append(f"{index:>2}. ", style="#555555")
+                body.append(f"{title}\n", style="#c8c8c8")
+                body.append("    ")
+                body.append(str(source.get("url") or ""), style="underline #7aa2c8")
+                body.append("\n")
+                meta_parts = [part for part in (
+                    str(source.get("host") or ""),
+                    "page read" if source.get("fetched") else "",
+                    f"“{source.get('query')}”" if source.get("query") else "",
+                ) if part]
+                if meta_parts:
+                    body.append(f"    {f'  {GLYPH_DOT}  '.join(meta_parts)}\n", style="#6b6b6b")
+                snippet = " ".join(str(source.get("snippet") or "").split())
+                if snippet:
+                    body.append(f"    {snippet[:280]}\n", style="#7a7a7a")
+                if index != len(self._sources):
+                    body.append("\n")
+            return body
+
+        def _render_view(self) -> object:
+            header = self._header()
+            if not self._expanded or not self._sources:
+                return header
+            return Group(header, Text(""), self._body())
+
+        def action_toggle(self) -> None:
+            if not self._sources:
                 return
             self._expanded = not self._expanded
             self.set_class(self._expanded, "-expanded")
@@ -1829,6 +1933,20 @@ def build_app_class():
             else:
                 self._stream_widget.update(panel)
             self._stream_widget = None
+            self._chat().scroll_end(animate=False)
+
+        def ui_research_sources(self, sources: list[dict]) -> None:
+            """Mount the citation dropdown directly beneath the response."""
+            cited = [
+                source for source in (sources or []) if isinstance(source, dict) and source.get("url")
+            ]
+            if not cited:
+                return
+            fold = SourcesFold(cited)
+            try:
+                self._chat().mount(fold)
+            except Exception:
+                return
             self._chat().scroll_end(animate=False)
 
         def ui_stats(self, elapsed: float, total_tokens: int, tokens_per_sec: float) -> None:

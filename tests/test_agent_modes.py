@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from agent.runtime_config import RuntimeConfigurationError
@@ -9,11 +12,14 @@ from agent.modes import (
     AGENT_MODE_SLASH_COMMANDS,
     DEEP_RESEARCH_COMPACT_MARKER,
     compact_deep_research_messages,
+    extract_research_sources,
     force_hard_web_search_schema,
     force_high_tool_difficulty,
+    merge_research_sources,
     normalize_agent_mode,
     parse_research_queries,
     research_query_count,
+    research_sources_summary,
 )
 
 
@@ -261,6 +267,259 @@ class AgentModePolicyTests(unittest.TestCase):
             web._normalize_session_settings({"agent_mode": "invented"})
 
 
+class ResearchCitationTests(unittest.TestCase):
+    def test_search_results_become_sources_with_query_provenance(self):
+        payload = json.dumps([
+            {
+                "title": "Ignition report",
+                "url": "https://example.com/report",
+                "snippet": "The facility reached ignition.",
+                "content": {"description": "full page"},
+            },
+            {"title": "Commentary", "url": "https://blog.test/post", "snippet": "opinion"},
+        ])
+        sources = extract_research_sources(
+            "web_search",
+            {"query": "fusion ignition evidence", "difficulty": "hard"},
+            payload,
+        )
+
+        self.assertEqual([source["url"] for source in sources], [
+            "https://example.com/report",
+            "https://blog.test/post",
+        ])
+        self.assertEqual(sources[0]["host"], "example.com")
+        self.assertEqual(sources[0]["query"], "fusion ignition evidence")
+        self.assertTrue(sources[0]["fetched"])
+        self.assertFalse(sources[1]["fetched"])
+
+    def test_only_public_http_sources_are_citable(self):
+        payload = json.dumps({"results": [
+            {"title": "script", "url": "javascript:alert(1)"},
+            {"title": "file", "url": "file:///etc/passwd"},
+            {"title": "credentials", "url": "https://user:pass@example.com/x"},
+            {"title": "ok", "url": "https://example.org/a"},
+        ]})
+        sources = extract_research_sources("web_search", {"query": "q"}, payload)
+        self.assertEqual([source["url"] for source in sources], ["https://example.org/a"])
+
+    def test_non_research_tools_and_unparsable_results_cite_nothing(self):
+        self.assertEqual(extract_research_sources("read_file", {}, "{}"), [])
+        self.assertEqual(extract_research_sources("web_search", {}, "not json"), [])
+        self.assertEqual(
+            extract_research_sources("web_scrape", {"url": "https://x.io"}, '{"error":"blocked"}'),
+            [],
+        )
+
+    def test_repeat_sources_merge_and_a_scrape_upgrades_the_search_hit(self):
+        collected: list[dict] = []
+        merge_research_sources(collected, extract_research_sources(
+            "web_search",
+            {"query": "first"},
+            json.dumps([{"title": "Report", "url": "https://example.com/report/"}]),
+        ))
+        merge_research_sources(collected, extract_research_sources(
+            "web_search",
+            {"query": "second"},
+            json.dumps([{"title": "Report", "url": "https://example.com/report"}]),
+        ))
+        merge_research_sources(collected, extract_research_sources(
+            "web_scrape",
+            {"url": "https://example.com/report"},
+            json.dumps({
+                "url": "https://example.com/report",
+                "title": "Report",
+                "description": "Full text of the report",
+            }),
+        ))
+
+        self.assertEqual(len(collected), 1)
+        self.assertEqual(collected[0]["query"], "first")
+        self.assertTrue(collected[0]["fetched"])
+        self.assertEqual(collected[0]["snippet"], "Full text of the report")
+
+    def test_citation_list_is_bounded(self):
+        collected: list[dict] = []
+        merge_research_sources(
+            collected,
+            [
+                {"url": f"https://example.com/{index}", "title": str(index)}
+                for index in range(200)
+            ],
+            limit=5,
+        )
+        self.assertEqual(len(collected), 5)
+
+    def test_summary_counts_sources_and_distinct_sites(self):
+        self.assertEqual(research_sources_summary([]), "no sources")
+        self.assertEqual(
+            research_sources_summary([{"url": "https://a.io/1", "host": "a.io"}]),
+            "1 link",
+        )
+        self.assertEqual(
+            research_sources_summary([
+                {"url": "https://a.io/1", "host": "a.io"},
+                {"url": "https://a.io/2", "host": "a.io"},
+            ]),
+            "2 links · 1 site",
+        )
+
+    def test_terminal_deep_research_shows_sources_and_keeps_them_on_the_answer(self):
+        from agent import core
+
+        session = core._new_session_state()
+        session["agent_mode"] = "deep-research"
+        history: list[dict] = []
+        searching = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "function": {
+                    "name": "web_search",
+                    "arguments": {"query": "ignition evidence", "difficulty": "hard"},
+                },
+            }],
+        }
+        answer = {"role": "assistant", "content": "Here is the synthesis."}
+        tool_result = [{
+            "role": "tool",
+            "tool_name": "web_search",
+            "name": "web_search",
+            "content": json.dumps([{
+                "title": "Ignition report",
+                "url": "https://example.com/report",
+                "snippet": "evidence",
+            }]),
+        }]
+        with (
+            patch.object(core, "_stream_complete_response", side_effect=[searching, answer]),
+            patch.object(
+                core,
+                "_process_tool_calls_with_turn_guard",
+                MagicMock(return_value=tool_result),
+            ),
+            patch.object(core, "_check_and_compact_history"),
+            patch.object(core, "print_research_sources") as show_sources,
+        ):
+            core.process_user_turn("compare the evidence", session, history, "system")
+
+        shown = show_sources.call_args.args[0]
+        self.assertEqual([source["url"] for source in shown], ["https://example.com/report"])
+        self.assertEqual(shown[0]["query"], "ignition evidence")
+        self.assertEqual(
+            history[-1]["research_sources"][0]["url"],
+            "https://example.com/report",
+        )
+
+    def test_normal_mode_terminal_turn_reports_no_sources(self):
+        from agent import core
+
+        session = core._new_session_state()
+        history: list[dict] = []
+        searching = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "function": {"name": "web_search", "arguments": {"query": "topic"}},
+            }],
+        }
+        answer = {"role": "assistant", "content": "done"}
+        tool_result = [{
+            "role": "tool",
+            "tool_name": "web_search",
+            "name": "web_search",
+            "content": json.dumps([{"title": "T", "url": "https://example.com/t"}]),
+        }]
+        with (
+            patch.object(core, "_stream_complete_response", side_effect=[searching, answer]),
+            patch.object(
+                core,
+                "_process_tool_calls_with_turn_guard",
+                MagicMock(return_value=tool_result),
+            ),
+            patch.object(core, "_check_and_compact_history"),
+            patch.object(core, "print_research_sources") as show_sources,
+        ):
+            core.process_user_turn("what happened?", session, history, "system")
+
+        show_sources.assert_not_called()
+        self.assertNotIn("research_sources", history[-1])
+
+    def test_web_deep_research_streams_sources_and_stores_them_on_the_answer(self):
+        from agent import web
+        from agent.cancellation import CancellationToken
+        from agent.runtime_config import get_runtime_config
+        from agent.tool_runner import ToolCallResult, normalize_tool_calls
+
+        search_payload = json.dumps([{
+            "title": "Ignition report",
+            "url": "https://example.com/report",
+            "snippet": "The facility reached ignition.",
+        }])
+
+        def fake_execute(calls, **kwargs):
+            return [
+                ToolCallResult(spec=spec, content=search_payload)
+                for spec in normalize_tool_calls(calls)
+            ]
+
+        def fake_plan(*args, **kwargs):
+            yield {"type": "status", "message": "planning", "color": "blue"}
+            return ["ignition evidence"]
+
+        answer = SimpleNamespace(
+            message=SimpleNamespace(
+                content="Synthesis with citations.",
+                thinking="",
+                planning="",
+                tool_calls=[],
+            ),
+            prompt_eval_count=0,
+            eval_count=0,
+            done_reason="stop",
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(web, "_SESSIONS_DIR", temporary),
+            patch.object(web, "_deep_research_plan_events", fake_plan),
+            patch.object(web, "execute_tool_calls", fake_execute),
+            patch.object(web, "_model_chat", return_value=iter([answer])),
+            patch.object(web, "title_temporary_session", return_value=None),
+        ):
+            runtime = get_runtime_config()
+            session = {
+                **web._session_from_runtime(runtime),
+                "agent_mode": "deep-research",
+            }
+            history: list[dict] = []
+            events = list(web._generate_chat_events_impl(
+                "compare the evidence",
+                session,
+                history,
+                "Active Session",
+                cancellation_token=CancellationToken(),
+                publish_global=False,
+                client_id="client-one",
+            ))
+
+        citation_events = [event for event in events if event.get("type") == "research_sources"]
+        self.assertTrue(citation_events)
+        self.assertEqual(citation_events[-1]["mode"], "deep-research")
+        self.assertEqual(
+            [source["url"] for source in citation_events[-1]["sources"]],
+            ["https://example.com/report"],
+        )
+        self.assertEqual(citation_events[-1]["sources"][0]["query"], "ignition evidence")
+        answers = [
+            message for message in history
+            if message.get("role") == "assistant" and message.get("content")
+        ]
+        self.assertEqual(
+            answers[-1]["research_sources"][0]["url"],
+            "https://example.com/report",
+        )
+
+
 class AgentModeFrontendTests(unittest.TestCase):
     def test_composer_mode_menu_and_clear_control_are_wired(self):
         self.assertIn('id="mode-trigger"', HTML)
@@ -292,6 +551,26 @@ class AgentModeFrontendTests(unittest.TestCase):
         self.assertIn("background: color-mix(in srgb, var(--option-tone) 14%, var(--surface))", STYLE)
         self.assertNotIn("rgba(10, 14, 27, 0.98)", STYLE)
         self.assertNotIn("var(--accent-2)", STYLE)
+
+    def test_sources_dropdown_is_wired_in_the_web_ui(self):
+        self.assertIn('case "research_sources":', APP)
+        self.assertIn("function sourcesBlock(sources)", APP)
+        self.assertIn("function upsertStreamSources(sources)", APP)
+        self.assertIn("function safeSourceURL(value)", APP)
+        self.assertIn('detailBlock("Sources", sourcesSummary(cited)', APP)
+        self.assertIn('link.rel = "noopener noreferrer"', APP)
+        self.assertIn("normalizeSources(message.research_sources)", APP)
+        self.assertIn(".sources-block", STYLE)
+        self.assertIn(".source-list", STYLE)
+        self.assertIn(".source-snippet", STYLE)
+
+    def test_sources_fold_is_wired_in_the_tui(self):
+        tui_source = (ROOT / "agent" / "tui.py").read_text(encoding="utf-8")
+        terminal_source = (ROOT / "agent" / "terminal.py").read_text(encoding="utf-8")
+        self.assertIn("class SourcesFold(Static):", tui_source)
+        self.assertIn("def ui_research_sources(self, sources: list[dict]) -> None:", tui_source)
+        self.assertIn("def research_sources(self, sources: list[dict]) -> None:", tui_source)
+        self.assertIn("def print_research_sources(sources: list[dict]) -> None:", terminal_source)
 
 
 if __name__ == "__main__":

@@ -369,11 +369,11 @@ input:focus-visible {
 
 .star {
   position: absolute;
-  width: 2px;
-  height: 2px;
+  width: 3px;
+  height: 3px;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 42%, transparent);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 60%, transparent);
   animation: ambient-star 8s ease-in-out infinite;
 }
 
@@ -382,38 +382,43 @@ input:focus-visible {
 .star-c { right: 18%; bottom: 17%; opacity: 0.5; animation-delay: -5s; }
 
 @keyframes ambient-star {
-  0%, 100% { opacity: 0.18; }
-  50% { opacity: 0.52; }
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.9; }
 }
 
 .app-shell {
   position: relative;
   z-index: 1;
-  display: grid;
-  grid-template-columns: 286px minmax(0, 1fr);
+  display: flex;
   width: 100%;
   height: 100vh;
   height: 100dvh;
-  gap: 12px;
   overflow: hidden;
-  padding: 12px;
   background: transparent;
-}
-
-.sidebar,
-.chat-shell {
-  border: 1px solid var(--line-strong);
-  background: var(--glass);
-  box-shadow: var(--shadow);
 }
 
 .sidebar {
   display: flex;
   flex-direction: column;
-  min-width: 0;
-  min-height: 0;
+  flex-shrink: 0;
+  width: 288px;
+  height: 100%;
   padding: 24px 20px 20px;
-  border-radius: 14px;
+  border-right: 1px solid var(--line-strong);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  z-index: 10;
+}
+
+.chat-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  background: transparent;
+  position: relative;
 }
 
 .brand {
@@ -443,10 +448,11 @@ input:focus-visible {
 }
 
 .brand h1 {
-  font-family: var(--mono);
-  font-size: 1.15rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-family: 'Syne', var(--mono);
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.05em;
+  text-transform: uppercase;
 }
 
 .eyebrow,
@@ -670,10 +676,13 @@ input:focus-visible {
 .chat-topbar {
   display: flex;
   align-items: center;
-  min-height: 74px;
-  padding: 13px clamp(24px, 4vw, 58px);
+  min-height: 64px;
+  padding: 0 clamp(24px, 4vw, 58px);
   border-bottom: 1px solid var(--line);
-  background: var(--bg);
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  z-index: 40;
 }
 
 .chat-topbar > div:first-child {
@@ -911,13 +920,27 @@ input:focus-visible {
 }
 
 .message {
-  display: block;
+  display: flex;
+  gap: 16px;
   width: min(100%, var(--content-width));
   margin: 0 auto 30px;
 }
 
 .avatar {
-  display: none;
+  display: block;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-low);
+}
+
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .message-stack {
@@ -926,34 +949,36 @@ input:focus-visible {
 }
 
 .message-stack::before {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 8px;
   color: var(--faint);
   font-family: var(--mono);
   font-size: 0.77rem;
-  letter-spacing: 0.05em;
-  text-transform: lowercase;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
 .message.user .message-stack::before {
-  content: "you";
+  content: "You";
   color: var(--muted);
 }
 
 .message.assistant .message-stack::before {
-  content: "selene";
+  content: "Selene";
 }
 
 .bubble {
   overflow-wrap: anywhere;
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--line-strong);
-  border-radius: 10px;
-  padding: 18px 20px;
-  background: var(--surface);
-  color: var(--text-soft);
-  font-size: 1.08rem;
-  line-height: 1.65;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  padding: 24px;
+  background: var(--surface-low);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 1.1rem;
+  line-height: 1.6;
 }
 
 .bubble.error {
@@ -975,9 +1000,10 @@ input:focus-visible {
 }
 
 .message.user .bubble {
-  border-left-color: var(--accent);
-  background: var(--panel);
+  border-radius: 16px 4px 16px 16px;
+  background: var(--surface-low);
   color: var(--text);
+  border: 1px solid var(--line-strong);
 }
 
 .message-actions {
@@ -1221,12 +1247,11 @@ input:focus-visible {
 }
 
 .detail-block {
-  margin-bottom: 10px;
+  margin-bottom: 12px;
   overflow: hidden;
-  border: 1px solid var(--line);
-  border-left: 2px solid var(--line-strong);
-  border-radius: 8px;
-  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  background: var(--surface-low);
 }
 
 .block-toggle {
@@ -1234,11 +1259,12 @@ input:focus-visible {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 12px 15px;
-  background: var(--surface);
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 0.85rem;
+  padding: 16px 20px;
+  background: transparent;
+  color: var(--text-soft);
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  font-weight: 500;
   text-align: left;
 }
 
@@ -1260,9 +1286,12 @@ input:focus-visible {
   display: flex;
   align-items: center;
   flex: 1;
-  gap: 7px;
+  gap: 12px;
   min-width: 0;
-  font-weight: 500;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.85rem;
 }
 
 .pill {
@@ -1306,6 +1335,89 @@ input:focus-visible {
   animation: oslo-pulse 1.1s steps(2, end) infinite;
 }
 
+/* Deep Research citations — collapsed dropdown under the answer. */
+.sources-block {
+  margin-top: 4px;
+  border-left-color: var(--accent, var(--line-strong));
+}
+
+.sources-block .block-body {
+  max-height: 380px;
+  white-space: normal;
+}
+
+.source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: none;
+}
+
+.source-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.source-link {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-soft);
+  text-decoration: none;
+}
+
+.source-link:hover .source-title,
+.source-link:focus-visible .source-title {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.source-index {
+  flex: none;
+  min-width: 1.4em;
+  color: var(--faint);
+  font-size: 0.78rem;
+  text-align: right;
+}
+
+.source-title {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  padding-left: calc(1.4em + 8px);
+  color: var(--faint);
+  font-size: 0.75rem;
+}
+
+.source-query {
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-snippet {
+  margin: 0;
+  padding-left: calc(1.4em + 8px);
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
 /* Compacted older turns are session bookkeeping, not a spoken reply. */
 .message.compaction-notice .avatar {
   visibility: hidden;
@@ -1339,14 +1451,15 @@ input:focus-visible {
 .tool-indicator {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 5px;
-  padding: 9px 11px;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 0.8rem;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 12px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface-low);
+  color: var(--text-soft);
+  font-family: var(--sans);
+  font-size: 0.85rem;
 }
 
 .block-body .tool-indicator {
@@ -1369,9 +1482,11 @@ input:focus-visible {
 }
 
 .composer {
-  padding: 18px clamp(24px, 5vw, 70px) 24px;
+  padding: 16px clamp(24px, 5vw, 70px) 24px;
   border-top: 0;
-  background: var(--glass);
+  background: transparent;
+  position: relative;
+  z-index: 20;
 }
 
 .composer-inner {
@@ -1379,9 +1494,12 @@ input:focus-visible {
   width: min(100%, var(--content-width));
   margin: 0 auto;
   border: 1px solid var(--line-strong);
-  border-radius: 12px;
-  background: var(--surface-low);
+  border-radius: 24px;
+  background: color-mix(in srgb, var(--bg) 95%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   transition: border-color 160ms ease;
+  padding: 12px;
 }
 
 .composer-inner:focus-within {
@@ -1404,29 +1522,18 @@ textarea {
 }
 
 #chat-input {
-  min-height: 70px;
+  min-height: 52px;
   max-height: min(240px, 30dvh);
-  padding: 21px 20px 10px 42px;
-  font-family: var(--mono);
-  font-size: 1rem;
-  border-radius: 11px 11px 0 0;
+  padding: 14px 20px 14px 20px;
+  font-family: var(--sans);
+  font-size: 1.1rem;
+  border-radius: 24px;
   background: var(--surface-low);
-}
-
-.composer-inner::before {
-  content: ">";
-  position: absolute;
-  top: 22px;
-  left: 19px;
-  color: var(--text-soft);
-  font-family: var(--mono);
-  font-size: 1rem;
-  font-weight: 600;
-  pointer-events: none;
+  margin-top: 8px;
 }
 
 textarea::placeholder {
-  color: var(--faint);
+  color: color-mix(in srgb, var(--faint) 60%, transparent);
 }
 
 .slash-menu {
@@ -1498,9 +1605,9 @@ textarea::placeholder {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 11px 11px 19px;
-  border-radius: 0 0 11px 11px;
-  background: var(--surface-low);
+  padding: 10px 4px 0 4px;
+  border-radius: 0 0 24px 24px;
+  background: transparent;
 }
 
 .composer-meta {
@@ -1956,8 +2063,11 @@ textarea::placeholder {
 }
 
 .settings-header h2 {
-  font-family: var(--mono);
-  font-size: 1.16rem;
+  font-family: 'Syne', var(--mono);
+  font-size: 1.25rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: -0.02em;
 }
 
 .icon-btn {
@@ -1986,12 +2096,12 @@ textarea::placeholder {
 }
 
 .settings-group h3 {
-  margin: 0 0 12px;
+  margin: 0 0 16px;
   color: var(--faint);
-  font-family: var(--mono);
-  font-size: 0.77rem;
-  font-weight: 500;
-  letter-spacing: 0.08em;
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
