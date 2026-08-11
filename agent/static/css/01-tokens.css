@@ -54,13 +54,13 @@
 
 :root {
   color-scheme: dark;
-  --bg: #101010;
-  --surface: #171717;
-  --panel: #1f1f1f;
-  --elevated: #1c1c1c;
+  --bg: #0b0b0b;
+  --surface: #131313;
+  --panel: #1a1a1a;
+  --elevated: #161616;
   --primary: #cfcfcf;
-  --line: #2a2a2a;
-  --line-strong: #333333;
+  --line: #242424;
+  --line-strong: #2e2e2e;
   --line-focus: #9a9a9a;
   --text: #f2f2f2;
   --text-soft: #d8d8d8;
@@ -149,11 +149,11 @@
   --scrim-blur: 14px;
 
   /* ── Radii and spacing ──────────────────────────────────────────── */
-  --r-xs: 6px;
-  --r-sm: 9px;
-  --r-md: 13px;
-  --r-lg: 18px;
-  --r-xl: 24px;
+  --r-xs: 2px;
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-xl: 10px;
   --r-full: 999px;
   --s-1: 4px;
   --s-2: 8px;

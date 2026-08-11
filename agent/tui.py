@@ -118,6 +118,9 @@ class TuiDisplaySink:
     def content_final(self, text: str) -> None:
         self._call("ui_content_final", text)
 
+    def response_model(self, label: str, detail: str | None = None) -> None:
+        self._call("ui_response_model", label, detail)
+
     def generation_stats(
         self,
         *,
@@ -175,7 +178,7 @@ def _import_textual():
         from textual.app import App, ComposeResult
         from textual.binding import Binding
         from textual.containers import Horizontal, Vertical, VerticalScroll
-        from textual.widgets import Input, Static
+        from textual.widgets import Static, TextArea
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
             "The Selene TUI requires the 'textual' package. "
@@ -188,8 +191,8 @@ def _import_textual():
         "Horizontal": Horizontal,
         "Vertical": Vertical,
         "VerticalScroll": VerticalScroll,
-        "Input": Input,
         "Static": Static,
+        "TextArea": TextArea,
     }
 
 
@@ -230,12 +233,95 @@ def build_app_class():
     Horizontal = t["Horizontal"]
     Vertical = t["Vertical"]
     VerticalScroll = t["VerticalScroll"]
-    Input = t["Input"]
     Static = t["Static"]
+    TextArea = t["TextArea"]
 
     # Colors come from Textual CSS variables ($background, $selene-*, …)
     # driven by agent.tui_themes. Hardcoded greys remain only as Rich fallbacks
     # until a theme is applied on mount.
+
+    class PromptArea(TextArea):
+        """Auto-growing prompt box: Enter sends, Shift/Alt+Enter adds a line.
+
+        The composer used to be a single-line ``Input``. A ``TextArea`` keeps
+        long prompts readable — the box grows with the text (and with soft-wrapped
+        lines) up to ``max-height`` and then scrolls. ``value`` /
+        ``cursor_position`` mirror the old ``Input`` surface so the rest of the
+        app (and saved muscle memory) keeps working.
+        """
+
+        # Terminals disagree on which chord they emit for a "soft" newline, so
+        # accept every common one rather than betraying the user's terminal.
+        NEWLINE_KEYS = frozenset(
+            {"shift+enter", "alt+enter", "ctrl+enter", "ctrl+shift+enter"}
+        )
+
+        def __init__(self, *, placeholder: str = "", **kwargs) -> None:
+            super().__init__(
+                "",
+                placeholder=placeholder,
+                soft_wrap=True,
+                show_line_numbers=False,
+                tab_behavior="focus",
+                **kwargs,
+            )
+
+        # ── Input-compatible surface ──────────────────────────────────
+        @property
+        def value(self) -> str:
+            return self.text
+
+        @value.setter
+        def value(self, new_value: str) -> None:
+            text = str(new_value or "")
+            if text == self.text:
+                return
+            self.load_text(text)
+            self.move_cursor(self.document.end)
+
+        @property
+        def cursor_position(self) -> int:
+            """Caret offset within the whole text (``Input`` semantics)."""
+            row, column = self.cursor_location
+            lines = self.text.split("\n")
+            offset = sum(len(line) + 1 for line in lines[:row])
+            return offset + min(column, len(lines[row]) if row < len(lines) else 0)
+
+        @cursor_position.setter
+        def cursor_position(self, offset: int) -> None:
+            target = max(0, int(offset or 0))
+            row = 0
+            for line in self.text.split("\n"):
+                if target <= len(line):
+                    break
+                target -= len(line) + 1
+                row += 1
+            self.move_cursor((row, target))
+
+        def clear(self) -> None:
+            self.value = ""
+
+        # ── Keys ──────────────────────────────────────────────────────
+        async def _on_key(self, event) -> None:  # noqa: ANN001
+            key = event.key
+            if key in self.NEWLINE_KEYS:
+                event.stop()
+                event.prevent_default()
+                self.insert("\n")
+                return
+            # The app gets first refusal so Enter still sends and the menus
+            # keep their arrow / tab navigation instead of moving the caret.
+            handler = getattr(self.app, "handle_prompt_key", None)
+            if handler is not None:
+                try:
+                    consumed = bool(handler(self, event))
+                except Exception:
+                    consumed = False
+                if consumed:
+                    event.stop()
+                    event.prevent_default()
+                    return
+            await super()._on_key(event)
 
     class ChatView(VerticalScroll):
         """Scrollable transcript region."""
@@ -263,28 +349,41 @@ def build_app_class():
             padding: 0 1;
             color: $secondary;
         }
-        /* —— Important: user prompts & model responses —— */
+        /* —— Important: user prompts & model responses ——
+           Two different *shapes*, not just two colors: the prompt is a filled,
+           outlined bubble in the theme's user hue, the response is an open
+           block behind an accent rule. They stay distinguishable in the
+           monochrome themes and for anyone who can't rely on hue alone. */
         MessageBlock.user {
-            color: $foreground;
-            background: $panel;
-            border-left: heavy $accent;
-            padding: 1 2;
-            margin: 0 0 1 0;
+            color: $selene-user-soft;
+            background: $selene-user-bg;
+            border: solid $selene-user;
+            padding: 0 1;
+            margin: 1 0 1 0;
         }
         MessageBlock.assistant {
             color: $foreground;
-            background: $panel;
-            border-left: heavy $accent;
-            padding: 1 2;
+            background: transparent;
+            border-left: heavy $selene-assistant;
+            padding: 0 2;
             margin: 0 0 1 0;
         }
         /* —— Secondary: slash / status / tools / thinking —— */
         MessageBlock.command {
             color: $secondary;
             background: transparent;
-            border-left: solid $primary 20%;
+            border-left: solid $selene-user 40%;
             padding: 0 1 0 2;
             margin: 0 0 0 0;
+            text-style: dim;
+        }
+        /* Faint 'answered by <model>' footer under a response. */
+        MessageBlock.meta {
+            color: $selene-faint;
+            background: transparent;
+            padding: 0 1 0 3;
+            margin: 0 0 1 0;
+            height: 1;
             text-style: dim;
         }
         MessageBlock.thinking {
@@ -383,6 +482,16 @@ def build_app_class():
             self._expanded = False
             super().__init__(self._render_view(), **kwargs)
 
+        def _palette(self) -> dict[str, str]:
+            from agent.tui_themes import DEFAULT_THEME, rich_palette
+
+            try:
+                # Built before mount, so the app may not be reachable yet.
+                palette = getattr(self.app, "_selene_palette", None)
+            except Exception:
+                palette = None
+            return palette or rich_palette(DEFAULT_THEME)
+
         def _token_label(self) -> str:
             if self._tokens <= 0:
                 return ""
@@ -390,28 +499,29 @@ def build_app_class():
             return f"  ·  ~{self._tokens} {unit}"
 
         def _header(self) -> Text:
+            pal = self._palette()
             chevron = "▾" if self._expanded else "▸"
             line = Text()
             if self._interrupted:
-                line.append(f"{chevron}  ", style="#8a8a60")
-                line.append(f"{GLYPH_WARN} {self._title}", style="#8a8a60")
+                line.append(f"{chevron}  ", style=pal["warning"])
+                line.append(f"{GLYPH_WARN} {self._title}", style=pal["warning"])
             else:
-                line.append(f"{chevron}  ", style="#6b6b6b")
-                line.append(f"{GLYPH_OK} {self._title}", style="#6a8a6a")
+                line.append(f"{chevron}  ", style=pal["muted"])
+                line.append(f"{GLYPH_OK} {self._title}", style=pal["success"])
             if self._tokens:
-                line.append(self._token_label(), style="#555555")
+                line.append(self._token_label(), style=pal["faint"])
             if self._full_text.strip():
                 hint = "click to collapse" if self._expanded else "click to expand"
-                line.append(f"  ·  {hint}", style="#555555")
+                line.append(f"  ·  {hint}", style=pal["faint"])
             else:
-                line.append("  ·  (empty)", style="#555555")
+                line.append("  ·  (empty)", style=pal["faint"])
             return line
 
         def _render_view(self) -> object:
             header = self._header()
             if not self._expanded or not self._full_text.strip():
                 return header
-            body = Text(self._full_text.rstrip(), style="#6b6b6b")
+            body = Text(self._full_text.rstrip(), style=self._palette()["muted"])
             return Group(header, Text(""), body)
 
         def action_toggle(self) -> None:
@@ -665,12 +775,13 @@ def build_app_class():
             self.update("")
 
     class SpeechMenu(Vertical):
-        """Centered voice popup: animated mic + editable transcript.
+        """Centered voice popup: status header, live meter, editable transcript.
 
         Visual states:
           • idle      — soft breathing mic, quiet wave dots
-          • recording — solid pulse + VU-style wave bars
-          • finishing/error — stable state with concise in-popup detail
+          • recording — solid pulse, VU meter, elapsed timer
+          • finishing — stable state while the last phrase is transcribed
+          • error     — the reason stays inside the card, typing still works
         """
 
         DEFAULT_CSS = """
@@ -681,40 +792,36 @@ def build_app_class():
             width: 100%;
             height: 100%;
             align: center middle;
-            background: $background 82%;
+            background: $background 85%;
         }
         SpeechMenu.-visible {
             display: block;
         }
         #speech-card {
-            width: 76;
+            width: 78;
             max-width: 96%;
             height: auto;
-            background: $boost;
-            border: round $primary;
-            padding: 1 2 1 2;
+            background: $surface;
+            border: round $primary 50%;
+            padding: 1 2;
         }
         SpeechMenu.-recording #speech-card {
             border: round $error;
         }
-        #speech-title {
+        SpeechMenu.-error #speech-card {
+            border: round $warning;
+        }
+        /* Header: ◉ voice · state ................ 00:07 */
+        #speech-head {
             height: 1;
             width: 100%;
-            color: $primary 50%;
-            text-style: dim;
-            background: transparent;
             margin: 0 0 1 0;
         }
-        #speech-row {
-            height: 3;
-            width: 100%;
-            align: left middle;
-        }
         #speech-mic {
-            width: 3;
-            height: 3;
-            min-width: 3;
-            content-align: center middle;
+            width: 2;
+            height: 1;
+            min-width: 2;
+            content-align: left middle;
             color: $primary;
             text-style: bold;
             background: transparent;
@@ -722,25 +829,40 @@ def build_app_class():
         }
         SpeechMenu.-recording #speech-mic {
             color: $error;
-            text-style: bold;
         }
-        #speech-wave {
-            width: 10;
-            height: 3;
-            min-width: 10;
-            content-align: center middle;
-            color: $primary 45%;
-            text-style: dim;
+        SpeechMenu.-error #speech-mic {
+            color: $warning;
+        }
+        #speech-title {
+            width: 1fr;
+            height: 1;
+            color: $selene-text-soft;
             background: transparent;
-            padding: 0 1 0 0;
+            padding: 0 0 0 1;
         }
-        SpeechMenu.-recording #speech-wave {
-            color: $error;
-            text-style: none;
+        #speech-timer {
+            width: auto;
+            height: 1;
+            color: $selene-faint;
+            content-align: right middle;
+            background: transparent;
+            text-style: dim;
+        }
+        /* Transcript: soft-wrapping, grows with what was said. */
+        #speech-body {
+            height: auto;
+            width: 100%;
+            border: round $primary 25%;
+            padding: 0 1;
+            background: $background;
+        }
+        SpeechMenu.-recording #speech-body {
+            border: round $error 60%;
         }
         #speech-input {
             width: 1fr;
-            height: 3;
+            height: auto;
+            max-height: 8;
             background: transparent;
             color: $foreground;
             border: none;
@@ -751,8 +873,23 @@ def build_app_class():
             background: transparent;
             border: none;
         }
-        #speech-input > .input--placeholder {
+        #speech-input > .text-area--placeholder {
             color: $primary 40%;
+        }
+        /* VU meter under the transcript. */
+        #speech-wave {
+            height: 1;
+            width: 100%;
+            content-align: left middle;
+            color: $primary 45%;
+            text-style: dim;
+            background: transparent;
+            margin: 1 0 0 0;
+            padding: 0;
+        }
+        SpeechMenu.-recording #speech-wave {
+            color: $error;
+            text-style: none;
         }
         #speech-hint {
             height: 1;
@@ -763,53 +900,73 @@ def build_app_class():
             padding: 0;
             margin: 1 0 0 0;
         }
+        #speech-detail {
+            height: auto;
+            max-height: 3;
+            width: 100%;
+            color: $warning;
+            background: transparent;
+            padding: 0;
+            margin: 1 0 0 0;
+            display: none;
+        }
+        SpeechMenu.-error #speech-detail {
+            display: block;
+        }
         """
 
         # Idle: soft “breathing” mic. Recording: hard pulse.
         _IDLE_MIC = ("○", "◔", "◑", "◕", "◉", "◕", "◑", "◔")
         _REC_MIC = ("●", "◉", "◎", "◉")
-        # Idle dots vs VU meter when live.
-        _IDLE_WAVE = ("· · · ·", " · · · ", "· · · ·", " · · · ")
-        _REC_WAVE = (
-            "▁▂▃▄▅▄▃▂",
-            "▂▃▄▅▆▅▄▃",
-            "▃▄▅▆▇▆▅▄",
-            "▄▅▆▇█▇▆▅",
-            "▅▆▇█▇▆▅▄",
-            "▆▇█▇▆▅▄▃",
-            "▇█▇▆▅▄▃▂",
-            "█▇▆▅▄▃▂▁",
-            "▇▆▅▄▃▂▁▂",
-            "▆▅▄▃▂▁▂▃",
-            "▅▄▃▂▁▂▃▄",
-            "▄▃▂▁▂▃▄▅",
-        )
+        _FINISH_MIC = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+        _WAVE_CELLS = 24
+        # Idle: a slow travelling ripple. Recording: a fuller VU sweep.
+        _IDLE_LEVELS = (1, 1, 2, 2, 3, 2, 1, 1)
+        _REC_LEVELS = (1, 2, 3, 5, 6, 7, 8, 7, 6, 4, 3, 2)
+        _BARS = " ▁▂▃▄▅▆▇█"
+
+        _STATE_LABELS = {
+            "idle": "ready",
+            "recording": "listening",
+            "finishing": "transcribing",
+            "error": "unavailable",
+        }
+        _STATE_HINTS = {
+            "idle": "enter  start listening  ·  esc  close",
+            "recording": "enter  stop & send  ·  esc  cancel",
+            "finishing": "finishing the last phrase  ·  esc  cancel",
+            "error": "type your message  ·  enter  send  ·  esc  close",
+        }
 
         def __init__(self, **kwargs) -> None:
             super().__init__(**kwargs)
             self._anim_frame = 0
             self._anim_timer = None
             self._recording = False
+            self._state = "idle"
+            self._started_at = 0.0
 
         def compose(self) -> ComposeResult:
             with Vertical(id="speech-card"):
-                yield Static("voice", id="speech-title", markup=False)
-                with Horizontal(id="speech-row"):
+                with Horizontal(id="speech-head"):
                     yield Static(self._IDLE_MIC[0], id="speech-mic", markup=False)
-                    yield Static(self._IDLE_WAVE[0], id="speech-wave", markup=False)
-                    yield Input(
-                        placeholder="Speak or type…",
+                    yield Static("voice", id="speech-title", markup=False)
+                    yield Static("", id="speech-timer", markup=False)
+                with Vertical(id="speech-body"):
+                    yield PromptArea(
+                        placeholder="Speak, or type your message…",
                         id="speech-input",
                     )
+                yield Static("", id="speech-wave", markup=False)
                 yield Static(
-                    "enter start  ·  enter again send  ·  esc close",
-                    id="speech-hint",
-                    markup=False,
+                    self._STATE_HINTS["idle"], id="speech-hint", markup=False
                 )
+                yield Static("", id="speech-detail", markup=False)
 
         def on_mount(self) -> None:
             # Keep the timer alive; _tick_anim no-ops while hidden.
             self._anim_timer = self.set_interval(0.11, self._tick_anim)
+            self._render_state()
 
         def on_unmount(self) -> None:
             timer = self._anim_timer
@@ -820,13 +977,73 @@ def build_app_class():
                 except Exception:
                     pass
 
-        def _tick_anim(self) -> None:
-            if not self.has_class("-visible"):
+        def _palette(self) -> dict[str, str]:
+            from agent.tui_themes import DEFAULT_THEME, rich_palette
+
+            try:
+                palette = getattr(self.app, "_selene_palette", None)
+            except Exception:
+                palette = None
+            return palette or rich_palette(DEFAULT_THEME)
+
+        def _wave_text(self) -> Text:
+            """Level meter: a travelling wave whose height tracks the state."""
+            pal = self._palette()
+            levels = self._REC_LEVELS if self._recording else self._IDLE_LEVELS
+            color = pal["error"] if self._recording else pal["faint"]
+            try:
+                cells = int(self.query_one("#speech-wave", Static).size.width or 0)
+            except Exception:
+                cells = 0
+            cells = cells if cells > 0 else self._WAVE_CELLS
+            line = Text()
+            for cell in range(cells):
+                level = levels[(self._anim_frame + cell) % len(levels)]
+                line.append(self._BARS[level], style=color)
+            return line
+
+        def _elapsed_text(self) -> str:
+            if self._state not in {"recording", "finishing"} or not self._started_at:
+                return ""
+            elapsed = max(0.0, time.monotonic() - self._started_at)
+            return f"{int(elapsed) // 60:02d}:{int(elapsed) % 60:02d}"
+
+        def _render_state(self) -> None:
+            """Repaint title / hint / meter for the current state."""
+            pal = self._palette()
+            label = self._STATE_LABELS.get(self._state, "ready")
+            title = Text()
+            title.append("voice", style=f"bold {pal['text_soft']}")
+            title.append("  ·  ", style=pal["faint"])
+            title.append(
+                label,
+                style=pal["error"] if self._state == "recording" else pal["muted"],
+            )
+            try:
+                self.query_one("#speech-title", Static).update(title)
+            except Exception:
+                pass
+            try:
+                self.query_one("#speech-hint", Static).update(
+                    self._STATE_HINTS.get(self._state, self._STATE_HINTS["idle"])
+                )
+            except Exception:
+                pass
+            try:
+                self.query_one("#speech-timer", Static).update(self._elapsed_text())
+            except Exception:
+                pass
+            self._tick_anim(force=True)
+
+        def _tick_anim(self, *, force: bool = False) -> None:
+            if not force and not self.has_class("-visible"):
                 return
-            self._anim_frame = (self._anim_frame + 1) % 64
-            recording = self._recording
-            mic_frames = self._REC_MIC if recording else self._IDLE_MIC
-            wave_frames = self._REC_WAVE if recording else self._IDLE_WAVE
+            self._anim_frame = (self._anim_frame + 1) % 96
+            mic_frames = {
+                "recording": self._REC_MIC,
+                "finishing": self._FINISH_MIC,
+                "error": (GLYPH_WARN,),
+            }.get(self._state, self._IDLE_MIC)
             try:
                 self.query_one("#speech-mic", Static).update(
                     mic_frames[self._anim_frame % len(mic_frames)]
@@ -834,86 +1051,67 @@ def build_app_class():
             except Exception:
                 pass
             try:
-                self.query_one("#speech-wave", Static).update(
-                    wave_frames[self._anim_frame % len(wave_frames)]
-                )
+                self.query_one("#speech-wave", Static).update(self._wave_text())
             except Exception:
                 pass
+            if self._state in {"recording", "finishing"}:
+                try:
+                    self.query_one("#speech-timer", Static).update(self._elapsed_text())
+                except Exception:
+                    pass
+
+        def _set_state(self, state: str) -> None:
+            self._state = state
+            self._recording = state == "recording"
+            self.set_class(self._recording, "-recording")
+            self.set_class(state == "error", "-error")
+            if state == "recording" and not self._started_at:
+                self._started_at = time.monotonic()
+            elif state in {"idle", "error"}:
+                self._started_at = 0.0
+            self._render_state()
 
         def show_menu(self) -> None:
-            self._recording = False
             self._anim_frame = 0
-            self.remove_class("-recording")
+            self._started_at = 0.0
             try:
-                self.query_one("#speech-mic", Static).update(self._IDLE_MIC[0])
-                self.query_one("#speech-wave", Static).update(self._IDLE_WAVE[0])
+                self.query_one("#speech-detail", Static).update("")
             except Exception:
                 pass
-            try:
-                self.query_one("#speech-title", Static).update("voice")
-            except Exception:
-                pass
-            try:
-                self.query_one("#speech-hint", Static).update(
-                    "enter start  ·  enter again send  ·  esc close"
-                )
-            except Exception:
-                pass
+            self._set_state("idle")
             self.add_class("-visible")
 
         def hide_menu(self) -> None:
             self.remove_class("-visible")
-            self.remove_class("-recording")
-            self._recording = False
             self._anim_frame = 0
+            self._started_at = 0.0
+            self._set_state("idle")
             try:
-                self.query_one("#speech-mic", Static).update(self._IDLE_MIC[0])
-                self.query_one("#speech-wave", Static).update(self._IDLE_WAVE[0])
+                self.query_one("#speech-input", PromptArea).value = ""
             except Exception:
                 pass
             try:
-                self.query_one("#speech-input", Input).value = ""
+                self.query_one("#speech-detail", Static).update("")
             except Exception:
                 pass
 
         def set_recording(self, active: bool) -> None:
-            active = bool(active)
-            self._recording = active
-            self.set_class(active, "-recording")
-            try:
-                title = "voice  ·  listening" if active else "voice"
-                self.query_one("#speech-title", Static).update(title)
-            except Exception:
-                pass
-            try:
-                if active:
-                    hint = "enter send  ·  esc cancel"
-                else:
-                    hint = "enter start  ·  enter again send  ·  esc close"
-                self.query_one("#speech-hint", Static).update(hint)
-            except Exception:
-                pass
-            # Snap animation frame so the state change is immediate.
-            self._tick_anim()
+            self._set_state("recording" if active else "idle")
 
         def set_finishing(self) -> None:
-            self.set_recording(False)
-            try:
-                self.query_one("#speech-title", Static).update("voice  ·  finishing")
-                self.query_one("#speech-hint", Static).update(
-                    "transcribing final phrase  ·  esc cancel"
-                )
-            except Exception:
-                pass
+            self._set_state("finishing")
 
         def set_error(self, message: str) -> None:
-            self.set_recording(False)
             detail = " ".join(str(message or "Voice input unavailable").split())
-            if len(detail) > 72:
-                detail = detail[:69].rstrip() + "…"
+            if len(detail) > 150:
+                detail = detail[:149].rstrip() + "…"
+            self._set_state("error")
+            pal = self._palette()
+            body = Text()
+            body.append(f"{GLYPH_WARN}  ", style=pal["warning"])
+            body.append(detail, style=pal["warning"])
             try:
-                self.query_one("#speech-title", Static).update("voice  ·  unavailable")
-                self.query_one("#speech-hint", Static).update(detail)
+                self.query_one("#speech-detail", Static).update(body)
             except Exception:
                 pass
 
@@ -928,23 +1126,24 @@ def build_app_class():
             padding: 0 1 1 1;
             margin: 0 0 0 0;
         }
+        /* Grows with the draft (soft-wrapped lines included), then scrolls. */
         #input-shell {
-            height: 3;
+            height: auto;
             border: round $primary 30%;
             background: $background;
             padding: 0 1;
             margin: 0 0 0 0;
-            /* Top-align so the '>' shares the Input's text row (Input draws y=0). */
+            /* Top-align so the '>' shares the first text row. */
             align: left top;
         }
         #input-shell:focus-within {
-            border: round $primary;
+            border: round $selene-user;
         }
         #prompt-glyph {
             width: 2;
             height: 1;
             min-width: 2;
-            color: $foreground;
+            color: $selene-user;
             content-align: left middle;
             background: transparent;
             text-style: bold;
@@ -953,26 +1152,35 @@ def build_app_class():
         }
         #prompt-input {
             width: 1fr;
-            height: 3;
+            height: auto;
+            max-height: 12;
             background: transparent;
             color: $foreground;
             border: none;
             padding: 0 0;
             margin: 0 0;
+            scrollbar-size-vertical: 1;
+            scrollbar-background: $background;
+            scrollbar-color: $primary 30%;
         }
         #prompt-input:focus {
             background: transparent;
             border: none;
         }
-        #prompt-input > .input--placeholder {
+        #prompt-input > .text-area--cursor {
+            color: $background;
+            background: $selene-user;
+        }
+        #prompt-input > .text-area--placeholder {
             color: $primary 40%;
         }
+        /* Runtime chip lives in the footer so the prompt keeps the full width. */
         #composer-meta {
             width: auto;
-            height: 3;
+            height: 1;
             color: $primary 40%;
             content-align: right middle;
-            padding: 0 0 0 1;
+            padding: 0 0 0 2;
             text-style: dim;
             background: transparent;
         }
@@ -995,7 +1203,7 @@ def build_app_class():
             content-align: right middle;
             text-style: dim;
             background: transparent;
-            padding: 0 0 0 1;
+            padding: 0 0 0 2;
         }
         """
 
@@ -1010,34 +1218,35 @@ def build_app_class():
             pal = getattr(self.app, "_selene_palette", None) or rich_palette(DEFAULT_THEME)
             faint = pal["faint"]
             soft = pal["text_soft"]
+            # Ordered by how often they are needed: the strip is the first
+            # thing to be clipped on a narrow terminal.
             items = (
                 ("↵", "send"),
-                ("/", "palette"),
-                ("^O", "chats"),
-                ("^S", "speech"),
-                ("⇥", "complete"),
-                ("^C", "stop"),
+                ("⇧↵", "newline"),
+                ("/", "commands"),
+                ("^S", "voice"),
                 ("^C^C", "quit"),
             )
             line = Text()
             for index, (key, action) in enumerate(items):
                 if index:
-                    line.append("  |  ", style=faint)
+                    line.append("  ", style=faint)
                 line.append(key, style=f"bold {soft}")
-                line.append(":", style=faint)
-                line.append(action, style=faint)
+                line.append(f" {action}", style=faint)
             return line
 
         def compose(self) -> ComposeResult:
             with Horizontal(id="input-shell"):
-                # ASCII '>' on the same row as typed text (Input renders on y=0).
+                # ASCII '>' on the same row as the first line of typed text.
                 yield Static(">", id="prompt-glyph", markup=False, shrink=False)
-                yield Input(placeholder="", id="prompt-input")
-                if self._meta_text:
-                    yield Static(self._meta_text, id="composer-meta")
-            # Shortcuts left, context usage right — outside the chatbox shell.
+                yield PromptArea(
+                    placeholder="Message Selene…  ⇧↵ for a new line",
+                    id="prompt-input",
+                )
+            # Shortcuts left, runtime chip + context usage right — outside the box.
             with Horizontal(id="composer-footer"):
                 yield Static(self._shortcut_strip(), id="composer-hint")
+                yield Static(self._meta_text, id="composer-meta", markup=False)
                 yield Static("0 / 0", id="composer-context")
 
         def on_mount(self) -> None:
@@ -1142,8 +1351,13 @@ def build_app_class():
             self._prompt_queue: list[str] = []
             self._PROMPT_QUEUE_MAX = 3
             self._quit_armed_until = 0.0
+            # Ctrl+C during this turn: thinking chrome is dropped, not folded.
+            self._interrupt_requested = False
             self._selene_palette = None  # filled on mount via ui_apply_theme
             self._stream_widget: MessageBlock | None = None
+            # Last finished response card + its text (model footer attaches here).
+            self._response_widget: MessageBlock | None = None
+            self._response_text = ""
             self._thinking_widget: MessageBlock | None = None
             self._thinking_buf = ""
             self._thinking_tokens = 0
@@ -1172,6 +1386,20 @@ def build_app_class():
             self._capture_file = None
             # Braille spinner frames — light, terminal-native motion.
             self._spinner_frames = tuple("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+
+        def get_theme_variable_defaults(self) -> dict[str, str]:
+            """Fallbacks for ``$selene-*`` used in widget CSS.
+
+            Widget stylesheets are parsed before ``on_mount`` installs the place
+            themes, so every Selene variable needs a value from the start or the
+            CSS fails to parse. Real themes override these on the first repaint.
+            """
+            from agent.tui_themes import DEFAULT_THEME, build_textual_theme
+
+            try:
+                return dict(build_textual_theme(DEFAULT_THEME).variables or {})
+            except Exception:
+                return {}
 
         def compose(self) -> ComposeResult:
             meta = self._format_meta()
@@ -1216,7 +1444,7 @@ def build_app_class():
             chat = self.query_one("#chat", ChatView)
             welcome = self._welcome_renderable()
             chat.mount(Static(welcome, id="welcome"))
-            self.query_one("#prompt-input", Input).focus()
+            self.query_one("#prompt-input", PromptArea).focus()
             self.refresh_context_usage()
 
         def on_unmount(self) -> None:
@@ -1236,18 +1464,17 @@ def build_app_class():
             return f" {GLYPH_DOT} ".join(parts) if parts else "local agent runtime"
 
         def _composer_meta(self) -> str:
-            """Short right-side chip inside the input shell (mode · model · profile)."""
-            bits = []
-            mode = self.status_meta.get("mode")
-            model = self.status_meta.get("model")
-            profile = self.status_meta.get("profile")
-            if mode:
-                bits.append(str(mode))
-            if model:
-                bits.append(str(model))
-            if profile:
-                bits.append(str(profile))
-            return f" {GLYPH_DOT} ".join(bits)
+            """Footer chip next to the context meter.
+
+            The status bar already carries mode / profile / context, so this
+            stays with the one value worth having under the cursor: the model
+            the next prompt will go to.
+            """
+            model = str(self.status_meta.get("model") or "").strip()
+            mode = str(self.status_meta.get("mode") or "").strip()
+            if model and mode and mode.casefold() not in {"standard", "fast response"}:
+                return f"{mode} {GLYPH_DOT} {model}"
+            return model
 
         def ui_refresh_runtime_meta(self) -> None:
             """Refresh model/profile/context chrome after a slash-command change."""
@@ -1321,7 +1548,7 @@ def build_app_class():
 
             # Draft text in the composer (mirrors web estimatedContextTokens).
             try:
-                draft = self.query_one("#prompt-input", Input).value or ""
+                draft = self.query_one("#prompt-input", PromptArea).value or ""
             except Exception:
                 draft = ""
             if draft.strip():
@@ -1474,24 +1701,30 @@ def build_app_class():
             chat.scroll_end(animate=False)
             return block
 
+        def _user_renderable(self, text: str) -> Text:
+            """Prompt block: user-hue marker + prompt text in the soft ink."""
+            pal = self._pal()
+            body = Text()
+            body.append(f"{GLYPH_PROMPT}  ", style=f"bold {pal['user']}")
+            body.append(str(text), style=pal["user_soft"])
+            return body
+
         def ui_add_user(self, text: str) -> None:
             # Slash commands are chrome; real prompts are primary content.
             if str(text).startswith("/"):
+                pal = self._pal()
                 line = Text()
-                line.append(f"{GLYPH_PROMPT} ", style="#555555")
-                line.append("command  ", style="bold #6b6b6b")
-                line.append(text, style="#7a7a7a")
+                line.append(f"{GLYPH_PROMPT} ", style=pal["faint"])
+                line.append("command  ", style=f"bold {pal['muted']}")
+                line.append(text, style=pal["user"])
                 self._mount_block(line, "command")
                 return
-            header = Text()
-            header.append(f"{GLYPH_MARK} ", style="bold #f2f2f2")
-            header.append("you\n", style="bold #ffffff")
-            header.append(text, style="#f2f2f2")
-            self._mount_block(header, "user")
+            self._mount_block(self._user_renderable(text), "user")
 
         # ── Activity animation (pre-thinking / in-progress) ───────────
 
         def _activity_renderable(self) -> Text:
+            pal = self._pal()
             frame = self._spinner_frames[
                 self._activity_frame % len(self._spinner_frames)
             ]
@@ -1499,9 +1732,9 @@ def build_app_class():
             # Soft pulse dots after the label.
             dots = "." * (1 + (self._activity_frame % 3))
             line = Text()
-            line.append(f"{frame}  ", style="#6b6b6b")
-            line.append(label, style="#6b6b6b")
-            line.append(dots.ljust(3), style="#555555")
+            line.append(f"{frame}  ", style=pal["assistant"])
+            line.append(label, style=pal["muted"])
+            line.append(dots.ljust(3), style=pal["faint"])
             return line
 
         def _thinking_line_width(self) -> int:
@@ -1526,20 +1759,21 @@ def build_app_class():
             return max(24, width - 4)
 
         def _thinking_renderable(self) -> Text:
+            pal = self._pal()
             frame = self._spinner_frames[
                 self._activity_frame % len(self._spinner_frames)
             ]
             body = Text()
-            body.append(f"{frame}  ", style="#6b6b6b")
-            body.append("thinking", style="#6b6b6b")
+            body.append(f"{frame}  ", style=pal["assistant"])
+            body.append("thinking", style=pal["muted"])
             if self._thinking_tokens:
                 label = "token" if self._thinking_tokens == 1 else "tokens"
                 body.append(
                     f"  ·  ~{self._thinking_tokens} {label}",
-                    style="#555555",
+                    style=pal["faint"],
                 )
             else:
-                body.append("  ·  collecting", style="#555555")
+                body.append("  ·  collecting", style=pal["faint"])
             preview = self._thinking_buf.strip().replace("\n", " ")
             if preview:
                 # Fill the full chat width (was hard-capped at 72 chars ≈ half line).
@@ -1547,7 +1781,7 @@ def build_app_class():
                 if len(preview) > budget:
                     preview = "…" + preview[-(budget - 1) :]
                 body.append("\n", style="")
-                body.append(preview, style="#555555")
+                body.append(preview, style=pal["faint"])
             return body
 
         def _ensure_activity_widget(self) -> "MessageBlock":
@@ -1597,6 +1831,8 @@ def build_app_class():
 
         def ui_activity_start(self, label: str = "Thinking") -> None:
             """Show a single animated waiting line (reused, never stacked)."""
+            if self._interrupt_requested:
+                return
             if self._activity_phase == "thinking":
                 # Thinking block owns the slot — leave it alone.
                 return
@@ -1643,7 +1879,8 @@ def build_app_class():
         def ui_status(self, message: str, kind: str = "info", detail: str | None = None) -> None:
             # While generating, keep chat clean — fold run-like noise into activity.
             # Tool lines stay visible (named steps), not swallowed as a spinner label.
-            if self._busy and kind in {"run", "info"}:
+            # After Ctrl+C the spinner is gone, so nothing may be folded into it.
+            if self._busy and not self._interrupt_requested and kind in {"run", "info"}:
                 label = message if not detail else f"{message} · {detail}"
                 # Skip pure chrome / duplicate thinking notices.
                 low = message.casefold()
@@ -1660,11 +1897,11 @@ def build_app_class():
             faint = pal.get("faint", "#555555")
             glyphs = {
                 "info": (GLYPH_MARK, muted),
-                "run": (GLYPH_RUN, "#7a7a60"),
-                "ok": (GLYPH_OK, "#6a8a6a"),
-                "warn": (GLYPH_WARN, "#8a8a60"),
-                "error": (GLYPH_ERR, "#c08080"),
-                "tool": (GLYPH_TOOL, soft),
+                "run": (GLYPH_RUN, pal["warning"]),
+                "ok": (GLYPH_OK, pal["success"]),
+                "warn": (GLYPH_WARN, pal["warning"]),
+                "error": (GLYPH_ERR, pal["error"]),
+                "tool": (GLYPH_TOOL, pal["assistant"]),
             }
             glyph, color = glyphs.get(kind, glyphs["info"])
             line = Text()
@@ -1716,10 +1953,32 @@ def build_app_class():
                     return
                 if len(stripped) < 3:
                     return
-            self._mount_block(Text(stripped, style="#555555"), "system")
+            self._mount_block(Text(stripped, style=self._pal()["faint"]), "system")
+
+        def _discard_thinking_ui(self) -> None:
+            """Remove live thinking / spinner rows without leaving a fold behind.
+
+            Used by Ctrl+C: an interrupted turn should not keep a half-finished
+            chain-of-thought on screen.
+            """
+            self._stop_activity_timer()
+            self._activity_phase = "idle"
+            self._thinking_buf = ""
+            self._thinking_tokens = 0
+            widget = self._thinking_widget
+            self._thinking_widget = None
+            if widget is not None:
+                try:
+                    widget.remove()
+                except Exception:
+                    pass
+            self._remove_activity_widget()
 
         def ui_thinking_start(self) -> None:
             """Promote the activity line into a compact thinking block."""
+            if self._interrupt_requested:
+                # Late chunks from a cancelled stream must not re-open the row.
+                return
             self._thinking_buf = ""
             self._thinking_tokens = 0
             self._activity_label = "thinking"
@@ -1745,7 +2004,7 @@ def build_app_class():
             self._chat().scroll_end(animate=False)
 
         def ui_thinking_delta(self, text: str) -> None:
-            if not text:
+            if not text or self._interrupt_requested:
                 return
             if self._thinking_widget is None:
                 self.ui_thinking_start()
@@ -1758,7 +2017,15 @@ def build_app_class():
                     self._chat().scroll_end(animate=False)
 
         def ui_thinking_end(self, label: str | None = None) -> None:
-            """Finish live thinking and replace it with a collapsible fold."""
+            """Finish live thinking and replace it with a collapsible fold.
+
+            An interrupted turn keeps nothing: the partial thoughts are removed
+            with the spinner instead of being folded away.
+            """
+            if self._interrupt_requested or label == "interrupted":
+                self._discard_thinking_ui()
+                return
+
             self._stop_activity_timer()
             self._activity_phase = "idle"
             self._activity_widget = None
@@ -1766,18 +2033,12 @@ def build_app_class():
             full_text = self._thinking_buf
             tokens = self._thinking_tokens
             title = (label or "thinking").strip() or "thinking"
-            interrupted = label == "interrupted"
             old = self._thinking_widget
             self._thinking_widget = None
             self._thinking_buf = ""
             self._thinking_tokens = 0
 
-            fold = ThinkingFold(
-                full_text,
-                tokens,
-                title=title if not interrupted else "thinking interrupted",
-                interrupted=interrupted,
-            )
+            fold = ThinkingFold(full_text, tokens, title=title)
 
             chat = self._chat()
             try:
@@ -1801,17 +2062,38 @@ def build_app_class():
                 self._activity_phase = "idle"
                 self._remove_activity_widget()
 
+        def _response_renderable(
+            self,
+            text: str,
+            *,
+            model_label: str = "",
+            detail: str | None = None,
+        ):
+            """Response card: accent header, markdown body, faint model footer."""
+            pal = self._pal()
+            title = Text()
+            title.append(f"{GLYPH_SECTION} ", style=f"bold {pal['assistant']}")
+            title.append("response", style=f"bold {pal['text']}")
+            parts = [title, response_markdown(text)]
+            if model_label:
+                footer = Text()
+                footer.append(f"{GLYPH_DOT}  ", style=pal["faint"])
+                footer.append(str(model_label), style=pal["faint"])
+                if detail:
+                    footer.append(f"  {GLYPH_DOT}  {detail}", style=pal["faint"])
+                # Blank line keeps the footer off the last line of the answer.
+                parts.extend((Text(""), footer))
+            return Group(*parts)
+
         def ui_content_stream(self, text: str) -> None:
             self._clear_waiting_activity()
-            rendered = response_markdown(text)
-            title = Text()
-            title.append(f"{GLYPH_SECTION} ", style="bold #ffffff")
-            title.append("response\n", style="bold #f2f2f2")
-            panel = Group(title, rendered)
+            self._response_text = text
+            panel = self._response_renderable(text)
             if self._stream_widget is None:
                 self._stream_widget = self._mount_block(panel, "assistant")
             else:
                 self._stream_widget.update(panel)
+            self._response_widget = self._stream_widget
             self._chat().scroll_end(animate=False)
 
         def ui_content_final(self, text: str) -> None:
@@ -1819,24 +2101,55 @@ def build_app_class():
             # Ensure thinking row is collapsed if footer was skipped.
             if self._thinking_widget is not None:
                 self.ui_thinking_end()
-            rendered = response_markdown(text)
-            title = Text()
-            title.append(f"{GLYPH_SECTION} ", style="bold #ffffff")
-            title.append("response\n", style="bold #f2f2f2")
-            panel = Group(title, rendered)
+            panel = self._response_renderable(text)
             if self._stream_widget is None:
-                self._mount_block(panel, "assistant")
+                widget = self._mount_block(panel, "assistant")
             else:
-                self._stream_widget.update(panel)
+                widget = self._stream_widget
+                widget.update(panel)
             self._stream_widget = None
+            # Kept so the model footer can be folded into this same card.
+            self._response_widget = widget
+            self._response_text = text
             self._chat().scroll_end(animate=False)
 
+        def ui_response_model(self, label: str, detail: str | None = None) -> None:
+            """Append the faint 'answered by <model>' line to the last response."""
+            name = str(label or "").strip()
+            if not name:
+                return
+            widget = self._response_widget
+            if widget is not None and widget.parent is not None:
+                try:
+                    widget.update(
+                        self._response_renderable(
+                            self._response_text,
+                            model_label=name,
+                            detail=detail,
+                        )
+                    )
+                    self._response_widget = None
+                    self._chat().scroll_end(animate=False)
+                    return
+                except Exception:
+                    pass
+            # No response card to attach to (interrupted, tool-only turn, …).
+            pal = self._pal()
+            line = Text()
+            line.append(f"{GLYPH_DOT}  ", style=pal["faint"])
+            line.append(name, style=pal["faint"])
+            if detail:
+                line.append(f"  {GLYPH_DOT}  {detail}", style=pal["faint"])
+            self._mount_block(line, "meta")
+            self._response_widget = None
+
         def ui_stats(self, elapsed: float, total_tokens: int, tokens_per_sec: float) -> None:
+            pal = self._pal()
             line = (
                 f"{GLYPH_DOT}  {elapsed:.1f}s  {GLYPH_DOT}  "
                 f"~{total_tokens} tokens  {GLYPH_DOT}  ~{tokens_per_sec:.1f} tok/s"
             )
-            self._mount_block(Text(line, style="#555555"), "status")
+            self._mount_block(Text(line, style=pal["faint"]), "status")
 
         def ui_help(
             self,
@@ -1844,23 +2157,24 @@ def build_app_class():
             title: str,
             subtitle: str | None,
         ) -> None:
+            pal = self._pal()
             body = Text()
-            body.append(f"{GLYPH_SECTION} ", style="#6b6b6b")
-            body.append(f"{title}\n", style="bold #7a7a7a")
+            body.append(f"{GLYPH_SECTION} ", style=pal["muted"])
+            body.append(f"{title}\n", style=f"bold {pal['text_soft']}")
             if subtitle:
-                body.append(f"{subtitle}\n\n", style="#555555")
+                body.append(f"{subtitle}\n\n", style=pal["faint"])
             else:
                 body.append("\n")
             for command, description in entries:
-                body.append(f"  {command}", style="#7a7a7a")
-                body.append(f"  {description}\n", style="#555555")
+                body.append(f"  {command}", style=pal["muted"])
+                body.append(f"  {description}\n", style=pal["faint"])
             self._mount_block(body, "system")
 
         # ── Slash palette ─────────────────────────────────────────────
 
         def _slash_query(self) -> str:
             try:
-                return self.query_one("#prompt-input", Input).value or ""
+                return self.query_one("#prompt-input", PromptArea).value or ""
             except Exception:
                 return ""
 
@@ -1887,7 +2201,7 @@ def build_app_class():
                 pass
             if clear_slash_draft and closed:
                 try:
-                    inp = self.query_one("#prompt-input", Input)
+                    inp = self.query_one("#prompt-input", PromptArea)
                     value = inp.value or ""
                     # Clear command drafts opened via Ctrl+/ or typed filters.
                     if value.startswith("/"):
@@ -1951,7 +2265,7 @@ def build_app_class():
             if not self._slash_matches:
                 return
             preferred = self._slash_matches[self._slash_selected][0]
-            inp = self.query_one("#prompt-input", Input)
+            inp = self.query_one("#prompt-input", PromptArea)
             inp.value = preferred
             inp.cursor_position = len(preferred)
             self._update_slash_palette(preferred, reset_selection=False)
@@ -1978,7 +2292,7 @@ def build_app_class():
 
         def _session_filter_query(self) -> str:
             try:
-                return (self.query_one("#prompt-input", Input).value or "").strip()
+                return (self.query_one("#prompt-input", PromptArea).value or "").strip()
             except Exception:
                 return ""
 
@@ -2030,7 +2344,7 @@ def build_app_class():
             # Opening with a slash filter leftover is confusing — clear leading '/'.
             if query.startswith("/"):
                 try:
-                    inp = self.query_one("#prompt-input", Input)
+                    inp = self.query_one("#prompt-input", PromptArea)
                     inp.value = ""
                     query = ""
                 except Exception:
@@ -2079,11 +2393,7 @@ def build_app_class():
                 if not text and not (role == "assistant" and thinking):
                     continue
                 if role == "user":
-                    header = Text()
-                    header.append(f"{GLYPH_MARK} ", style="bold #f2f2f2")
-                    header.append("you\n", style="bold #ffffff")
-                    header.append(text, style="#f2f2f2")
-                    self._mount_block(header, "user")
+                    self._mount_block(self._user_renderable(text), "user")
                 elif role == "assistant":
                     if thinking:
                         self._chat().mount(
@@ -2091,11 +2401,15 @@ def build_app_class():
                         )
                     if not text:
                         continue
-                    rendered = response_markdown(text)
-                    title = Text()
-                    title.append(f"{GLYPH_SECTION} ", style="bold #ffffff")
-                    title.append("response\n", style="bold #f2f2f2")
-                    self._mount_block(Group(title, rendered), "assistant")
+                    self._mount_block(
+                        self._response_renderable(
+                            text,
+                            model_label=str(message.get("model_label") or ""),
+                        ),
+                        "assistant",
+                    )
+            self._response_widget = None
+            self._response_text = ""
             self.refresh_context_usage()
 
         def _accept_session_selection(self) -> None:
@@ -2107,7 +2421,7 @@ def build_app_class():
             key, title, _detail = self._session_rows[self._session_selected]
             # Clear filter text from the composer.
             try:
-                inp = self.query_one("#prompt-input", Input)
+                inp = self.query_one("#prompt-input", PromptArea)
                 inp.value = ""
             except Exception:
                 pass
@@ -2154,37 +2468,133 @@ def build_app_class():
             for warning in warnings:
                 self.ui_status(str(warning), kind="warn")
 
-        def on_input_changed(self, event: Input.Changed) -> None:
-            if event.input.id == "speech-input":
+        def on_text_area_changed(self, event) -> None:  # noqa: ANN001
+            """Composer / speech edits — same routing the old Input.Changed had."""
+            area = getattr(event, "text_area", None)
+            area_id = getattr(area, "id", None)
+            value = area.text if area is not None else ""
+            if area_id == "speech-input":
                 # Keep the recognizer base in sync so live phrases append to edits.
                 voice = self._voice
                 if voice is not None and (
                     self._voice_active or getattr(voice, "active", False)
                 ):
                     try:
-                        voice.set_base_text(event.value or "")
+                        voice.set_base_text(value or "")
                     except Exception:
                         pass
                 return
-            if event.input.id != "prompt-input":
+            if area_id != "prompt-input":
                 return
             if self._sessions_open:
-                self._update_sessions_filter(event.value, reset_selection=True)
+                self._update_sessions_filter(value, reset_selection=True)
                 self.refresh_context_usage()
                 return
-            self._update_slash_palette(event.value, reset_selection=True)
+            self._update_slash_palette(value, reset_selection=True)
             self.refresh_context_usage()
 
-        def on_input_submitted(self, event: Input.Submitted) -> None:
-            if event.input.id == "speech-input":
-                self._speech_on_enter()
-                return
-            if event.input.id != "prompt-input":
-                return
+        def handle_prompt_key(self, widget, event) -> bool:  # noqa: ANN001
+            """First refusal on keys typed in a prompt box.
+
+            Returns True when the app consumed the key, which stops the text
+            area from also acting on it (Enter sending instead of inserting a
+            line break, arrows moving a menu selection instead of the caret).
+            """
+            key = event.key
+            widget_id = getattr(widget, "id", None)
+
+            if widget_id == "speech-input":
+                if key == "enter":
+                    self._speech_on_enter()
+                    return True
+                return False
+
+            if widget_id != "prompt-input":
+                return False
+
+            if key == "enter":
+                if self._speech_open:
+                    self._speech_on_enter()
+                    return True
+                if self._sessions_open:
+                    self._accept_session_selection()
+                    return True
+                self._submit_from_input()
+                return True
+
+            # Conversations menu navigation takes priority while open.
             if self._sessions_open:
-                self._accept_session_selection()
-                return
-            self._submit_from_input()
+                if key in ("ctrl+n", "down"):
+                    self._move_session(1)
+                    return True
+                if key in ("ctrl+p", "up"):
+                    self._move_session(-1)
+                    return True
+                if key == "pageup":
+                    self._move_session(-5)
+                    return True
+                if key == "pagedown":
+                    self._move_session(5)
+                    return True
+                if key == "home":
+                    self._session_selected = 0
+                    self._refresh_sessions_view()
+                    return True
+                if key == "end":
+                    self._session_selected = max(0, len(self._session_rows) - 1)
+                    self._refresh_sessions_view()
+                    return True
+                if key == "tab":
+                    # Tab does not complete sessions; Enter opens.
+                    return True
+                return False
+
+            # Slash palette navigation.
+            if key in ("ctrl+n", "down"):
+                if self._slash_matches or self._slash_query().startswith("/"):
+                    if not self._slash_matches:
+                        self._update_slash_palette(self._slash_query())
+                    if self._slash_matches:
+                        self._move_slash(1)
+                        return True
+                return False
+            if key in ("ctrl+p", "up"):
+                if self._slash_matches or self._slash_query().startswith("/"):
+                    if not self._slash_matches:
+                        self._update_slash_palette(self._slash_query())
+                    if self._slash_matches:
+                        self._move_slash(-1)
+                        return True
+                return False
+            if key == "pageup" and self._slash_matches:
+                self._move_slash(-5)
+                return True
+            if key == "pagedown" and self._slash_matches:
+                self._move_slash(5)
+                return True
+            if key == "home" and self._slash_matches:
+                self._slash_selected = 0
+                self._refresh_slash_view()
+                return True
+            if key == "end" and self._slash_matches:
+                self._slash_selected = len(self._slash_matches) - 1
+                self._refresh_slash_view()
+                return True
+            if key == "tab":
+                value = widget.value or ""
+                if value.startswith("/") or self._slash_matches:
+                    if self._slash_matches:
+                        self._accept_slash_selection(run=False)
+                    else:
+                        self._tab_complete(widget)
+                    return True
+                return False
+            if key == "right" and self._slash_matches:
+                # Right arrow accepts the highlight when the caret is at the end.
+                if widget.cursor_position >= len(widget.value or ""):
+                    self._accept_slash_selection(run=False)
+                    return True
+            return False
 
         def _submit_from_input(self) -> None:
             if self._speech_open:
@@ -2193,7 +2603,7 @@ def build_app_class():
             if self._sessions_open:
                 self._accept_session_selection()
                 return
-            inp = self.query_one("#prompt-input", Input)
+            inp = self.query_one("#prompt-input", PromptArea)
             value = (inp.value or "").strip()
             # Accept highlighted slash command when the buffer is a prefix/filter.
             if (
@@ -2231,122 +2641,10 @@ def build_app_class():
                     self.action_blur_or_clear()
                     return
 
-            # Intercept palette / conversations navigation while the input is focused.
-            try:
-                focused = self.focused
-            except Exception:
-                focused = None
-            focused_id = getattr(focused, "id", None) if focused is not None else None
-            if focused_id == "speech-input":
-                # Speech popup owns Enter/typing; no slash/session navigation.
-                return
-            if focused is None or focused_id != "prompt-input":
-                return
+            # Everything typed inside a prompt box is handled by PromptArea,
+            # which calls handle_prompt_key before the caret ever moves.
 
-            # Conversations menu navigation takes priority while open.
-            if self._sessions_open:
-                if key in ("ctrl+n", "down"):
-                    event.prevent_default()
-                    event.stop()
-                    self._move_session(1)
-                    return
-                if key in ("ctrl+p", "up"):
-                    event.prevent_default()
-                    event.stop()
-                    self._move_session(-1)
-                    return
-                if key in ("pageup",):
-                    event.prevent_default()
-                    event.stop()
-                    self._move_session(-5)
-                    return
-                if key in ("pagedown",):
-                    event.prevent_default()
-                    event.stop()
-                    self._move_session(5)
-                    return
-                if key in ("home",):
-                    event.prevent_default()
-                    event.stop()
-                    self._session_selected = 0
-                    self._refresh_sessions_view()
-                    return
-                if key in ("end",):
-                    event.prevent_default()
-                    event.stop()
-                    self._session_selected = max(0, len(self._session_rows) - 1)
-                    self._refresh_sessions_view()
-                    return
-                if key == "tab":
-                    # Tab does not complete sessions; Enter opens.
-                    event.prevent_default()
-                    event.stop()
-                    return
-                return
-
-            # Normalize a few aliases Textual may emit.
-            if key in ("ctrl+n", "down"):
-                if self._slash_matches or (self._slash_query().startswith("/")):
-                    if not self._slash_matches:
-                        self._update_slash_palette(self._slash_query())
-                    if self._slash_matches:
-                        event.prevent_default()
-                        event.stop()
-                        self._move_slash(1)
-                return
-            if key in ("ctrl+p", "up"):
-                if self._slash_matches or (self._slash_query().startswith("/")):
-                    if not self._slash_matches:
-                        self._update_slash_palette(self._slash_query())
-                    if self._slash_matches:
-                        event.prevent_default()
-                        event.stop()
-                        self._move_slash(-1)
-                return
-            if key in ("pageup",):
-                if self._slash_matches:
-                    event.prevent_default()
-                    event.stop()
-                    self._move_slash(-5)
-                return
-            if key in ("pagedown",):
-                if self._slash_matches:
-                    event.prevent_default()
-                    event.stop()
-                    self._move_slash(5)
-                return
-            if key in ("home",) and self._slash_matches:
-                event.prevent_default()
-                event.stop()
-                self._slash_selected = 0
-                self._refresh_slash_view()
-                return
-            if key in ("end",) and self._slash_matches:
-                event.prevent_default()
-                event.stop()
-                self._slash_selected = len(self._slash_matches) - 1
-                self._refresh_slash_view()
-                return
-            if key == "tab":
-                inp = self.query_one("#prompt-input", Input)
-                value = inp.value or ""
-                if value.startswith("/") or self._slash_matches:
-                    event.prevent_default()
-                    event.stop()
-                    if self._slash_matches:
-                        self._accept_slash_selection(run=False)
-                    else:
-                        self._tab_complete(inp)
-                return
-            if key in ("right",) and self._slash_matches:
-                # Right arrow accepts the highlight when the caret is at EOL.
-                inp = self.query_one("#prompt-input", Input)
-                if inp.cursor_position >= len(inp.value or ""):
-                    event.prevent_default()
-                    event.stop()
-                    self._accept_slash_selection(run=False)
-
-        def _tab_complete(self, inp: Input) -> None:
+        def _tab_complete(self, inp: "PromptArea") -> None:
             value = inp.value or ""
             if not value.startswith("/"):
                 value = "/" + value.lstrip()
@@ -2437,16 +2735,26 @@ def build_app_class():
 
             self.ui_add_user(user_input)
             self._stream_widget = None
+            self._response_widget = None
+            self._response_text = ""
             self._thinking_widget = None
             self._thinking_buf = ""
             self._thinking_tokens = 0
+            # A Ctrl+C from the previous turn must not mute this one.
+            self._interrupt_requested = False
+            try:
+                from agent.core import clear_generation_interrupt
+
+                clear_generation_interrupt()
+            except Exception:
+                pass
             # Fresh activity line for this turn (Thinking animation).
             self._stop_activity_timer()
             self._remove_activity_widget()
             self._activity_phase = "idle"
             # Composer stays enabled so the user can type / queue the next prompt.
             try:
-                inp = self.query_one("#prompt-input", Input)
+                inp = self.query_one("#prompt-input", PromptArea)
                 inp.disabled = False
             except Exception:
                 pass
@@ -2492,16 +2800,21 @@ def build_app_class():
         def _turn_finished(self) -> None:
             # Collapse any leftover spinner / open thinking row.
             self._stop_activity_timer()
-            if self._thinking_widget is not None:
+            if self._interrupt_requested:
+                self._discard_thinking_ui()
+            elif self._thinking_widget is not None:
                 self.ui_thinking_end()
             self._clear_waiting_activity()
+            self._interrupt_requested = False
+            self._response_widget = None
+            self._response_text = ""
             next_prompt: str | None = None
             with self._busy_lock:
                 self._busy = False
                 if self._prompt_queue:
                     next_prompt = self._prompt_queue.pop(0)
             try:
-                inp = self.query_one("#prompt-input", Input)
+                inp = self.query_one("#prompt-input", PromptArea)
                 inp.disabled = False
                 if next_prompt is None:
                     inp.focus()
@@ -2531,6 +2844,8 @@ def build_app_class():
             self._thinking_buf = ""
             self._thinking_tokens = 0
             self._stream_widget = None
+            self._response_widget = None
+            self._response_text = ""
 
             chat = self._chat()
             welcome = None
@@ -2615,7 +2930,7 @@ def build_app_class():
 
             - With selected text: copy to clipboard (do **not** interrupt).
             - While a turn is running (no selection): request stream cancel.
-            - Second Ctrl+C within a short window (or when idle after arming): quit.
+            - Second Ctrl+C within a short window: quit, running turn or not.
 
             Ctrl+Shift+C is handled separately by ``action_copy_selection`` so
             the terminal copy chord never cancels a running response.
@@ -2630,28 +2945,32 @@ def build_app_class():
                 return
 
             now = time.monotonic()
+            # Armed by a previous press — the second Ctrl+C always quits, even
+            # while the interrupted turn is still unwinding on its worker thread.
+            if now <= float(self._quit_armed_until or 0):
+                self.exit()
+                return
+
             with self._busy_lock:
                 busy = self._busy
 
+            self._quit_armed_until = now + self._QUIT_ARM_SECONDS
             if busy:
+                self._interrupt_requested = True
                 try:
                     from agent.core import request_generation_interrupt
 
                     request_generation_interrupt()
                 except Exception:
                     pass
-                self._quit_armed_until = now + self._QUIT_ARM_SECONDS
+                # Drop the live thinking / spinner chrome immediately.
+                self._discard_thinking_ui()
                 self.ui_status(
-                    "Generation stopping · press Ctrl+C again to quit",
+                    "Stopping · press Ctrl+C again to quit",
                     kind="warn",
                 )
                 return
 
-            if now <= float(self._quit_armed_until or 0):
-                self.exit()
-                return
-
-            self._quit_armed_until = now + self._QUIT_ARM_SECONDS
             self.ui_status("Press Ctrl+C again to quit", kind="info")
 
         def action_clear_chat(self) -> None:
@@ -2665,7 +2984,7 @@ def build_app_class():
             """Ctrl+K — clear the composer (and dismiss menus)."""
             if self._dismiss_speech_menu():
                 return
-            inp = self.query_one("#prompt-input", Input)
+            inp = self.query_one("#prompt-input", PromptArea)
             inp.value = ""
             inp.focus()
             self._dismiss_slash_palette()
@@ -2673,7 +2992,7 @@ def build_app_class():
 
         def action_open_commands(self) -> None:
             """Ctrl+/ — open (or toggle closed) the slash command palette."""
-            inp = self.query_one("#prompt-input", Input)
+            inp = self.query_one("#prompt-input", PromptArea)
             if self._busy:
                 return
             self._dismiss_speech_menu()
@@ -2698,7 +3017,7 @@ def build_app_class():
             if self._busy:
                 return
             try:
-                inp = self.query_one("#prompt-input", Input)
+                inp = self.query_one("#prompt-input", PromptArea)
                 inp.focus()
             except Exception:
                 pass
@@ -2732,9 +3051,10 @@ def build_app_class():
                 "commands",
                 "ctrl+/ palette  ·  ctrl+o chats  ·  ctrl+s speech  ·  tab complete",
             )
+            pal = self._pal()
             shortcuts = Text()
-            shortcuts.append(f"{GLYPH_SECTION} ", style="#6b6b6b")
-            shortcuts.append("shortcuts\n", style="bold #7a7a7a")
+            shortcuts.append(f"{GLYPH_SECTION} ", style=pal["muted"])
+            shortcuts.append("shortcuts\n", style=f"bold {pal['text_soft']}")
             for key, desc in (
                 ("Enter / Ctrl+J", "Send message (queues up to 3 while generating)"),
                 ("Ctrl+C", "Stop generation"),
@@ -2749,8 +3069,8 @@ def build_app_class():
                 ("Ctrl+K", "Clear input + dismiss menus"),
                 ("Ctrl+L", "Clear conversation"),
             ):
-                shortcuts.append(f"  {key:<16}", style="#7a7a7a")
-                shortcuts.append(f"  {desc}\n", style="#555555")
+                shortcuts.append(f"  {key:<16}", style=pal["muted"])
+                shortcuts.append(f"  {desc}\n", style=pal["faint"])
             self._mount_block(shortcuts, "system")
 
         def action_submit_input(self) -> None:
@@ -2810,7 +3130,7 @@ def build_app_class():
                 pass
             # Armed stays True so a second Enter still sends typed text.
             try:
-                self.query_one("#speech-input", Input).focus()
+                self.query_one("#speech-input", PromptArea).focus()
             except Exception:
                 pass
             try:
@@ -2832,7 +3152,7 @@ def build_app_class():
             # Prefill from the main composer when it holds a normal draft.
             draft = ""
             try:
-                main = self.query_one("#prompt-input", Input)
+                main = self.query_one("#prompt-input", PromptArea)
                 draft = main.value or ""
                 if draft.strip().startswith("/"):
                     draft = ""
@@ -2840,7 +3160,7 @@ def build_app_class():
                 draft = ""
 
             try:
-                speech = self.query_one("#speech-input", Input)
+                speech = self.query_one("#speech-input", PromptArea)
                 speech.value = draft
                 speech.cursor_position = len(speech.value or "")
             except Exception:
@@ -2852,7 +3172,7 @@ def build_app_class():
             self._speech_pending_submit = False
             self._voice_error_message = ""
             try:
-                self.query_one("#speech-input", Input).focus()
+                self.query_one("#speech-input", PromptArea).focus()
             except Exception:
                 pass
             try:
@@ -2888,7 +3208,7 @@ def build_app_class():
                     pass
             if closed:
                 try:
-                    self.query_one("#prompt-input", Input).focus()
+                    self.query_one("#prompt-input", PromptArea).focus()
                 except Exception:
                     pass
                 try:
@@ -2905,7 +3225,7 @@ def build_app_class():
             if voice.active or self._voice_active:
                 return
             try:
-                base = self.query_one("#speech-input", Input).value or ""
+                base = self.query_one("#speech-input", PromptArea).value or ""
             except Exception:
                 base = ""
             self._voice_error_message = ""
@@ -2967,7 +3287,7 @@ def build_app_class():
             if not self._speech_open or (not force and not self._speech_pending_submit):
                 return
             try:
-                text = (self.query_one("#speech-input", Input).value or "").strip()
+                text = (self.query_one("#speech-input", PromptArea).value or "").strip()
             except Exception:
                 text = ""
             self._speech_pending_submit = False
@@ -2984,7 +3304,7 @@ def build_app_class():
                     menu.set_error(self._voice_error_message)
                 else:
                     menu.set_recording(False)
-                self.query_one("#speech-input", Input).focus()
+                self.query_one("#speech-input", PromptArea).focus()
             except Exception:
                 pass
 
@@ -2993,7 +3313,7 @@ def build_app_class():
             if not self._speech_open:
                 return
             try:
-                inp = self.query_one("#speech-input", Input)
+                inp = self.query_one("#speech-input", PromptArea)
             except Exception:
                 return
             inp.value = str(text or "")
@@ -3094,18 +3414,18 @@ def build_app_class():
                 return
             if self._dismiss_sessions_menu():
                 try:
-                    self.query_one("#prompt-input", Input).focus()
+                    self.query_one("#prompt-input", PromptArea).focus()
                 except Exception:
                     pass
                 return
             if self._dismiss_slash_palette(clear_slash_draft=True):
                 try:
-                    self.query_one("#prompt-input", Input).focus()
+                    self.query_one("#prompt-input", PromptArea).focus()
                 except Exception:
                     pass
                 return
             try:
-                inp = self.query_one("#prompt-input", Input)
+                inp = self.query_one("#prompt-input", PromptArea)
             except Exception:
                 return
             if inp.value:

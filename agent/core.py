@@ -25,6 +25,7 @@ from agent.terminal import (
     print_info,
     print_lab_status,
     print_ok,
+    print_response_model,
     print_thinking_delta,
     print_thinking_footer,
     print_thinking_header,
@@ -1021,8 +1022,9 @@ _interrupted = False
 def request_generation_interrupt() -> bool:
     """Request cooperative cancellation of the in-flight chat stream.
 
-    Used by the TUI (Ctrl+C) and classic SIGQUIT handler. The streaming loop
-    checks the flag between chunks and exits cleanly.
+    Used by the TUI (Ctrl+C) and classic SIGQUIT handler. The flag stays set
+    for the rest of the turn: the streaming loop exits between chunks, and the
+    continuation / tool-call loops stop instead of starting another stream.
 
     Returns:
         bool: True if a generation may be in progress (flag was set).
@@ -1030,6 +1032,12 @@ def request_generation_interrupt() -> bool:
     global _interrupted
     _interrupted = True
     return True
+
+
+def clear_generation_interrupt() -> None:
+    """Clear the interrupt flag — called when a new user turn starts."""
+    global _interrupted
+    _interrupted = False
 
 
 def generation_interrupt_requested() -> bool:
@@ -1611,6 +1619,10 @@ def _stream_thinking_response(
     Returns:
         dict: The full assistant message containing content, thinking (if any), and tool calls.
     """
+    if generation_interrupt_requested():
+        # A Ctrl+C earlier in this turn stays honoured: never open a new stream.
+        return {"role": "assistant", "content": ""}
+
     spinner = _Spinner("Thinking").start()
     t_start = time.monotonic()
     session_data = dict(session or {})
@@ -1628,6 +1640,7 @@ def _stream_thinking_response(
     eval_tokens = 0
     in_thinking = False
     thinking_displayed = False
+    interrupted = False
 
     try:
         base_runtime = get_runtime_config(session_data)
@@ -1712,8 +1725,6 @@ def _stream_thinking_response(
     _last_render = 0.0  # throttle Live.update() calls
     _RENDER_INTERVAL = 0.08  # seconds between re-renders (~12 FPS)
 
-    global _interrupted
-    _interrupted = False
     interrupt_signal = getattr(signal, "SIGQUIT", None) or getattr(signal, "SIGBREAK", None)
     old_handler = None
     if interrupt_signal is not None:
@@ -1724,8 +1735,9 @@ def _stream_thinking_response(
 
     try:
         for chunk in stream:
-            if _interrupted:
+            if generation_interrupt_requested():
                 spinner.stop()
+                interrupted = True
                 if in_thinking:
                     in_thinking = False
                     print_thinking_footer("interrupted")
@@ -1941,13 +1953,24 @@ def _stream_thinking_response(
 
     if in_thinking:
         # Stream ended while still in thinking (no content followed)
-        print_thinking_footer()
+        print_thinking_footer("interrupted" if interrupted else None)
+
+    # Which model actually answered (fallbacks may have switched mid-turn).
+    model_label = ""
+    model_provider = ""
+    try:
+        answered_with = resolve_model(request_session.get("model_id"), runtime_config)
+        model_label = answered_with.display_name
+        model_provider = answered_with.provider
+    except (ModelProviderError, RuntimeConfigurationError):
+        pass
 
     if content_buf:
         # Flush any throttled stream frame, then pin the final markdown card.
         if display_is_tui():
             print_content_stream(content_buf)
         print_assistant_message(content_buf)
+        print_response_model(model_label, detail=model_provider)
 
     # Verbose stats
     if verbose:
@@ -1968,6 +1991,9 @@ def _stream_thinking_response(
         assistant_msg["thinking"] = thinking_buf
     if response_provider_metadata:
         assistant_msg["provider_metadata"] = response_provider_metadata
+    if model_label:
+        # Kept on the message so a reloaded transcript still shows its model.
+        assistant_msg["model_label"] = model_label
     assistant_msg["_done_reason"] = done_reason
     assistant_msg["_eval_count"] = eval_tokens
     assistant_msg["_num_predict"] = int(guarded_options.get("num_predict", 0))
@@ -2002,7 +2028,8 @@ def _stream_complete_response(
     continuation_rounds = 0
 
     while (
-        not response.get("tool_calls")
+        not generation_interrupt_requested()
+        and not response.get("tool_calls")
         and combined_content
         and _output_limit_reached(
             response.get("_done_reason", ""),
@@ -2063,6 +2090,8 @@ def _stream_complete_response(
         combined["provider_metadata"] = response["provider_metadata"]
     if response.get("tool_calls"):
         combined["tool_calls"] = response["tool_calls"]
+    if response.get("model_label"):
+        combined["model_label"] = response["model_label"]
     return combined
 
 
@@ -2430,6 +2459,81 @@ def _configured_model_rows(session: dict | None = None) -> list[dict]:
     runtime = get_runtime_config(session or {})
     return available_models(runtime)
 
+
+# Families that read better in full ("gemini-3.5-flash" says more than "gemini").
+_FULL_NAME_MODEL_FAMILIES: tuple[str, ...] = ("gemini", "gemma")
+
+
+def _model_base_name(model_id: str, display_name: str = "") -> str:
+    """Strip provider prefixes, vendor paths, and pricing suffixes from an id."""
+    raw = str(model_id or "").strip() or str(display_name or "").strip()
+    if not raw:
+        return ""
+    # "nvidia:nvidia/nemotron-3-ultra-550b-a55b" → "nvidia/nemotron-3-ultra-550b-a55b"
+    _provider, _, remainder = raw.partition(":")
+    base = (remainder or raw).strip()
+    # OpenRouter tiers: "openai/gpt-oss-20b:free" → "openai/gpt-oss-20b"
+    base = base.split(":", 1)[0]
+    # Vendor path: "openai/gpt-oss-20b" → "gpt-oss-20b"
+    base = base.rsplit("/", 1)[-1]
+    return base.strip()
+
+
+def _model_family_name(base: str) -> str:
+    """Keep the leading words of a model name, dropping version/size segments.
+
+    ``nemotron-3-ultra-550b-a55b`` → ``nemotron`` and ``gpt-oss-20b`` →
+    ``gpt-oss``; anything that starts with a digit segment is left alone.
+    """
+    segments = [segment for segment in str(base or "").split("-") if segment]
+    if not segments:
+        return str(base or "")
+    words: list[str] = []
+    for segment in segments:
+        if any(character.isdigit() for character in segment):
+            break
+        words.append(segment)
+    return "-".join(words) if words else segments[0]
+
+
+def _short_model_name(model_id: str, display_name: str = "") -> str:
+    """Menu label for one model — short family name, or the full model name.
+
+    Gemini and Gemma keep their full names because the version *is* the choice;
+    long provider identifiers collapse to the family ("nemotron").
+    """
+    if str(model_id or "") == LOCAL_MODEL_ID:
+        return "local"
+    base = _model_base_name(model_id, display_name)
+    if not base:
+        return str(model_id or "")
+    if base.casefold().startswith(_FULL_NAME_MODEL_FAMILIES):
+        return base
+    return _model_family_name(base)
+
+
+def model_menu_rows(session: dict | None = None) -> list[dict]:
+    """Configured models plus a unique short ``label`` for menus and /model.
+
+    Collisions fall back to the full model name, then to the raw id, so every
+    row stays selectable by exactly what the menu shows.
+    """
+    rows = _configured_model_rows(session)
+    labels: list[str] = []
+    for model in rows:
+        model_id = str(model.get("id") or "")
+        display_name = str(model.get("display_name") or "")
+        label = _short_model_name(model_id, display_name)
+        if label in labels:
+            label = _model_base_name(model_id, display_name) or model_id
+        if label in labels:
+            label = model_id
+        labels.append(label)
+    return [
+        {**model, "label": label}
+        for model, label in zip(rows, labels)
+    ]
+
 # Common model knobs surfaced in Tab autocomplete (full list still via /set parameter).
 _PARAMETER_SPECS: tuple[tuple[str, str], ...] = (
     ("temperature", "Sampling randomness  ·  e.g. 0.25"),
@@ -2457,8 +2561,8 @@ def _build_cli_slash_specs() -> tuple[tuple[str, str], ...]:
         ("/profile", "Show or set profile  ·  /profile <name>"),
         ("/set profile", "Set profile  ·  manual|auto|low-vram|balanced"),
         ("/models", "List configured models"),
-        ("/model", "Show or select model  ·  /model <id|number>"),
-        ("/set model", "Select configured model  ·  /set model <id|number>"),
+        ("/model", "Show or select model  ·  /model <name|number>"),
+        ("/set model", "Select configured model  ·  /set model <name|number>"),
         ("/fast", "Mode · Fast response"),
         ("/ultrathink", "Mode · Ultra Thinking"),
         ("/deepresearch", "Mode · Deep Research"),
@@ -2467,13 +2571,14 @@ def _build_cli_slash_specs() -> tuple[tuple[str, str], ...]:
         specs.append((f"/profile {name}", desc))
         specs.append((f"/set profile {name}", desc))
     try:
-        for model in _configured_model_rows():
-            model_id = str(model.get("id") or "")
-            if not model_id:
+        # Menus list short names ("nemotron"), not raw provider ids.
+        for model in model_menu_rows():
+            label = str(model.get("label") or model.get("id") or "")
+            if not label:
                 continue
             description = f"{model.get('display_name')} · {model.get('provider')}"
-            specs.append((f"/model {model_id}", description))
-            specs.append((f"/set model {model_id}", description))
+            specs.append((f"/model {label}", description))
+            specs.append((f"/set model {label}", description))
     except Exception:
         pass
 
@@ -2542,8 +2647,8 @@ _COMMAND_HELP_ENTRIES: tuple[tuple[str, str], ...] = (
     ("/load [name|index]", "Load a session (lists if no arg)"),
     ("/profile [name]", "Show or set profile (manual · auto · low-vram · balanced)"),
     ("/set profile <name>", "Same as /profile <name>"),
-    ("/model [id|number]", "Show or select a configured model"),
-    ("/set model <id|number>", "Same as /model <id|number>"),
+    ("/model [name|number]", "Show or select a configured model"),
+    ("/set model <name|number>", "Same as /model <name|number>"),
     ("/fast", "Switch this conversation to Fast mode"),
     ("/ultrathink", "Switch this conversation to Ultra Thinking mode"),
     ("/deepresearch", "Switch this conversation to Deep Research mode"),
@@ -2611,17 +2716,18 @@ def _apply_agent_mode(session: dict, mode: str) -> None:
 
 
 def _print_model_catalog(session: dict) -> None:
-    rows = _configured_model_rows(session)
+    rows = model_menu_rows(session)
     current_id = str(session.get("model_id") or LOCAL_MODEL_ID)
     print_info("Configured models")
     for index, model in enumerate(rows, 1):
         model_id = str(model.get("id") or "")
+        label = str(model.get("label") or model_id)
         marker = "  ← active" if model_id == current_id else ""
         _console.print(
-            f"    [bold]{index:<2}[/] [cyan]{model_id}[/]  "
+            f"    [bold]{index:<2}[/] [cyan]{label}[/]  "
             f"[dim]{model.get('display_name')} · {model.get('provider')}{marker}[/]"
         )
-    print_info("Usage · /model <id|number>  or  /set model <id|number>")
+    print_info("Usage · /model <name|number>  or  /set model <name|number>")
     _console.print()
 
 
@@ -2633,7 +2739,7 @@ def _apply_model(
     """Resolve and persist one configured provider model for CLI/TUI chat."""
     query = str(requested or "").strip()
     previous_id = str(session.get("model_id") or LOCAL_MODEL_ID)
-    rows = _configured_model_rows(session)
+    rows = model_menu_rows(session)
     if not query:
         _print_model_catalog(session)
         return
@@ -2645,10 +2751,12 @@ def _apply_model(
             selected = rows[index]
     folded = query.casefold()
     if selected is None:
+        # Exact hit on what the menu shows, the raw id, or the display name.
         selected = next(
             (
                 model for model in rows
                 if folded in {
+                    str(model.get("label") or "").casefold(),
                     str(model.get("id") or "").casefold(),
                     str(model.get("display_name") or "").casefold(),
                 }
@@ -2658,7 +2766,8 @@ def _apply_model(
     if selected is None:
         matches = [
             model for model in rows
-            if folded in str(model.get("id") or "").casefold()
+            if folded in str(model.get("label") or "").casefold()
+            or folded in str(model.get("id") or "").casefold()
             or folded in str(model.get("display_name") or "").casefold()
         ]
         if len(matches) == 1:
@@ -3958,6 +4067,8 @@ def process_user_turn(
     Handles system-prompt sync, optional vault auto-index, streaming generation,
     tool-call rounds, and background history compaction.
     """
+    # A Ctrl+C from an earlier turn must never cancel this one.
+    clear_generation_interrupt()
     if default_system_prompt is None:
         default_system_prompt = load_default_system_prompt()
     try:
@@ -4107,6 +4218,19 @@ def process_user_turn(
         or vault_index_loop_state.get("expected_arguments")
         or vault_index_loop_state.get("blocked_reason")
     ):
+        if generation_interrupt_requested():
+            # Ctrl+C ends the whole turn, not just the stream that was running.
+            # Unanswered tool calls would poison the next request, so drop them.
+            if assistant_msg.get("tool_calls"):
+                assistant_msg.pop("tool_calls", None)
+                if (
+                    session["history"]
+                    and history
+                    and history[-1] is assistant_msg
+                    and not str(assistant_msg.get("content") or "").strip()
+                ):
+                    history.pop()
+            break
         if not assistant_msg.get("tool_calls"):
             automatic_call = _automatic_vault_index_tool_call(vault_index_loop_state)
             if automatic_call is None:

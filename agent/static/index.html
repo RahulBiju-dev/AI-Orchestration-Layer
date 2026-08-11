@@ -11,13 +11,13 @@
   <link rel="preload" href="/fonts/grotesk-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="icon" href="/favicon.png" type="image/png">
   <!-- Loaded in numeric order: the cascade depends on it. -->
-  <link rel="stylesheet" href="/css/01-tokens.css?v=2">
-  <link rel="stylesheet" href="/css/02-base.css?v=2">
-  <link rel="stylesheet" href="/css/03-sidebar.css?v=2">
-  <link rel="stylesheet" href="/css/04-chat.css?v=2">
-  <link rel="stylesheet" href="/css/05-composer.css?v=2">
-  <link rel="stylesheet" href="/css/06-overlays.css?v=2">
-  <link rel="stylesheet" href="/css/07-responsive.css?v=2">
+  <link rel="stylesheet" href="/css/01-tokens.css?v=3">
+  <link rel="stylesheet" href="/css/02-base.css?v=3">
+  <link rel="stylesheet" href="/css/03-sidebar.css?v=3">
+  <link rel="stylesheet" href="/css/04-chat.css?v=3">
+  <link rel="stylesheet" href="/css/05-composer.css?v=3">
+  <link rel="stylesheet" href="/css/06-overlays.css?v=3">
+  <link rel="stylesheet" href="/css/07-responsive.css?v=3">
 </head>
 <body>
   <div class="sky" aria-hidden="true">
@@ -69,6 +69,7 @@
           <h2 id="chat-title">New conversation</h2>
         </div>
         <div class="topbar-actions">
+          <span id="context-label" class="context-readout" title="Estimated context window usage">0 / —</span>
           <button id="theme-btn" class="topbar-theme-btn" type="button" aria-label="Choose color theme" aria-haspopup="dialog" aria-controls="theme-dialog" aria-expanded="false" title="Themes">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="8" cy="8" r="2.25"/><circle cx="16" cy="8" r="2.25"/>
@@ -83,13 +84,13 @@
 
       <form id="composer-form" class="composer" autocomplete="off">
         <div class="composer-inner">
+          <span id="context-meter" class="context-bar" aria-hidden="true"><span id="context-fill"></span></span>
           <textarea id="chat-input" rows="1" placeholder="Message Selene..." aria-label="Message Selene"></textarea>
           <div id="slash-menu" class="slash-menu" role="listbox" aria-label="Slash commands"></div>
           <div class="composer-footer">
             <div class="composer-meta">
               <div id="model-picker" class="model-picker">
                 <button id="model-trigger" class="model-trigger" type="button" aria-haspopup="menu" aria-controls="model-menu" aria-expanded="false">
-                  <span class="model-picker-label">Model</span>
                   <span id="model-label">Gemma 4 E4B</span>
                   <svg class="mode-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
                 </button>
@@ -123,10 +124,6 @@
                   </button>
                 </div>
               </div>
-              <div class="context-meter" title="Estimated context window usage">
-                <span id="context-label">0 / —</span>
-                <span class="meter-track"><span id="context-fill"></span></span>
-              </div>
             </div>
             <div class="composer-actions">
               <button id="mic-btn" class="mic-btn" type="button" aria-label="Start voice input" aria-pressed="false" title="Start voice input">
@@ -135,7 +132,14 @@
                   <path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/>
                 </svg>
               </button>
-              <button id="send-btn" class="send-btn" type="submit" disabled>Send</button>
+              <button id="send-btn" class="send-btn" type="submit" aria-label="Send message" title="Send message" disabled>
+                <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 20V4M5 11l7-7 7 7"/>
+                </svg>
+                <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="7" y="7" width="10" height="10" rx="1.5"/>
+                </svg>
+              </button>
             </div>
           </div>
         </div>

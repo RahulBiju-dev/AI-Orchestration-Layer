@@ -12,7 +12,7 @@
   padding: 14px 16px;
   border: 1px solid var(--line-strong);
   border-left: 2px solid var(--accent);
-  border-radius: 8px;
+  border-radius: 4px;
   background: var(--panel);
   color: var(--text-soft);
   font-family: var(--ui-label);
@@ -465,7 +465,7 @@ output {
   width: min(540px, 100%);
   overflow: hidden;
   border: 1px solid var(--line-strong);
-  border-radius: 16px;
+  border-radius: 10px;
   background: var(--surface);
   box-shadow: var(--shadow);
   opacity: 0;
@@ -543,7 +543,7 @@ output {
   min-height: 44px;
   padding: 10px 18px;
   border: 1px solid var(--accent);
-  border-radius: 8px;
+  border-radius: 4px;
   background: var(--accent);
   color: var(--select-fg);
   font-family: var(--ui-label);
@@ -589,7 +589,7 @@ output {
   max-height: min(760px, 88dvh);
   overflow: hidden;
   border: 1px solid var(--line-strong);
-  border-radius: 16px;
+  border-radius: 10px;
   background: var(--surface);
   opacity: 0;
   transform: translateY(10px) scale(0.985);
@@ -639,7 +639,7 @@ output {
   min-height: 68px;
   padding: 11px 13px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 6px;
   background: var(--surface-high);
   color: var(--text-soft);
   cursor: pointer;
@@ -665,7 +665,7 @@ output {
   height: 36px;
   overflow: hidden;
   border: 1px solid var(--line-strong);
-  border-radius: 9px;
+  border-radius: 4px;
   background: linear-gradient(
     90deg,
     var(--preview-bg) 0 25%,

@@ -140,6 +140,74 @@ class DisplaySinkRoutingTests(unittest.TestCase):
         self.assertIn(("thinking_delta", "Check the evidence first."), calls)
         self.assertIn(("content_final", "The final answer."), calls)
 
+    def test_interrupt_stops_the_stream_and_blocks_further_model_calls(self):
+        from agent import core
+
+        def endless_chunks():
+            while True:
+                yield SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="",
+                        thinking="still reasoning ",
+                        planning="",
+                        tool_calls=[],
+                        provider_metadata={},
+                    ),
+                    prompt_eval_count=1,
+                    eval_count=1,
+                    done_reason="",
+                )
+
+        deltas: list[str] = []
+
+        class FakeSink:
+            is_tui = True
+
+            def lab_status(self, message, *, kind="info", detail=None):
+                deltas.append(f"{kind}:{message}")
+
+            def thinking_header(self):
+                pass
+
+            def thinking_delta(self, text):
+                deltas.append(text)
+                # Ctrl+C lands while the model is mid-thought.
+                if len(deltas) == 3:
+                    core.request_generation_interrupt()
+
+            def thinking_footer(self, label=None):
+                deltas.append(f"footer:{label}")
+
+            def content_final(self, text):
+                pass
+
+        terminal.set_display_sink(FakeSink())
+        core.clear_generation_interrupt()
+        try:
+            with patch.object(
+                core, "chat_with_model", return_value=endless_chunks()
+            ) as chat:
+                response = core._stream_thinking_response(
+                    "selene",
+                    [{"role": "user", "content": "think forever"}],
+                    session={"model_id": "local:default", "options": {}},
+                )
+                self.assertEqual(chat.call_count, 1)
+                self.assertEqual(response["content"], "")
+                self.assertIn("footer:interrupted", deltas)
+
+                # The flag is sticky: later calls in the same turn never reach
+                # the provider, so a tool loop cannot restart generation.
+                followup = core._stream_thinking_response(
+                    "selene",
+                    [{"role": "user", "content": "continue"}],
+                    session={"model_id": "local:default", "options": {}},
+                )
+                self.assertEqual(chat.call_count, 1)
+                self.assertEqual(followup["content"], "")
+        finally:
+            core.clear_generation_interrupt()
+
     def test_model_errors_update_tui_through_ordered_fallback_chain(self):
         from agent import core
         from agent.model_providers import ProviderNetworkError
@@ -444,6 +512,326 @@ class TuiAppSmokeTests(unittest.TestCase):
 
         asyncio.run(_run())
         core_mod._interrupted = False
+
+    def test_ctrl_c_quits_on_second_press_while_still_busy(self):
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            self.skipTest("textual not installed")
+
+        import asyncio
+
+        from agent import core as core_mod
+        from agent.tui import build_app_class
+
+        AppCls = build_app_class()
+        app = AppCls(
+            session={"history": True, "system": "", "options": {}, "verbose": False,
+                     "wordwrap": True, "format": "", "think": True,
+                     "runtime_profile": "manual"},
+            history=[],
+            default_system_prompt="sys",
+            process_turn=lambda *a, **k: None,
+            handle_command=lambda *a, **k: True,
+            slash_completions=("/help",),
+            slash_descriptions={"/help": "Help"},
+            status_meta={"profile": "manual"},
+        )
+
+        async def _run():
+            async with app.run_test() as pilot:
+                core_mod._interrupted = False
+                app._busy = True
+                app.action_interrupt_or_quit()
+                # The turn thread has not unwound yet — a second press must
+                # still quit rather than re-arming the interrupt.
+                self.assertTrue(app._busy)
+                app.action_interrupt_or_quit()
+                await pilot.pause()
+                self.assertTrue(app.return_code is not None or not app.is_running)
+
+        asyncio.run(_run())
+        core_mod._interrupted = False
+
+    def test_ctrl_c_removes_thinking_instead_of_folding_it(self):
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            self.skipTest("textual not installed")
+
+        import asyncio
+
+        from agent import core as core_mod
+        from agent.tui import build_app_class
+
+        AppCls = build_app_class()
+        app = AppCls(
+            session={"history": True, "system": "", "options": {}, "verbose": False,
+                     "wordwrap": True, "format": "", "think": True,
+                     "runtime_profile": "manual"},
+            history=[],
+            default_system_prompt="sys",
+            process_turn=lambda *a, **k: None,
+            handle_command=lambda *a, **k: True,
+            slash_completions=("/help",),
+            slash_descriptions={"/help": "Help"},
+            status_meta={"profile": "manual"},
+        )
+
+        async def _run():
+            async with app.run_test() as pilot:
+                core_mod._interrupted = False
+                app._busy = True
+                app.ui_thinking_start()
+                app.ui_thinking_delta("Weighing the options before answering.")
+                await pilot.pause()
+                self.assertIsNotNone(app._thinking_widget)
+
+                app.action_interrupt_or_quit()
+                await pilot.pause()
+                # No live row and no leftover fold.
+                self.assertIsNone(app._thinking_widget)
+                self.assertEqual(len(list(app.query("ThinkingFold"))), 0)
+
+                # Chunks still in flight must not resurrect the row.
+                app.ui_thinking_delta("late chunk")
+                app.ui_thinking_end("interrupted")
+                await pilot.pause()
+                self.assertIsNone(app._thinking_widget)
+                self.assertEqual(len(list(app.query("ThinkingFold"))), 0)
+
+                app._busy = False
+                app._turn_finished()
+                self.assertFalse(app._interrupt_requested)
+
+        asyncio.run(_run())
+        core_mod._interrupted = False
+
+    def test_response_block_shows_faint_model_footer(self):
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            self.skipTest("textual not installed")
+
+        import asyncio
+
+        from agent.tui import build_app_class
+
+        AppCls = build_app_class()
+        app = AppCls(
+            session={"history": True, "system": "", "options": {}, "verbose": False,
+                     "wordwrap": True, "format": "", "think": True,
+                     "runtime_profile": "manual"},
+            history=[],
+            default_system_prompt="sys",
+            process_turn=lambda *a, **k: None,
+            handle_command=lambda *a, **k: True,
+            slash_completions=("/help",),
+            slash_descriptions={"/help": "Help"},
+            status_meta={"profile": "manual", "model": "gemini-3.5-flash"},
+        )
+
+        async def _run():
+            async with app.run_test() as pilot:
+                app.ui_content_final("The answer.")
+                app.ui_response_model("gemini-3.5-flash", "Google Gemini")
+                await pilot.pause()
+                blocks = [
+                    block for block in app.query("MessageBlock")
+                    if block.has_class("assistant")
+                ]
+                self.assertEqual(len(blocks), 1)
+                import io
+
+                from rich.console import Console
+
+                console = Console(file=io.StringIO(), width=90, no_color=True)
+                visual = blocks[0].visual
+                console.print(getattr(visual, "_renderable", visual))
+                text = console.file.getvalue()
+                self.assertIn("The answer.", text)
+                self.assertIn("gemini-3.5-flash", text)
+                self.assertIn("Google Gemini", text)
+
+        asyncio.run(_run())
+
+    def test_prompt_and_response_blocks_use_distinct_role_colors(self):
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            self.skipTest("textual not installed")
+
+        import asyncio
+
+        from agent.tui import build_app_class
+        from agent.tui_themes import THEME_ORDER, rich_palette
+
+        for name in THEME_ORDER:
+            palette = rich_palette(name)
+            self.assertNotEqual(palette["user"], palette["assistant"], name)
+            self.assertNotEqual(palette["user_bg"], palette["assistant_bg"], name)
+
+        AppCls = build_app_class()
+        app = AppCls(
+            session={"history": True, "system": "", "options": {}, "verbose": False,
+                     "wordwrap": True, "format": "", "think": True,
+                     "runtime_profile": "manual"},
+            history=[],
+            default_system_prompt="sys",
+            process_turn=lambda *a, **k: None,
+            handle_command=lambda *a, **k: True,
+            slash_completions=("/help",),
+            slash_descriptions={"/help": "Help"},
+            status_meta={"profile": "manual"},
+        )
+
+        async def _run():
+            async with app.run_test() as pilot:
+                app.ui_add_user("what is the plan?")
+                app.ui_content_final("Here is the plan.")
+                await pilot.pause()
+                user_block = next(
+                    block for block in app.query("MessageBlock")
+                    if block.has_class("user")
+                )
+                assistant_block = next(
+                    block for block in app.query("MessageBlock")
+                    if block.has_class("assistant")
+                )
+                self.assertNotEqual(
+                    user_block.styles.background, assistant_block.styles.background
+                )
+                # Shape carries the difference too: the prompt is a full box,
+                # the response is an open block behind a left rule.
+                self.assertTrue(all(user_block.styles.border))
+                self.assertFalse(assistant_block.styles.border_top[0])
+                self.assertTrue(assistant_block.styles.border_left[0])
+
+                # Every place theme must resolve the role variables.
+                for name in ("Tokyo", "Rome", "Havana"):
+                    app.theme = name
+                    await pilot.pause()
+                    self.assertNotEqual(
+                        user_block.styles.background,
+                        assistant_block.styles.background,
+                    )
+
+        asyncio.run(_run())
+
+    def test_composer_grows_for_multi_line_prompts(self):
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            self.skipTest("textual not installed")
+
+        import asyncio
+
+        from agent.tui import build_app_class
+
+        AppCls = build_app_class()
+        submitted: list[str] = []
+        app = AppCls(
+            session={"history": True, "system": "", "options": {}, "verbose": False,
+                     "wordwrap": True, "format": "", "think": True,
+                     "runtime_profile": "manual"},
+            history=[],
+            default_system_prompt="sys",
+            process_turn=lambda *a, **k: None,
+            handle_command=lambda *a, **k: True,
+            slash_completions=("/help",),
+            slash_descriptions={"/help": "Help"},
+            status_meta={"profile": "manual"},
+        )
+
+        async def _run():
+            async with app.run_test(size=(90, 26)) as pilot:
+                app._submit = lambda text: submitted.append(text)
+                composer = app.query_one("#prompt-input")
+                shell = app.query_one("#input-shell")
+                await pilot.click("#prompt-input")
+                await pilot.pause()
+                single_line = shell.size.height
+
+                # Shift+Enter adds a line instead of sending.
+                for character in "one":
+                    await pilot.press(character)
+                await pilot.press("shift+enter")
+                for character in "two":
+                    await pilot.press(character)
+                await pilot.pause()
+                self.assertEqual(composer.value, "one\ntwo")
+                self.assertEqual(submitted, [])
+                self.assertGreater(shell.size.height, single_line)
+
+                # Enter sends the whole multi-line prompt and clears the box.
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(submitted, ["one\ntwo"])
+                self.assertEqual(composer.value, "")
+                self.assertEqual(shell.size.height, single_line)
+
+                # Soft-wrapped text grows the box too (no explicit newlines).
+                composer.value = "word " * 80
+                await pilot.pause()
+                self.assertGreater(shell.size.height, single_line)
+
+                # …but never past the cap, so the transcript keeps its room.
+                composer.value = "\n".join(f"line {index}" for index in range(60))
+                await pilot.pause()
+                self.assertLessEqual(shell.size.height, 14)
+
+        asyncio.run(_run())
+
+    def test_slash_palette_navigation_survives_the_text_area_composer(self):
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            self.skipTest("textual not installed")
+
+        import asyncio
+
+        from agent.tui import build_app_class
+
+        AppCls = build_app_class()
+        submitted: list[str] = []
+        app = AppCls(
+            session={"history": True, "system": "", "options": {}, "verbose": False,
+                     "wordwrap": True, "format": "", "think": True,
+                     "runtime_profile": "manual"},
+            history=[],
+            default_system_prompt="sys",
+            process_turn=lambda *a, **k: None,
+            handle_command=lambda *a, **k: True,
+            slash_completions=("/help", "/model", "/models", "/quit"),
+            slash_descriptions={"/help": "Help", "/model": "Model",
+                                "/models": "List", "/quit": "Exit"},
+            status_meta={"profile": "manual"},
+        )
+
+        async def _run():
+            async with app.run_test(size=(90, 26)) as pilot:
+                app._submit = lambda text: submitted.append(text)
+                composer = app.query_one("#prompt-input")
+                await pilot.click("#prompt-input")
+                await pilot.press("slash")
+                await pilot.pause()
+                self.assertTrue(app.query_one("#slash-palette").has_class("-visible"))
+
+                # Arrows move the highlight; the caret must not move instead.
+                await pilot.press("down")
+                await pilot.pause()
+                self.assertEqual(app._slash_selected, 1)
+                self.assertEqual(composer.cursor_location, (0, 1))
+
+                # Tab completes the highlight, Enter runs it.
+                await pilot.press("tab")
+                await pilot.pause()
+                self.assertEqual(composer.value, "/model")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(submitted, ["/model"])
+
+        asyncio.run(_run())
 
     def test_ctrl_c_with_selection_copies_instead_of_interrupt(self):
         try:

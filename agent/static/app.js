@@ -106,7 +106,7 @@ const SLASH_COMMANDS = [
 
 const THEME_STORAGE_KEY = "selene-web-theme";
 const PLACE_THEMES = [
-  { id: "oslo", name: "Oslo", description: "Monochrome grey & white", background: "#101010", surface: "#171717", primary: "#cfcfcf", accent: "#e8e8e8" },
+  { id: "oslo", name: "Oslo", description: "Monochrome grey & white", background: "#0b0b0b", surface: "#131313", primary: "#cfcfcf", accent: "#e8e8e8" },
   { id: "tokyo", name: "Tokyo", description: "Futuristic hollow blue", background: "#070b14", surface: "#0c1220", primary: "#5ec8ff", accent: "#7dcfff" },
   { id: "rome", name: "Rome", description: "Royal gold & marble", background: "#120e18", surface: "#1a1424", primary: "#d4af37", accent: "#f0d78c" },
   { id: "amazon", name: "Amazon", description: "Deep rainforest", background: "#0a120c", surface: "#101a12", primary: "#6dbf6d", accent: "#a8d4a0" },
@@ -286,7 +286,7 @@ function bindElements() {
   el.send = document.getElementById("send-btn");
   el.contextLabel = document.getElementById("context-label");
   el.contextFill = document.getElementById("context-fill");
-  el.contextMeter = document.querySelector(".context-meter");
+  el.contextMeter = document.getElementById("context-meter");
   el.sessionList = document.getElementById("session-list");
   el.title = document.getElementById("chat-title");
   el.history = document.getElementById("setting-history");
@@ -1129,33 +1129,14 @@ function renderWelcome() {
     <div class="welcome">
       <canvas class="welcome-sky" aria-hidden="true"></canvas>
       <div class="welcome-core">
-        <h3 data-text="Selene">Selene</h3>
-        <div class="suggestions">
-          <button class="suggestion" type="button" data-prompt="Summarize this project and identify the most important files.">
-            <span class="suggestion-index">01</span><span class="suggestion-copy"><strong>Project summary</strong><small>Understand the workspace</small></span>
-          </button>
-          <button class="suggestion" type="button" data-prompt="Search the web for the latest AI developer tooling news.">
-            <span class="suggestion-index">02</span><span class="suggestion-copy"><strong>Web research</strong><small>Use tools when needed</small></span>
-          </button>
-          <button class="suggestion" type="button" data-prompt="Help me debug a Python error step by step.">
-            <span class="suggestion-index">03</span><span class="suggestion-copy"><strong>Debug with me</strong><small>Reason through a problem</small></span>
-          </button>
-          <button class="suggestion" type="button" data-prompt="/help">
-            <span class="suggestion-index">04</span><span class="suggestion-copy"><strong>Commands</strong><small>Show slash commands</small></span>
-          </button>
+        <div class="welcome-title">
+          <img class="welcome-mark" src="/assets/selene-icon.png" alt="" aria-hidden="true">
+          <h3 data-text="Selene">Selene</h3>
         </div>
       </div>
     </div>
   `;
 
-  el.messages.querySelectorAll(".suggestion").forEach((button) => {
-    button.addEventListener("click", () => {
-      el.input.value = button.dataset.prompt || "";
-      resizeComposer();
-      updateComposerState();
-      el.input.focus();
-    });
-  });
   startWelcomeSky();
 }
 
@@ -3119,7 +3100,11 @@ function updateComposerState() {
   }
   if (el.send) {
     el.send.disabled = stopping || (!state.isGenerating && !hasText);
-    el.send.textContent = stopping ? "Stopping…" : (state.isGenerating ? "Stop" : "Send");
+    // The button holds two inline SVGs, so the state lives in the label and the
+    // class — writing textContent here would wipe the icons out.
+    const label = stopping ? "Stopping…" : (state.isGenerating ? "Stop generating" : "Send message");
+    el.send.setAttribute("aria-label", label);
+    el.send.title = label;
     el.send.classList.toggle("stop", state.isGenerating);
   }
   updateContextMeter();
@@ -3320,9 +3305,12 @@ function updateContextMeter(forcedUsed = null, forcedBudget = null) {
 
   if (el.contextLabel) el.contextLabel.textContent = `${used} / ${budget ?? "—"}`;
   if (el.contextFill) el.contextFill.style.width = `${pct}%`;
-  if (el.contextMeter) {
-    el.contextMeter.classList.toggle("warn", pct >= 75 && pct < 90);
-    el.contextMeter.classList.toggle("hot", pct >= 90);
+  // The readout and the composer's fill bar are separate elements now, so both
+  // carry the pressure classes and stay in the same color state.
+  for (const node of [el.contextMeter, el.contextLabel]) {
+    if (!node) continue;
+    node.classList.toggle("warn", pct >= 75 && pct < 90);
+    node.classList.toggle("hot", pct >= 90);
   }
 }
 

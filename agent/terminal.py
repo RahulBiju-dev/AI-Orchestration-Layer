@@ -759,6 +759,21 @@ def print_assistant_message(text: str) -> None:
     _console.print()
 
 
+def print_response_model(label: str, *, detail: str | None = None) -> None:
+    """Print the faint 'answered by <model>' footer under a finished response."""
+    text = str(label or "").strip()
+    if not text:
+        return
+    sink = get_display_sink()
+    if sink is not None and getattr(sink, "is_tui", False):
+        callback = getattr(sink, "response_model", None)
+        if callable(callback):
+            callback(text, detail)
+        return
+    suffix = f"  {GLYPH_DOT}  {detail}" if detail else ""
+    _console.print(f"  [{THEME.meta}]{GLYPH_DOT}  {text}{suffix}[/]")
+
+
 def print_thinking_header() -> None:
     sink = get_display_sink()
     if sink is not None and getattr(sink, "is_tui", False):

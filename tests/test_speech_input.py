@@ -535,6 +535,78 @@ class SpeechTuiTests(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_speech_popup_states_and_multiline_transcript(self):
+        try:
+            import textual  # noqa: F401
+        except ImportError:
+            self.skipTest("textual not installed")
+
+        import asyncio
+
+        from agent.tui import build_app_class
+
+        AppCls = build_app_class()
+        app = AppCls(
+            session={"history": True, "system": "", "options": {}, "verbose": False,
+                     "wordwrap": True, "format": "", "think": True,
+                     "runtime_profile": "manual"},
+            history=[],
+            default_system_prompt="sys",
+            process_turn=lambda *a, **k: None,
+            handle_command=lambda *a, **k: True,
+            slash_completions=("/speech",),
+            slash_descriptions={"/speech": "Voice"},
+            status_meta={},
+        )
+
+        def card_text(widget) -> str:
+            visual = widget.visual
+            renderable = getattr(visual, "_renderable", visual)
+            return str(getattr(renderable, "plain", renderable))
+
+        async def _run():
+            async with app.run_test(size=(96, 32)) as pilot:
+                app.action_toggle_speech()
+                await pilot.pause()
+                menu = app.query_one("#speech-menu")
+                title = app.query_one("#speech-title")
+                hint = app.query_one("#speech-hint")
+
+                # Idle: no recording chrome, an actionable hint, no timer.
+                self.assertFalse(menu.has_class("-recording"))
+                self.assertIn("ready", card_text(title))
+                self.assertIn("start listening", card_text(hint))
+                self.assertEqual(card_text(app.query_one("#speech-timer")), "")
+
+                menu.set_recording(True)
+                await pilot.pause()
+                self.assertTrue(menu.has_class("-recording"))
+                self.assertIn("listening", card_text(title))
+                self.assertIn("stop & send", card_text(hint))
+                self.assertRegex(card_text(app.query_one("#speech-timer")), r"\d\d:\d\d")
+
+                menu.set_finishing()
+                await pilot.pause()
+                self.assertFalse(menu.has_class("-recording"))
+                self.assertIn("transcribing", card_text(title))
+
+                # Errors stay inside the card and typing keeps working.
+                menu.set_error("No microphone was found. Connect an input device.")
+                await pilot.pause()
+                self.assertTrue(menu.has_class("-error"))
+                self.assertIn("unavailable", card_text(title))
+                self.assertIn("microphone", card_text(app.query_one("#speech-detail")))
+
+                # A long transcript wraps instead of scrolling out of sight.
+                speech_input = app.query_one("#speech-input")
+                body = app.query_one("#speech-body")
+                short_height = body.size.height
+                speech_input.value = "review the scaling notes " * 12
+                await pilot.pause()
+                self.assertGreater(body.size.height, short_height)
+
+        asyncio.run(_run())
+
     def test_ctrl_s_binding_registered(self):
         try:
             import textual  # noqa: F401

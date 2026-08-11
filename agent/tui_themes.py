@@ -7,6 +7,12 @@ Cairo sand, etc.). ``oslo`` is the default and is always listed first.
 Themes drive Textual CSS variables plus a small Rich palette for markup-free
 Text spans (slash palette, thinking chrome, etc.). Registered Textual theme
 names use Title Case place names so Ctrl+P → Themes matches the slash catalog.
+
+Each place also carries a ``selene-user`` hue. Prompts are painted with it and
+responses keep the theme accent, so the two transcript roles never read as the
+same block. Block tints (``selene-user-bg`` / ``selene-assistant-bg``) are
+derived from that pair, which keeps every theme in step without hand-tuning a
+second set of near-identical greys.
 """
 from __future__ import annotations
 
@@ -49,24 +55,25 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
         "secondary": "#7a7a7a",
         "accent": "#e8e8e8",
         "foreground": "#f2f2f2",
-        "background": "#101010",
-        "surface": "#171717",
-        "panel": "#1f1f1f",
+        "background": "#0b0b0b",
+        "surface": "#131313",
+        "panel": "#1a1a1a",
         "warning": "#c8c8a0",
         "error": "#c08080",
         "success": "#6a8a6a",
-        "boost": "#1c1c1c",
+        "boost": "#161616",
         "variables": {
             "selene-muted": "#7a7a7a",
             "selene-faint": "#555555",
             "selene-text-soft": "#d8d8d8",
-            "selene-border": "#333333",
-            "selene-border-soft": "#2a2a2a",
+            "selene-border": "#2e2e2e",
+            "selene-border-soft": "#242424",
             "selene-border-focus": "#9a9a9a",
-            "selene-elevated": "#1c1c1c",
+            "selene-elevated": "#161616",
             "selene-select-fg": "#0a0a0a",
             "selene-select-bg": "#e8e8e8",
-            "selene-content": "#1f1f1f",
+            "selene-content": "#1a1a1a",
+            "selene-user": "#8f8f8f",
         },
     },
     "tokyo": {
@@ -94,6 +101,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#070b14",
             "selene-select-bg": "#5ec8ff",
             "selene-content": "#111a2c",
+            "selene-user": "#9d7cd8",
         },
     },
     "rome": {
@@ -121,6 +129,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#120e18",
             "selene-select-bg": "#d4af37",
             "selene-content": "#241c30",
+            "selene-user": "#9a8ac4",
         },
     },
     "amazon": {
@@ -148,6 +157,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#0a120c",
             "selene-select-bg": "#6dbf6d",
             "selene-content": "#162418",
+            "selene-user": "#d0b878",
         },
     },
     "cairo": {
@@ -175,6 +185,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#14100c",
             "selene-select-bg": "#c4a574",
             "selene-content": "#261e16",
+            "selene-user": "#8fb0b8",
         },
     },
     "kyoto": {
@@ -202,6 +213,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#141018",
             "selene-select-bg": "#d4a0c0",
             "selene-content": "#241e2c",
+            "selene-user": "#9db4d4",
         },
     },
     "bergen": {
@@ -229,6 +241,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#121820",
             "selene-select-bg": "#88c0d0",
             "selene-content": "#222c38",
+            "selene-user": "#d0b090",
         },
     },
     "marrakech": {
@@ -256,6 +269,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#140e0c",
             "selene-select-bg": "#e08860",
             "selene-content": "#261c16",
+            "selene-user": "#8fc0a8",
         },
     },
     "shanghai": {
@@ -283,6 +297,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#0a0814",
             "selene-select-bg": "#e060c0",
             "selene-content": "#1a1628",
+            "selene-user": "#e060c0",
         },
     },
     "reykjavik": {
@@ -310,6 +325,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#080e12",
             "selene-select-bg": "#60e0b8",
             "selene-content": "#141e26",
+            "selene-user": "#60e0b8",
         },
     },
     "venice": {
@@ -337,6 +353,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#0c1214",
             "selene-select-bg": "#50b0b8",
             "selene-content": "#1c2628",
+            "selene-user": "#50b0b8",
         },
     },
     "seoul": {
@@ -364,6 +381,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#0c0a14",
             "selene-select-bg": "#a070f0",
             "selene-content": "#1c182a",
+            "selene-user": "#70d0b0",
         },
     },
     "santorini": {
@@ -391,6 +409,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#0a1018",
             "selene-select-bg": "#60b0e8",
             "selene-content": "#1a2430",
+            "selene-user": "#60b0e8",
         },
     },
     "havana": {
@@ -418,6 +437,7 @@ _THEME_DEFS: dict[str, dict[str, Any]] = {
             "selene-select-fg": "#120c0c",
             "selene-select-bg": "#e07070",
             "selene-content": "#241a18",
+            "selene-user": "#e07070",
         },
     },
 }
@@ -473,6 +493,50 @@ _THEME_ALIASES: dict[str, str] = {
     "oslo-(default)": "oslo",
     "oslo(default)": "oslo",
 }
+
+
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    raw = str(value or "").strip().lstrip("#")
+    if len(raw) == 3:
+        raw = "".join(character * 2 for character in raw)
+    if len(raw) != 6:
+        return (0, 0, 0)
+    try:
+        return (int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16))
+    except ValueError:
+        return (0, 0, 0)
+
+
+def _mix(base: str, tint: str, amount: float) -> str:
+    """Blend ``tint`` into ``base`` by ``amount`` (0..1) and return ``#rrggbb``."""
+    ratio = min(1.0, max(0.0, float(amount)))
+    base_rgb = _hex_to_rgb(base)
+    tint_rgb = _hex_to_rgb(tint)
+    blended = tuple(
+        int(round(base_channel + (tint_channel - base_channel) * ratio))
+        for base_channel, tint_channel in zip(base_rgb, tint_rgb)
+    )
+    return "#{:02x}{:02x}{:02x}".format(*blended)
+
+
+def _role_variables(data: dict[str, Any]) -> dict[str, str]:
+    """Transcript role colors (prompt vs response) derived from a theme.
+
+    ``selene-user`` is authored per place; everything else is blended from it so
+    a new theme only has to pick one extra hue and still gets matching block
+    tints, bars, and labels.
+    """
+    variables = dict(data.get("variables") or {})
+    content = str(variables.get("selene-content") or data["panel"])
+    user = str(variables.get("selene-user") or data["secondary"])
+    assistant = str(data["accent"])
+    return {
+        "selene-user": user,
+        "selene-user-soft": _mix(user, str(data["foreground"]), 0.35),
+        "selene-user-bg": _mix(content, user, 0.16),
+        "selene-assistant": assistant,
+        "selene-assistant-bg": _mix(content, assistant, 0.05),
+    }
 
 
 def theme_names() -> tuple[str, ...]:
@@ -538,6 +602,7 @@ def rich_palette(name: str | None = None) -> dict[str, str]:
     key = normalize_theme_name(name)
     data = _THEME_DEFS[key]
     variables = dict(data.get("variables") or {})
+    roles = _role_variables(data)
     return {
         "bg": str(data["background"]),
         "surface": str(data["surface"]),
@@ -557,6 +622,12 @@ def rich_palette(name: str | None = None) -> dict[str, str]:
         "warning": str(data["warning"]),
         "error": str(data["error"]),
         "success": str(data["success"]),
+        # Transcript roles — prompts and responses never share a color.
+        "user": roles["selene-user"],
+        "user_soft": roles["selene-user-soft"],
+        "user_bg": roles["selene-user-bg"],
+        "assistant": roles["selene-assistant"],
+        "assistant_bg": roles["selene-assistant-bg"],
         "dark": "1" if data.get("dark", True) else "0",
     }
 
@@ -571,6 +642,7 @@ def build_textual_theme(name: str | None = None) -> Any:
 
     key = normalize_theme_name(name)
     data = _THEME_DEFS[key]
+    variables = {**dict(data.get("variables") or {}), **_role_variables(data)}
     return Theme(
         name=_display_name(key),
         primary=str(data["primary"]),
@@ -585,7 +657,7 @@ def build_textual_theme(name: str | None = None) -> Any:
         success=str(data["success"]),
         boost=str(data.get("boost") or data["surface"]),
         dark=bool(data.get("dark", True)),
-        variables=dict(data.get("variables") or {}),
+        variables=variables,
     )
 
 

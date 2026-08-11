@@ -195,20 +195,10 @@ textarea::placeholder {
   transform: rotate(180deg);
 }
 
-.model-picker-label {
-  flex: 0 0 auto;
-  color: var(--faint);
-  font-family: var(--ui-label);
-  font-size: var(--fs-eyebrow);
-  font-weight: 650;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 #model-label {
   flex: 1;
   min-width: 0;
-  margin: 0 6px 0 8px;
+  margin: 0 6px 0 2px;
   color: var(--text);
   font: 650 var(--fs-sm)/1 var(--sans);
   text-align: left;
@@ -258,7 +248,7 @@ textarea::placeholder {
 .mode-trigger,
 .mode-clear {
   min-height: 32px;
-  border-radius: 9px;
+  border-radius: 4px;
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -310,7 +300,7 @@ textarea::placeholder {
   width: 27px;
   padding: 0 6px 1px;
   border-left: 1px solid var(--line);
-  border-radius: 0 9px 9px 0;
+  border-radius: 0 4px 4px 0;
   color: var(--faint);
   font-size: 1rem;
 }
@@ -403,7 +393,7 @@ textarea::placeholder {
   width: 28px;
   height: 28px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 4px;
   color: var(--option-tone);
 }
 
@@ -458,32 +448,19 @@ textarea::placeholder {
   font-size: var(--fs-xs);
 }
 
-/* Without an explicit rule this inherited the flex container's wrapping and
-   broke "1184 / 8192" across two lines. */
-.context-meter {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: var(--s-2);
-  white-space: nowrap;
-}
-
-/* Token counts are numeric readouts, so they stay mono — and tabular figures
-   keep the label from reflowing as digits change during streaming. */
-#context-label {
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0;
-}
-
-.meter-track {
-  width: 124px;
-  height: 5px;
-  border-radius: var(--r-full);
+/* Context pressure reads as a fill line along the composer's top edge: the
+   further it runs, the closer the window is to full. The exact fraction lives
+   in the chat topbar (.context-readout). */
+.context-bar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 3px;
   overflow: hidden;
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
   background: var(--surface-low);
-  box-shadow: var(--ring-inset);
+  pointer-events: none;
 }
 
 #context-fill {
@@ -491,14 +468,13 @@ textarea::placeholder {
   width: 0%;
   height: 100%;
   background: var(--muted);
-  border-radius: inherit;
   transition: width var(--dur-4) var(--ease-out),
               background-color var(--dur-3) var(--ease-out);
 }
 
-.context-meter.warn #context-fill { background: var(--warning); }
+.context-bar.warn #context-fill { background: var(--warning); }
 
-.context-meter.hot #context-fill {
+.context-bar.hot #context-fill {
   background: var(--danger);
   animation: context-breathe 2.4s var(--ease-in-out) infinite;
 }
@@ -564,17 +540,17 @@ textarea::placeholder {
 }
 
 .send-btn {
-  min-width: 86px;
-  min-height: 44px;
-  padding: 11px 17px;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  padding: 0;
   border: 1px solid var(--accent);
   border-radius: var(--r-full);
   background: var(--accent);
   color: var(--select-fg);
   cursor: pointer;
-  font-family: var(--ui-label);
-  font-size: var(--fs-sm);
-  font-weight: 600;
   transition: opacity var(--dur-2) var(--ease-out),
               background-color var(--dur-2) var(--ease-out),
               color var(--dur-2) var(--ease-out),
@@ -600,4 +576,25 @@ textarea::placeholder {
   background: var(--danger);
   color: var(--select-fg);
 }
+
+.send-btn svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.send-btn .stop-icon {
+  fill: currentColor;
+  stroke: none;
+}
+
+/* Both glyphs ship in the markup and swap by class, so updateComposerState()
+   never has to rewrite the button's children on every keystroke. */
+.send-btn .stop-icon,
+.send-btn.stop .send-icon { display: none; }
+.send-btn.stop .stop-icon { display: block; }
 

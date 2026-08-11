@@ -4,7 +4,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border-radius: 16px;
+  border-radius: 10px;
 }
 
 .chat-topbar {
@@ -41,6 +41,21 @@
   margin-left: auto;
 }
 
+/* Token counts are numeric readouts, so they stay mono — and tabular figures
+   keep the label from reflowing as digits change during streaming. */
+.context-readout {
+  margin-right: var(--s-2);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.context-readout.warn { color: var(--warning); }
+.context-readout.hot { color: var(--danger); }
+
 .topbar-theme-btn {
   display: inline-flex;
   align-items: center;
@@ -49,7 +64,7 @@
   min-height: 42px;
   padding: 0 13px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: 4px;
   background: var(--surface-low);
   color: var(--muted);
   cursor: pointer;
@@ -76,7 +91,7 @@
   min-height: 36px;
   padding: 8px 12px;
   border: 1px solid var(--line);
-  border-radius: 3px;
+  border-radius: 2px;
   background: transparent;
   color: var(--muted);
   font-family: var(--ui-label);
@@ -158,9 +173,23 @@
   animation: selene-rise var(--dur-4) var(--ease-out) backwards;
 }
 
+.welcome-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  margin: 0 0 var(--s-6);
+}
+
+.welcome-mark {
+  flex: 0 0 auto;
+  width: clamp(48px, 6vw, 76px);
+  height: auto;
+  border-radius: var(--r-md);
+}
+
 .welcome h3 {
   position: relative;
-  margin: 0 0 var(--s-7);
+  margin: 0;
   color: transparent;
   background: linear-gradient(168deg,
     var(--text) 0%,
@@ -202,92 +231,6 @@
 @keyframes welcome-sweep {
   from { background-position: -70% 50%; }
   to { background-position: 175% 50%; }
-}
-
-.suggestions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  width: min(100%, 620px);
-  gap: var(--s-3);
-  border: 0;
-}
-
-.suggestion {
-  position: relative;
-  display: grid;
-  grid-template-columns: 26px minmax(0, 1fr);
-  gap: var(--s-3);
-  min-width: 0;
-  padding: var(--s-4);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-lg);
-  background: var(--surface-high);
-  color: var(--text-soft);
-  text-align: left;
-  box-shadow: var(--elev-1);
-  animation: selene-rise var(--dur-4) var(--ease-out) backwards;
-  animation-delay: calc(120ms + var(--enter-index, 0) * 60ms);
-  transition: transform var(--dur-2) var(--ease-out),
-              border-color var(--dur-2) var(--ease-out),
-              box-shadow var(--dur-2) var(--ease-out),
-              color var(--dur-2) var(--ease-out);
-}
-
-.suggestion:nth-child(1) { --enter-index: 0; }
-.suggestion:nth-child(2) { --enter-index: 1; }
-.suggestion:nth-child(3) { --enter-index: 2; }
-.suggestion:nth-child(4) { --enter-index: 3; }
-
-.suggestion:hover,
-.suggestion:focus-visible {
-  transform: translateY(-3px);
-  border-color: var(--edge-primary);
-  box-shadow: var(--elev-3);
-  color: var(--text);
-}
-
-.suggestion:active {
-  transform: translateY(-1px);
-}
-
-.suggestion-index {
-  color: var(--faint);
-  font-family: var(--mono);
-  font-size: var(--fs-eyebrow);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.7;
-  transition: color var(--dur-2) var(--ease-out);
-}
-
-.suggestion:hover .suggestion-index,
-.suggestion:focus-visible .suggestion-index {
-  color: var(--primary);
-}
-
-.suggestion-copy {
-  display: block;
-  min-width: 0;
-}
-
-.suggestion-copy strong,
-.suggestion-copy small {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.suggestion-copy strong {
-  font-size: var(--fs-h3);
-  font-weight: 600;
-  line-height: 1.35;
-}
-
-.suggestion-copy small {
-  margin-top: var(--s-1);
-  color: var(--muted);
-  font-family: var(--ui-label);
-  font-size: var(--fs-sm);
 }
 
 .message {
@@ -430,7 +373,7 @@
   min-height: 22px;
   padding: 2px 5px;
   border: 0;
-  border-radius: 4px;
+  border-radius: 2px;
   background: transparent;
   color: var(--faint);
   font-family: var(--ui-label);

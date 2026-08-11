@@ -1188,7 +1188,7 @@ class ModelSelectorFrontendTests(unittest.TestCase):
 
     def test_model_selector_precedes_mode_and_uses_persisted_settings(self):
         self.assertLess(HTML.index('id="model-picker"'), HTML.index('id="mode-picker"'))
-        self.assertIn('<span class="model-picker-label">Model</span>', HTML)
+        self.assertIn('<span id="model-label">', HTML)
         self.assertIn('model_id: "local:default"', APP)
         self.assertIn("state.settings.model_id = modelId", APP)
         self.assertIn("function updateModelUI()", APP)
@@ -1255,7 +1255,59 @@ class ModelSlashCommandTests(unittest.TestCase):
 
         self.assertIn("/model", CLI_SLASH_COMPLETIONS)
         self.assertIn("/set model", CLI_SLASH_COMPLETIONS)
-        self.assertIn("/model local:default", CLI_SLASH_COMPLETIONS)
+        # The submenu lists short names, not raw provider ids.
+        self.assertIn("/model local", CLI_SLASH_COMPLETIONS)
+        self.assertNotIn("/model local:default", CLI_SLASH_COMPLETIONS)
+
+    def test_model_menu_shortens_long_ids_but_keeps_gemini_names(self):
+        from agent.core import _short_model_name
+
+        self.assertEqual(
+            _short_model_name("nvidia:nvidia/nemotron-3-ultra-550b-a55b"),
+            "nemotron",
+        )
+        self.assertEqual(
+            _short_model_name("openrouter:openai/gpt-oss-20b:free"), "gpt-oss"
+        )
+        self.assertEqual(
+            _short_model_name("gemini:gemini-3.1-flash-lite"), "gemini-3.1-flash-lite"
+        )
+        self.assertEqual(_short_model_name("gemini:gemma-4-31b-it"), "gemma-4-31b-it")
+        self.assertEqual(_short_model_name("local:default"), "local")
+
+    def test_model_menu_rows_keep_labels_unique(self):
+        from agent import core
+
+        environment = {
+            "NVIDIA_API_KEY": "nvidia-secret",
+            "NVIDIA_MODELS": "nvidia/nemotron-3-ultra-550b-a55b,nvidia/nemotron-2-mini",
+        }
+        with patch.dict("os.environ", environment, clear=True):
+            rows = core.model_menu_rows(core._new_session_state())
+
+        labels = [row["label"] for row in rows]
+        self.assertEqual(len(labels), len(set(labels)))
+        self.assertIn("nemotron", labels)
+        self.assertIn("nemotron-2-mini", labels)
+
+    def test_terminal_model_command_accepts_short_menu_name(self):
+        from agent import core
+
+        environment = {
+            "NVIDIA_API_KEY": "nvidia-secret",
+            "NVIDIA_MODELS": "nvidia/nemotron-3-ultra-550b-a55b",
+        }
+        session = core._new_session_state()
+        with (
+            patch.dict("os.environ", environment, clear=True),
+            patch.object(core, "_refresh_tui_runtime_meta"),
+        ):
+            result = core._handle_command("/model nemotron", session, [])
+
+        self.assertTrue(result)
+        self.assertEqual(
+            session["model_id"], "nvidia:nvidia/nemotron-3-ultra-550b-a55b"
+        )
 
     def test_terminal_model_command_selects_configured_external_model(self):
         from agent import core
