@@ -77,6 +77,12 @@
   --surface-high: color-mix(in srgb, var(--surface) 74%, var(--panel));
   --surface-row: color-mix(in srgb, var(--surface) 88%, var(--panel));
   --code-bg: color-mix(in srgb, var(--bg) 82%, black);
+  /* Recessed surfaces. The composer sits below the page rather than floating
+     above it, and its pickers deeper still. Derived from whichever --bg is
+     active, so all 14 places inherit the relationship — same trick as
+     --code-bg above, and the reason no per-theme block needs to know. */
+  --sunken: color-mix(in srgb, var(--bg) 86%, black);
+  --sunken-deep: color-mix(in srgb, var(--bg) 72%, black);
   --content-width: 1040px;
 
   /* ── Type ───────────────────────────────────────────────────────────

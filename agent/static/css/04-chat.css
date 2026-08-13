@@ -20,8 +20,11 @@
   min-width: 0;
 }
 
+/* 100%, not a vw figure: the viewport is wider than this column by the whole
+   sidebar, so a vw cap let the title run past its own container before the
+   ellipsis fired. The parent carries min-width: 0, which is what lets it. */
 .chat-topbar h2 {
-  max-width: min(72vw, 680px);
+  max-width: 100%;
   overflow: hidden;
   color: var(--text-soft);
   font-family: var(--display);
@@ -55,6 +58,41 @@
 
 .context-readout.warn { color: var(--warning); }
 .context-readout.hot { color: var(--danger); }
+
+/* Phone-only. It shares the theme button's chrome so the two ends of the
+   topbar read as one control set; 07-responsive.css reveals it. */
+.sidebar-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  margin-right: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-low);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.sidebar-toggle svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.sidebar-toggle:hover,
+.sidebar-toggle:focus-visible,
+.sidebar-toggle[aria-expanded="true"] {
+  border-color: var(--line-focus);
+  background: var(--elevated);
+  color: var(--text);
+}
 
 .topbar-theme-btn {
   display: inline-flex;
@@ -134,8 +172,12 @@
   background: var(--line-strong);
 }
 
+/* Scroll rather than clip. .welcome still stretches to min-height: 100% so the
+   starfield fills the pane, but on a short viewport the title used to be cut
+   off with no way to reach it. */
 .messages:has(.welcome) {
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .welcome {
@@ -180,11 +222,14 @@
   margin: 0 0 var(--s-6);
 }
 
+/* aspect-ratio replaces the height: auto an <img> got from its intrinsic size.
+   The drop-shadow recovers the glow the original artwork was painted with —
+   themed this time, so it tracks the accent rather than staying purple. */
 .welcome-mark {
-  flex: 0 0 auto;
   width: clamp(48px, 6vw, 76px);
-  height: auto;
-  border-radius: var(--r-md);
+  aspect-ratio: 1;
+  color: var(--text);
+  filter: drop-shadow(0 0 18px color-mix(in srgb, var(--accent) 22%, transparent));
 }
 
 .welcome h3 {

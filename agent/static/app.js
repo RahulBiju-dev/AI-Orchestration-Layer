@@ -264,6 +264,7 @@ const el = {};
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
   bindEvents();
+  restoreSidebar();
   restoreVaultPanel();
   loadState();
 });
@@ -303,6 +304,11 @@ function bindElements() {
   el.profileApply = document.getElementById("profile-apply");
   el.system = document.getElementById("setting-system");
   el.chatShell = document.querySelector(".chat-shell");
+  el.appShell = document.querySelector(".app-shell");
+  el.sidebar = document.getElementById("sidebar");
+  el.sidebarToggle = document.getElementById("sidebar-toggle");
+  el.sidebarCollapse = document.getElementById("sidebar-collapse");
+  el.sidebarBackdrop = document.getElementById("sidebar-backdrop");
   el.settingsView = document.getElementById("settings-view");
   el.settingsBtn = document.getElementById("settings-btn");
   el.settingsBackdrop = document.getElementById("settings-backdrop");
@@ -396,6 +402,9 @@ function bindEvents() {
   });
 
   document.getElementById("new-chat-btn")?.addEventListener("click", newConversation);
+  el.sidebarToggle?.addEventListener("click", toggleSidebar);
+  el.sidebarCollapse?.addEventListener("click", toggleSidebarCollapsed);
+  el.sidebarBackdrop?.addEventListener("click", () => closeSidebar({ returnFocus: true }));
   document.getElementById("settings-btn")?.addEventListener("click", openSettings);
   el.settingsClose?.addEventListener("click", closeSettings);
   el.settingsBackdrop?.addEventListener("click", closeSettings);
@@ -417,7 +426,12 @@ function bindEvents() {
       handleThemeDialogKeydown(event);
       return;
     }
-    if (event.key === "Escape" && settingsOpen()) closeSettings();
+    if (event.key === "Escape" && settingsOpen()) {
+      closeSettings();
+      return;
+    }
+    // Last in the chain: the dialogs above own Escape while they are up.
+    if (event.key === "Escape" && sidebarOpen()) closeSidebar({ returnFocus: true });
   });
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
@@ -426,7 +440,16 @@ function bindEvents() {
     }
     else if (el.messages?.querySelector(".welcome")) startWelcomeSky();
   });
-  window.addEventListener("resize", resizeComposer);
+  window.addEventListener("resize", () => {
+    resizeComposer();
+    // Widening past the breakpoint restores the sidebar as a static column.
+    // Without this the drawer state survives and leaves the scrim covering an
+    // already-visible sidebar.
+    if (!sidebarIsDrawer()) closeSidebar();
+    // closeSidebar above may have changed the drawer state without going
+    // through a click, so re-assert both buttons' labels.
+    syncSidebarToggle();
+  });
 
   el.messages?.addEventListener("wheel", (event) => {
     if (event.deltaY < 0) state.followOutput = false;
@@ -986,7 +1009,13 @@ function renderSessions() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "session-open";
-    button.textContent = cleanSessionName(name);
+    // The name gets its own element: text-overflow does not apply to the
+    // anonymous text of a flex container, so putting it straight on the button
+    // clipped long titles mid-word instead of ellipsizing them.
+    const label = document.createElement("span");
+    label.className = "session-name";
+    label.textContent = cleanSessionName(name);
+    button.appendChild(label);
     button.title = generation ? `${name} · response running` : name;
     if (generation) {
       const running = document.createElement("span");
@@ -1130,7 +1159,7 @@ function renderWelcome() {
       <canvas class="welcome-sky" aria-hidden="true"></canvas>
       <div class="welcome-core">
         <div class="welcome-title">
-          <img class="welcome-mark" src="/assets/selene-icon.png" alt="" aria-hidden="true">
+          <svg class="welcome-mark selene-mark" aria-hidden="true"><use href="#selene-mark"/></svg>
           <h3 data-text="Selene">Selene</h3>
         </div>
       </div>
@@ -2421,6 +2450,7 @@ async function clearConversation() {
 
 async function newConversation() {
   if (settingsOpen()) closeSettings();
+  closeSidebar();
   await waitForPendingConversationIdentity();
   markCurrentGenerationBackgrounded();
   const requestedView = ++state.viewVersion;
@@ -2636,6 +2666,7 @@ function renderVaultList() {
 function insertVaultQuery(collection) {
   if (!el.input) return;
   if (settingsOpen()) closeSettings();
+  closeSidebar();
   el.input.value = `/vault search --collection ${collection} `;
   el.input.focus();
   el.input.setSelectionRange(el.input.value.length, el.input.value.length);
@@ -2784,6 +2815,114 @@ function updateRangeFill(input) {
   input.style.setProperty("--fill", `${Math.min(100, Math.max(0, ratio * 100))}%`);
 }
 
+// ── Sidebar ──────────────────────────────────────────────────────────
+// One control, two behaviours. Below SIDEBAR_DRAWER_MAX_WIDTH the rail is an
+// off-canvas drawer over a scrim (07-responsive.css); above it the rail is a
+// grid column that collapses to zero width (02-base.css). The drawer is
+// transient, the collapse is remembered.
+const SIDEBAR_DRAWER_MAX_WIDTH = 760;
+const SIDEBAR_COLLAPSED_KEY = "selene-sidebar-collapsed";
+
+function sidebarIsDrawer() {
+  return window.matchMedia(`(max-width: ${SIDEBAR_DRAWER_MAX_WIDTH}px)`).matches;
+}
+
+function sidebarOpen() {
+  return el.sidebar?.classList.contains("open") === true;
+}
+
+function sidebarIsCollapsed() {
+  return el.appShell?.classList.contains("sidebar-collapsed") === true;
+}
+
+function storedSidebarCollapsed() {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "collapsed";
+  } catch {
+    return false;
+  }
+}
+
+function setStoredSidebarCollapsed(collapsed) {
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "collapsed" : "expanded");
+  } catch {
+    /* private browsing — the rail just won't remember across reloads */
+  }
+}
+
+// Two controls, one per mode: the topbar button opens the phone drawer, the
+// button in the brand row collapses the desktop rail. Each is hidden at the
+// other's breakpoint, but both keep their state honest either way.
+function syncSidebarToggle() {
+  if (el.sidebarToggle) {
+    const open = sidebarOpen();
+    const label = open ? "Close navigation" : "Open navigation";
+    el.sidebarToggle.setAttribute("aria-expanded", String(open));
+    el.sidebarToggle.setAttribute("aria-label", label);
+    el.sidebarToggle.title = label;
+  }
+  if (el.sidebarCollapse) {
+    const shown = !sidebarIsCollapsed();
+    const label = shown ? "Collapse sidebar" : "Expand sidebar";
+    el.sidebarCollapse.setAttribute("aria-expanded", String(shown));
+    el.sidebarCollapse.setAttribute("aria-label", label);
+    el.sidebarCollapse.title = label;
+  }
+}
+
+function applySidebarCollapsed(collapsed) {
+  el.appShell?.classList.toggle("sidebar-collapsed", collapsed);
+  syncSidebarToggle();
+}
+
+// Applied before the first paint the user sees, then .anim-ready arms the
+// transition a frame later so a remembered collapse does not animate open on
+// every load.
+function restoreSidebar() {
+  applySidebarCollapsed(storedSidebarCollapsed());
+  requestAnimationFrame(() => el.appShell?.classList.add("anim-ready"));
+}
+
+function openSidebar() {
+  if (!el.sidebar || !sidebarIsDrawer()) return;
+  el.sidebar.classList.add("open");
+  if (el.sidebarBackdrop) {
+    el.sidebarBackdrop.hidden = false;
+    requestAnimationFrame(() => el.sidebarBackdrop.classList.add("open"));
+  }
+  syncSidebarToggle();
+  // The drawer's own visibility transition is delayed by the slide, so focus
+  // has to wait for it too or it lands on a still-hidden element.
+  setTimeout(() => {
+    if (sidebarOpen()) el.sidebar.querySelector("#new-chat-btn")?.focus();
+  }, 60);
+}
+
+// `returnFocus` is off for the incidental closes — opening a session, widening
+// the window — where yanking focus back to the hamburger would be a surprise.
+function closeSidebar({ returnFocus = false } = {}) {
+  if (!el.sidebar || !sidebarOpen()) return;
+  el.sidebar.classList.remove("open");
+  if (el.sidebarBackdrop) el.sidebarBackdrop.classList.remove("open");
+  syncSidebarToggle();
+  setTimeout(() => {
+    if (!sidebarOpen() && el.sidebarBackdrop) el.sidebarBackdrop.hidden = true;
+  }, 380);
+  if (returnFocus) el.sidebarToggle?.focus();
+}
+
+function toggleSidebar() {
+  if (sidebarOpen()) closeSidebar({ returnFocus: true });
+  else openSidebar();
+}
+
+function toggleSidebarCollapsed() {
+  const collapsed = !sidebarIsCollapsed();
+  applySidebarCollapsed(collapsed);
+  setStoredSidebarCollapsed(collapsed);
+}
+
 function settingsOpen() {
   return el.settingsView?.classList.contains("open") === true;
 }
@@ -2807,6 +2946,9 @@ function syncSettingsNav() {
 
 function openSettings() {
   if (!el.settingsView) return;
+  // The trigger lives inside the sidebar, so on a phone it is the drawer the
+  // user is tapping through.
+  closeSidebar();
   el.settingsView.hidden = false;
   el.settingsView.classList.add("open");
   if (el.settingsBackdrop) {
@@ -2904,6 +3046,7 @@ function openThemeDialog(trigger = document.activeElement) {
   }
   themeTriggerElement = trigger instanceof HTMLElement ? trigger : el.input;
   if (settingsOpen()) closeSettings();
+  closeSidebar();
   renderThemeOptions();
   el.themeBackdrop.hidden = false;
   el.themeDialog.setAttribute("aria-hidden", "false");
@@ -3058,6 +3201,7 @@ async function saveSession() {
 
 async function loadSession(name) {
   if (settingsOpen()) closeSettings();
+  closeSidebar();
   if (name === state.activeSessionName) {
     renderActiveConversation();
     updateComposerState();

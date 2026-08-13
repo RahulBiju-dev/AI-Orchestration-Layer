@@ -101,6 +101,11 @@ function createWindow(port) {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
+    // The UI's narrowest supported layout. Without a floor the window can be
+    // dragged smaller than the compact breakpoint handles, and body overflow is
+    // hidden, so whatever gets clipped is unreachable.
+    minWidth: 380,
+    minHeight: 480,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

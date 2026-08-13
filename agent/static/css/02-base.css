@@ -47,6 +47,40 @@ input:focus-visible {
   color: var(--select-fg);
 }
 
+/* ── Selene mark ──────────────────────────────────────────────────────
+   The sprite must stay laid out — `display: none` (and the `hidden`
+   attribute) stops Safari resolving <use> into it, so it is collapsed to
+   a zero box instead. */
+.svg-sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* Drawn, not loaded: the mark takes its color from context so it tracks the
+   active place theme, and having no text nodes it cannot be selected the way
+   the <img> it replaced could be selected and dragged out. */
+.selene-mark {
+  display: block;
+  flex: 0 0 auto;
+  overflow: visible;
+  user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+
+.selene-disc {
+  fill: currentColor;
+}
+
+/* Craters are painted in the page background rather than a fixed grey, so they
+   stay in key with whichever place theme is active. Depth comes from the
+   per-shape opacity in the markup. */
+.selene-craters {
+  fill: var(--bg);
+}
+
 .sky {
   position: fixed;
   inset: 0;
@@ -54,6 +88,8 @@ input:focus-visible {
   pointer-events: none;
 }
 
+/* A full disc, matching the mark. The craters are gradient stops rather than
+   a punched-out pseudo-element, which is what used to make this a crescent. */
 .moon {
   position: absolute;
   top: 50px;
@@ -61,20 +97,13 @@ input:focus-visible {
   width: 74px;
   height: 74px;
   border-radius: 50%;
-  background: var(--text-soft);
+  background:
+    radial-gradient(circle at 62% 34%, color-mix(in srgb, var(--bg) 55%, transparent) 0 22%, transparent 23%),
+    radial-gradient(circle at 38% 58%, color-mix(in srgb, var(--bg) 45%, transparent) 0 17%, transparent 18%),
+    radial-gradient(circle at 68% 68%, color-mix(in srgb, var(--bg) 40%, transparent) 0 11%, transparent 12%),
+    var(--text-soft);
   box-shadow: 0 0 54px color-mix(in srgb, var(--accent) 12%, transparent);
   opacity: 0.24;
-}
-
-.moon::after {
-  content: "";
-  position: absolute;
-  top: -7px;
-  left: 23px;
-  width: 74px;
-  height: 74px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--bg) 86%, black);
 }
 
 .star {
@@ -100,7 +129,9 @@ input:focus-visible {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: 286px minmax(0, 1fr);
+  /* Was a hard 286px, which the chat column paid for all the way down to the
+     drawer breakpoint. The clamp lets the rail give ground first. */
+  grid-template-columns: clamp(232px, 24vw, 286px) minmax(0, 1fr);
   width: 100%;
   height: 100vh;
   height: 100dvh;
@@ -115,6 +146,84 @@ input:focus-visible {
   border: 1px solid var(--line-strong);
   background: var(--glass);
   box-shadow: var(--shadow);
+}
+
+/* ── Desktop rail collapse ────────────────────────────────────────────
+   Collapsed the rail becomes a 64px icon column — the mark, a new-conversation
+   button and settings at the foot — rather than disappearing. Everything that
+   needs horizontal room is what gets dropped.
+
+   Bounded to min-width on purpose. `.app-shell.sidebar-collapsed` out-specifies
+   the plain `.app-shell` rule that 07-responsive.css uses to stack the phone
+   layout, so without this bound a remembered collapse would follow the user
+   down to phone widths and fight the drawer.
+
+   The transition only attaches once JS adds .anim-ready, one frame after the
+   remembered state is applied — otherwise a collapsed rail animates open on
+   every page load. */
+@media (min-width: 761px) {
+  .app-shell.anim-ready {
+    transition: grid-template-columns var(--dur-4) var(--ease-out);
+  }
+
+  .app-shell.anim-ready > .sidebar {
+    transition: padding var(--dur-4) var(--ease-out);
+  }
+
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .app-shell.sidebar-collapsed > .sidebar {
+    align-items: center;
+    padding: var(--s-4) var(--s-2);
+    overflow: hidden;
+  }
+
+  /* The wordmark, the session and vault lists, and both button labels all need
+     width the rail no longer has. */
+  .app-shell.sidebar-collapsed .brand > div,
+  .app-shell.sidebar-collapsed .side-section,
+  .app-shell.sidebar-collapsed .primary-btn-label,
+  .app-shell.sidebar-collapsed .settings-trigger > span {
+    display: none;
+  }
+
+  /* Mark on top, its own toggle underneath. */
+  .app-shell.sidebar-collapsed .brand {
+    flex-direction: column;
+    gap: var(--s-2);
+    width: 100%;
+    min-height: 0;
+    padding: 0 0 var(--s-3);
+  }
+
+  .app-shell.sidebar-collapsed .sidebar-collapse {
+    margin-left: 0;
+  }
+
+  .app-shell.sidebar-collapsed .primary-btn,
+  .app-shell.sidebar-collapsed .settings-trigger {
+    justify-content: center;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    gap: 0;
+    padding: 0;
+  }
+
+  .app-shell.sidebar-collapsed .primary-btn {
+    margin: var(--s-4) 0 0;
+  }
+
+  /* Sessions and vaults were what pushed settings down; with them gone the
+     margin has to do it, and a rule across a 44px button reads as a stray
+     line rather than a divider. */
+  .app-shell.sidebar-collapsed .settings-trigger {
+    margin-top: auto;
+    border-top: 0;
+  }
 }
 
 

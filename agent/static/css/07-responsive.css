@@ -1,72 +1,117 @@
+/* ── Breakpoints ──────────────────────────────────────────────────────
+   Two tiers, not four:
+
+     ≤760px  the sidebar becomes an off-canvas drawer and the shell goes
+             full-bleed. This is the phone/narrow-window layout.
+     ≤430px  the compact tier — typography, touch targets and the controls
+             that have to give up their labels to fit.
+
+   The 760px tier used to fold the sidebar into a horizontal strip capped at
+   max-height: 190px, which clipped its own content — vaults had to be hidden
+   outright and section titles dropped. The drawer gives the column its natural
+   height back, so all of that is restored rather than suppressed. */
+
 @media (max-width: 760px) {
   .moon {
     display: none;
   }
 
+  /* Full-bleed: the 12px inset frame and its rounded corners are desktop
+     chrome. On a phone the chat is the window. */
   .app-shell {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
-    gap: 8px;
-    padding: 8px;
-  }
-
-  .sidebar {
-    display: grid;
-    grid-template-columns: auto minmax(140px, 1fr) auto;
-    grid-template-rows: auto auto;
-    gap: 9px;
-    max-height: 190px;
-    padding: 11px 13px;
-    border-radius: 8px;
-  }
-
-  .brand {
-    gap: 5px;
-    min-height: 38px;
-    padding: 0 8px 0 0;
-    border: 0;
-  }
-
-  .brand-mark {
-    width: 38px;
-    height: 38px;
-    border-radius: 6px;
-  }
-
-  .primary-btn {
-    align-self: center;
-    width: auto;
-    min-width: 0;
-    margin: 0;
-  }
-
-  .side-section {
-    grid-row: 2;
-    grid-column: 1 / -1;
-  }
-
-  .section-title {
-    display: none;
-  }
-
-  .session-list {
-    flex-direction: row;
-    min-height: 42px;
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-
-  .session-item {
-    flex: 0 0 min(210px, 55vw);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0;
+    padding: 0;
   }
 
   .chat-shell {
     min-height: 0;
+    border: 0;
+    border-radius: 0;
   }
 
+  /* The sidebar leaves the grid entirely and becomes a left-anchored drawer,
+     mirroring .settings-view (06-overlays.css) but from the other side.
+
+     Unlike settings, this element is permanent markup — it is a real column
+     above this breakpoint — so it cannot use the `hidden` attribute to stay
+     out of the tab order while closed. visibility does the same job in pure
+     CSS, delayed by the slide duration so the close animation still plays. */
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 53;
+    width: min(304px, 86vw);
+    padding: calc(var(--s-5) + env(safe-area-inset-top))
+             var(--s-5)
+             calc(var(--s-5) + env(safe-area-inset-bottom))
+             calc(var(--s-5) + env(safe-area-inset-left));
+    border: 0;
+    border-right: 1px solid var(--line-strong);
+    border-radius: 0;
+    background: var(--surface);
+    box-shadow: var(--elev-4);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    visibility: hidden;
+    transform: translateX(-100%);
+    transition: transform var(--dur-4) var(--ease-out),
+                visibility 0s linear var(--dur-4);
+  }
+
+  .sidebar.open {
+    visibility: visible;
+    transform: translateX(0);
+    transition: transform var(--dur-4) var(--ease-out), visibility 0s;
+  }
+
+  .sidebar-toggle {
+    display: inline-flex;
+  }
+
+  /* The rail is an overlay here, so there is nothing to collapse it into. */
+  .sidebar-collapse {
+    display: none;
+  }
+
+  /* Back to a single row. The hamburger takes the left, the theme button goes
+     icon-only at the compact tier, and dropping the 74px floor is what stops
+     the topbar squeezing the transcript. */
   .chat-topbar {
-    align-items: flex-start;
-    flex-direction: column;
+    flex-direction: row;
+    align-items: center;
+    min-height: 0;
+    padding: calc(11px + env(safe-area-inset-top)) 16px 11px;
+  }
+
+  .composer {
+    padding-bottom: calc(clamp(8px, 3vw, 12px) + env(safe-area-inset-bottom));
+  }
+
+  .message.assistant .bubble {
+    max-width: none;
+  }
+
+  .settings-view {
+    padding: var(--s-5) var(--s-4);
+  }
+
+  .settings-status,
+  .settings-group {
+    padding: var(--s-4);
+  }
+
+  .tool-row-head {
+    gap: var(--s-2);
+  }
+
+  .vault-card-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .vault-card-row .vault-bar {
+    display: none;
   }
 }
 
@@ -77,8 +122,11 @@
 
   .composer {
     padding: clamp(8px, 3vw, 12px);
+    padding-bottom: calc(clamp(8px, 3vw, 12px) + env(safe-area-inset-bottom));
   }
 
+  /* Give the meta row (model + mode) and the actions their own rows rather
+     than clipping the send button. */
   .composer-footer {
     flex-wrap: wrap;
     gap: 8px;
@@ -88,6 +136,7 @@
   .composer-meta {
     gap: 7px;
     width: 100%;
+    min-width: 0;
   }
 
   .composer-actions {
@@ -107,6 +156,15 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* The mode picker is the rightmost control, so its menu — anchored left: 0
+     with no collision handling — is the one that runs off the screen edge.
+     Flip it to hang off its right instead. */
+  #mode-menu {
+    right: 0;
+    left: auto;
+    transform-origin: bottom right;
   }
 
   .send-btn {
@@ -135,7 +193,41 @@
   }
 }
 
-@media (max-width: 480px) {
+/* ── Compact tier ─────────────────────────────────────────────────────
+   Phones proper. Everything here is either a fit problem or a touch problem. */
+@media (max-width: 430px) {
+  /* The hero was the worst offender: a non-wrapping row of the mark plus
+     52px-floor display type, inside a pane that used to clip. */
+  :root {
+    --fs-display: clamp(38px, 12vw, 52px);
+  }
+
+  .welcome-mark {
+    width: clamp(34px, 11vw, 44px);
+  }
+
+  .welcome-title {
+    gap: var(--s-3);
+  }
+
+  .messages {
+    padding: 16px 12px;
+  }
+
+  .chat-topbar {
+    padding: calc(10px + env(safe-area-inset-top)) 12px 10px;
+  }
+
+  /* Icon-only. The label is what pushed the topbar into a second row. */
+  .topbar-theme-btn {
+    width: 42px;
+    padding: 0;
+  }
+
+  .topbar-theme-btn span {
+    display: none;
+  }
+
   .context-readout {
     display: none;
   }
@@ -145,73 +237,34 @@
     max-width: none;
   }
 
+  /* 16px exactly: at anything smaller iOS Safari zooms the page on focus and
+     never zooms back out. */
+  #chat-input {
+    min-height: 56px;
+    max-height: min(160px, 26dvh);
+    font-size: 16px;
+  }
+
   .settings-view {
     width: 100%;
   }
-}
 
-@media (max-width: 420px) {
   .slash-item {
     grid-template-columns: 1fr;
     gap: 4px;
   }
 
-  .session-delete { opacity: .75; transform: scale(1); }
-
-  .mode-trigger {
-    max-width: 132px;
-  }
-}
-
-/* ── Narrow viewports: new components ─────────────────────────────── */
-
-
-@media (max-width: 760px) {
-  /* The sidebar collapses to a fixed-height horizontal bar here, which has no
-     room for the panel. Vaults remain reachable via the /vault commands. */
-  .vault-section {
-    display: none;
+  /* There is no hover on touch, so the delete affordance has to be permanent —
+     and big enough to hit. */
+  .session-delete {
+    width: 40px;
+    height: 40px;
+    opacity: 0.75;
+    transform: scale(1);
   }
 
-  .message.assistant .bubble {
-    max-width: none;
-  }
-
-  .settings-view {
-    padding: var(--s-5) var(--s-4);
-  }
-
-  .settings-status,
-  .settings-group {
-    padding: var(--s-4);
-  }
-
-  .tool-row-head {
-    gap: var(--s-2);
-  }
-
-  /* The meta row (model + mode) no longer fits beside the actions at this
-     width, so give each its own row here rather than clipping the send button. */
-  .composer-footer {
-    flex-wrap: wrap;
-    gap: var(--s-2);
-  }
-
-  .composer-meta {
-    width: 100%;
-    min-width: 0;
-  }
-
-  .composer-actions {
-    margin-left: auto;
-  }
-
-  .vault-card-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .vault-card-row .vault-bar {
-    display: none;
+  .theme-options {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

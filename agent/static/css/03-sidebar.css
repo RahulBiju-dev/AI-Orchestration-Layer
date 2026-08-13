@@ -16,13 +16,12 @@
   border-bottom: 1px solid var(--line);
 }
 
+/* No border or radius: those framed an opaque square photo. The mark is now a
+   transparent glyph, so a box around it reads as a stray container. */
 .brand-mark {
-  display: block;
-  width: 46px;
-  height: 46px;
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  object-fit: cover;
+  width: 42px;
+  height: 42px;
+  color: var(--text-soft);
 }
 
 .brand h1,
@@ -38,6 +37,39 @@
   font-size: var(--fs-h2);
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+
+/* Sits at the end of the brand row while the rail is open, and drops beneath
+   the mark once 02-base.css turns the brand into a column. */
+.sidebar-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  margin-left: auto;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease-out),
+              color var(--dur-1) var(--ease-out);
+}
+
+.sidebar-collapse svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.sidebar-collapse:hover,
+.sidebar-collapse:focus-visible {
+  background: var(--elevated);
+  color: var(--text);
 }
 
 .eyebrow,
@@ -83,8 +115,17 @@
   transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
 }
 
-.primary-btn span {
+/* The glyph and the label are separate elements so the collapsed rail can drop
+   the label and keep a square icon button. */
+.primary-btn-icon {
+  flex: 0 0 auto;
   color: var(--muted);
+}
+
+.primary-btn-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .primary-btn:hover {
@@ -167,6 +208,11 @@
   overflow: hidden;
   font-size: var(--fs-sm);
   text-align: left;
+}
+
+.session-name {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

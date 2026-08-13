@@ -8,9 +8,11 @@
   position: relative;
   width: min(100%, var(--content-width));
   margin: 0 auto;
-  border: 1px solid var(--hairline);
+  /* --line rather than --hairline: the hairline is 72% transparent and all but
+     vanishes now that the fill is darker than the page behind it. */
+  border: 1px solid var(--line);
   border-radius: var(--r-xl);
-  background: var(--surface-high);
+  background: var(--sunken);
   box-shadow: var(--elev-2);
   transition: border-color var(--dur-2) var(--ease-out),
               box-shadow var(--dur-2) var(--ease-out);
@@ -162,8 +164,8 @@ textarea::placeholder {
   min-width: 0;
   height: 34px;
   border: 1px solid var(--hairline);
-  border-radius: var(--r-full);
-  background: var(--surface-low);
+  border-radius: var(--r-sm);
+  background: var(--sunken-deep);
   color: var(--muted);
   transition: border-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
 }
@@ -226,8 +228,8 @@ textarea::placeholder {
   align-items: center;
   min-height: 34px;
   border: 1px solid var(--hairline);
-  border-radius: var(--r-full);
-  background: var(--surface-low);
+  border-radius: var(--r-sm);
+  background: var(--sunken-deep);
   color: var(--muted);
   transition: border-color var(--dur-2) var(--ease-out),
               background-color var(--dur-2) var(--ease-out),
@@ -236,13 +238,13 @@ textarea::placeholder {
 
 .mode-picker.active .mode-chip {
   border-color: color-mix(in srgb, var(--mode-tone) 48%, var(--line));
-  background: color-mix(in srgb, var(--mode-tone) 11%, var(--surface-low));
+  background: color-mix(in srgb, var(--mode-tone) 11%, var(--sunken-deep));
   color: var(--text);
 }
 
 .mode-picker[data-mode="deep-research"] .mode-chip {
   border-color: color-mix(in srgb, var(--primary) 52%, var(--line));
-  background: color-mix(in srgb, var(--primary) 12%, var(--surface-low));
+  background: color-mix(in srgb, var(--primary) 12%, var(--sunken-deep));
 }
 
 .mode-trigger,
@@ -459,7 +461,9 @@ textarea::placeholder {
   height: 3px;
   overflow: hidden;
   border-radius: var(--r-xl) var(--r-xl) 0 0;
-  background: var(--surface-low);
+  /* The track rides the composer's top edge, so it has to stay darker than the
+     fill it sits on or the meter reads inverted. */
+  background: var(--sunken-deep);
   pointer-events: none;
 }
 

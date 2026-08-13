@@ -8,7 +8,9 @@
 }
 
 .toast {
-  max-width: 390px;
+  /* The region is pinned 16px off the right edge, so the toast needs its own
+     guard or a long message runs off the left of a narrow screen. */
+  max-width: min(390px, calc(100vw - 32px));
   padding: 14px 16px;
   border: 1px solid var(--line-strong);
   border-left: 2px solid var(--accent);
@@ -18,6 +20,28 @@
   font-family: var(--ui-label);
   font-size: var(--fs-sm);
 }
+
+/* ── Sidebar drawer scrim ─────────────────────────────────────────────
+   Only ever visible at the drawer breakpoint, where 07-responsive.css turns
+   the sidebar into an off-canvas panel. Both it and the drawer (53) sit below
+   the settings scrim (55), so settings — which is opened from a button inside
+   the drawer — still covers it. */
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 52;
+  background: color-mix(in srgb, var(--bg) 50%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-3) var(--ease-out);
+}
+
+.sidebar-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sidebar-backdrop[hidden] { display: none; }
 
 /* ── Settings view ──────────────────────────────────────────────────── */
 .settings-backdrop {
