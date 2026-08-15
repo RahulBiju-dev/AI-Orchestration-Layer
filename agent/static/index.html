@@ -16,13 +16,13 @@
   <link rel="icon" href="/assets/selene-mark.svg" type="image/svg+xml">
   <link rel="alternate icon" href="/favicon.png" type="image/png">
   <!-- Loaded in numeric order: the cascade depends on it. -->
-  <link rel="stylesheet" href="/css/01-tokens.css?v=7">
-  <link rel="stylesheet" href="/css/02-base.css?v=7">
-  <link rel="stylesheet" href="/css/03-sidebar.css?v=7">
-  <link rel="stylesheet" href="/css/04-chat.css?v=7">
-  <link rel="stylesheet" href="/css/05-composer.css?v=7">
-  <link rel="stylesheet" href="/css/06-overlays.css?v=7">
-  <link rel="stylesheet" href="/css/07-responsive.css?v=7">
+  <link rel="stylesheet" href="/css/01-tokens.css?v=8">
+  <link rel="stylesheet" href="/css/02-base.css?v=8">
+  <link rel="stylesheet" href="/css/03-sidebar.css?v=8">
+  <link rel="stylesheet" href="/css/04-chat.css?v=8">
+  <link rel="stylesheet" href="/css/05-composer.css?v=8">
+  <link rel="stylesheet" href="/css/06-overlays.css?v=8">
+  <link rel="stylesheet" href="/css/07-responsive.css?v=8">
 </head>
 <body>
   <!-- The Selene mark, defined once and referenced with <use> by the sidebar
@@ -63,7 +63,7 @@
         <!-- Desktop only: collapses the rail to an icon column. The phone
              drawer uses the topbar button instead — a drawer cannot hold the
              control that opens it. -->
-        <button id="sidebar-collapse" class="sidebar-collapse" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar">
+        <button id="sidebar-collapse" class="sidebar-collapse icon-action" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
         </button>
       </header>
@@ -271,6 +271,22 @@
         <button id="profile-apply" class="profile-apply-btn" type="button">Continue</button>
       </footer>
     </section>
+  </div>
+
+  <!-- One menu shared by every session row, parked in the overlay layer beside
+       the toasts. It has to sit outside .sidebar: that list scrolls, and below
+       the drawer breakpoint the sidebar itself carries a transform, which would
+       make it the containing block for this menu's `position: fixed` and throw
+       the viewport coordinates JS computes for it. -->
+  <div id="session-menu" class="row-menu" role="menu" aria-label="Chat options" hidden>
+    <button class="row-menu-item" type="button" role="menuitem" data-action="pin">
+      <span class="row-menu-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 4h6l-1 6 3 3H7l3-3-1-6ZM12 13v7"/></svg></span>
+      <span class="row-menu-label">Pin chat</span>
+    </button>
+    <button class="row-menu-item danger" type="button" role="menuitem" data-action="delete">
+      <span class="row-menu-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/></svg></span>
+      <span class="row-menu-label">Delete chat</span>
+    </button>
   </div>
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>

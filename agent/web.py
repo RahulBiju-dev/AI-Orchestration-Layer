@@ -327,6 +327,70 @@ def list_saved_sessions() -> list[str]:
     return [os.path.basename(f) for f in files]
 
 
+# Pinned chats live in a dotfile sidecar rather than inside the session
+# snapshots: `glob("*.json")` above skips leading-dot names, so the index stays
+# invisible to list_saved_sessions() and every caller that indexes into it.
+_PINS_PATH = os.path.join(_SESSIONS_DIR, ".pins.json")
+
+
+def load_pinned_sessions() -> list[str]:
+    """Return the pinned session filenames that still exist on disk.
+
+    Returns:
+        list[str]: Pinned filenames, most recently pinned last.
+    """
+    try:
+        stored = read_json_preserved(_PINS_PATH, expected_type=list)
+    except FileNotFoundError:
+        return []
+    except PersistenceError as exc:
+        print(f"Preserved malformed pin index: {exc}")
+        return []
+    except OSError:
+        return []
+    existing = set(list_saved_sessions())
+    return [name for name in stored if isinstance(name, str) and name in existing]
+
+
+def set_session_pinned(name: str, pinned: bool) -> list[str]:
+    """Add or remove one session from the pin index.
+
+    Args:
+        name (str): The session filename to pin or unpin.
+        pinned (bool): True to pin, False to unpin.
+
+    Returns:
+        list[str]: The pin index after the change.
+    """
+    safe_name = os.path.basename(name)
+    with _SESSION_LIFECYCLE_LOCK:
+        pins = load_pinned_sessions()
+        if pinned and safe_name not in pins:
+            pins.append(safe_name)
+        elif not pinned:
+            pins = [entry for entry in pins if entry != safe_name]
+        os.makedirs(_SESSIONS_DIR, exist_ok=True)
+        atomic_write_json(_PINS_PATH, pins)
+        return pins
+
+
+def _repin_renamed_session(old_name: str, new_name: str) -> None:
+    """Carry a pin across the rename that happens when the agent titles a chat."""
+    with _SESSION_LIFECYCLE_LOCK:
+        try:
+            stored = read_json_preserved(_PINS_PATH, expected_type=list)
+        except (FileNotFoundError, PersistenceError, OSError):
+            return
+        if old_name not in stored:
+            return
+        renamed = [new_name if entry == old_name else entry for entry in stored]
+        try:
+            atomic_write_json(_PINS_PATH, renamed)
+        except (OSError, PersistenceError) as exc:
+            # A lost pin must never break the rename that carries the title.
+            print(f"Could not carry pin across rename: {exc}")
+
+
 def save_session(
     name: str,
     session_data: dict | None = None,
@@ -584,6 +648,7 @@ def title_temporary_session(
             raise
         with _SESSION_LOCKS_GUARD:
             _SESSION_RENAMES[filename] = target
+        _repin_renamed_session(filename, target)
     return target
 
 
@@ -3126,6 +3191,7 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 "settings": view.session,
                 "history": view.history,
                 "saved_sessions": saved,
+                "pinned_sessions": load_pinned_sessions(),
                 "active_session_name": view.active_session_name,
                 "model_name": selected_model.display_name,
                 "models": available_models(runtime),
@@ -3502,6 +3568,7 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     else:
                         with _session_lock(name):
                             os.remove(os.path.join(_SESSIONS_DIR, name))
+                        set_session_pinned(name, False)
                         CLIENT_SESSIONS.remove_session(name)
                 if delete_error is not None:
                     status, error = delete_error
@@ -3512,9 +3579,26 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json_response(200, {
                     "status": "success",
                     "saved_sessions": list_saved_sessions(),
+                    "pinned_sessions": load_pinned_sessions(),
                     "active_session_name": view.active_session_name,
                 })
             except OSError as exc:
+                self.send_json_response(500, {"status": "error", "error": str(exc)})
+            return
+
+        if path == '/api/pin-session':
+            name = os.path.basename(str(body.get("name", "")))
+            pinned = bool(body.get("pinned", True))
+            try:
+                with _SESSION_LIFECYCLE_LOCK:
+                    if not name or name not in list_saved_sessions():
+                        self.send_json_response(
+                            404, {"status": "error", "error": "Session not found"}
+                        )
+                        return
+                    pins = set_session_pinned(name, pinned)
+                self.send_json_response(200, {"status": "success", "pinned_sessions": pins})
+            except (OSError, PersistenceError) as exc:
                 self.send_json_response(500, {"status": "error", "error": str(exc)})
             return
 

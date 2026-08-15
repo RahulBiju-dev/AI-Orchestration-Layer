@@ -254,9 +254,9 @@
     gap: 4px;
   }
 
-  /* There is no hover on touch, so the delete affordance has to be permanent —
-     and big enough to hit. */
-  .session-delete {
+  /* There is no hover on touch, so the row's action affordance has to be
+     permanent — and big enough to hit. */
+  .session-menu-btn {
     width: 40px;
     height: 40px;
     opacity: 0.75;

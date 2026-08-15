@@ -104,6 +104,10 @@ const SLASH_COMMANDS = [
   { command: "/q", description: "Exit the agent" }
 ];
 
+// Marks a pinned row. Same path as the menu's Pin item in index.html — keep
+// the two in step if either is redrawn.
+const PIN_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6l-1 6 3 3H7l3-3-1-6ZM12 13v7"/></svg>`;
+
 const THEME_STORAGE_KEY = "selene-web-theme";
 const PLACE_THEMES = [
   { id: "oslo", name: "Oslo", description: "Monochrome grey & white", background: "#0b0b0b", surface: "#131313", primary: "#cfcfcf", accent: "#e8e8e8" },
@@ -141,6 +145,8 @@ const state = {
   settings: cloneSettings(DEFAULT_SETTINGS),
   runtime: { effective_options: { ...FALLBACK_MODEL_OPTIONS } },
   savedSessions: [],
+  pinnedSessions: [],
+  sessionMenuTarget: null,
   activeSessionName: "New conversation",
   modelName: "selene",
   models: [
@@ -289,6 +295,7 @@ function bindElements() {
   el.contextFill = document.getElementById("context-fill");
   el.contextMeter = document.getElementById("context-meter");
   el.sessionList = document.getElementById("session-list");
+  el.sessionMenu = document.getElementById("session-menu");
   el.title = document.getElementById("chat-title");
   el.history = document.getElementById("setting-history");
   el.think = document.getElementById("setting-think");
@@ -369,7 +376,17 @@ function bindEvents() {
     }
     if (!el.modePicker?.contains(event.target)) closeModeMenu();
     if (!el.modelPicker?.contains(event.target)) closeModelMenu();
+    if (!el.sessionMenu?.contains(event.target)) closeSessionMenu();
   });
+
+  el.sessionMenu?.addEventListener("click", handleSessionMenuAction);
+  el.sessionMenu?.addEventListener("keydown", handleSessionMenuKeydown);
+  // Fixed positioning is resolved once at open time, so anything that moves the
+  // anchor underneath it has to dismiss the menu rather than let it drift.
+  // Capture phase: scroll does not bubble, and the anchor sits inside the
+  // session list on desktop but inside the scrolling sidebar on phones.
+  document.addEventListener("scroll", () => closeSessionMenu(), { capture: true, passive: true });
+  window.addEventListener("resize", () => closeSessionMenu());
 
   el.modelTrigger?.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -611,6 +628,7 @@ async function loadState() {
 
     state.history = data.history || [];
     state.savedSessions = data.saved_sessions || [];
+    state.pinnedSessions = data.pinned_sessions || [];
     state.settings = mergeSettings(data.settings || {});
     state.runtime = data.runtime || state.runtime;
     reportRuntimeWarnings(state.runtime);
@@ -992,53 +1010,220 @@ function handleModeMenuKeydown(event) {
   options[next].focus();
 }
 
+function isSessionPinned(name) {
+  return state.pinnedSessions.includes(name);
+}
+
+/* ── Session row menu ──────────────────────────────────────────────────
+   One menu node shared by every row, living outside .session-list. The list
+   is `overflow: auto`, so a per-row menu would be clipped by its scroller;
+   this one is `position: fixed` and anchored to whichever trigger opened it. */
+
+function positionSessionMenu(anchor) {
+  const menu = el.sessionMenu;
+  const rect = anchor.getBoundingClientRect();
+  // offsetWidth/Height, not a bounding rect: the closed menu carries a
+  // scale(0.97), and a rect would hand back the shrunken box, skewing the
+  // flip decision below.
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  const gap = 6;
+  const margin = 8;
+
+  let left = rect.right - width;
+  left = Math.min(Math.max(left, margin), window.innerWidth - width - margin);
+
+  let top = rect.bottom + gap;
+  let flipped = false;
+  if (top + height > window.innerHeight - margin) {
+    const above = rect.top - height - gap;
+    flipped = above >= margin;
+    top = flipped ? above : Math.max(margin, window.innerHeight - height - margin);
+  }
+
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+  // Grow out of the corner nearest the trigger.
+  menu.style.transformOrigin = flipped ? "bottom right" : "top right";
+}
+
+function openSessionMenu(name, anchor) {
+  const menu = el.sessionMenu;
+  if (!menu || !anchor) return;
+  closeSessionMenu();
+
+  state.sessionMenuTarget = name;
+  const pinned = isSessionPinned(name);
+  const pinItem = menu.querySelector('[data-action="pin"]');
+  if (pinItem) {
+    pinItem.querySelector(".row-menu-label").textContent = pinned ? "Unpin chat" : "Pin chat";
+    pinItem.classList.toggle("active", pinned);
+  }
+
+  menu.hidden = false;
+  anchor.setAttribute("aria-expanded", "true");
+  positionSessionMenu(anchor);
+  requestAnimationFrame(() => menu.classList.add("open"));
+  menu.querySelector(".row-menu-item")?.focus();
+}
+
+function closeSessionMenu({ restoreFocus = false } = {}) {
+  const menu = el.sessionMenu;
+  if (!menu || menu.hidden) return;
+  const trigger = el.sessionList?.querySelector('.session-menu-btn[aria-expanded="true"]');
+  menu.classList.remove("open");
+  menu.hidden = true;
+  state.sessionMenuTarget = null;
+  trigger?.setAttribute("aria-expanded", "false");
+  if (restoreFocus) trigger?.focus();
+}
+
+function handleSessionMenuTriggerKeydown(event) {
+  if (event.key === "Escape" && !el.sessionMenu?.hidden) {
+    event.preventDefault();
+    closeSessionMenu({ restoreFocus: true });
+    return;
+  }
+  if (!["Enter", " ", "ArrowDown", "ArrowUp"].includes(event.key)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const name = event.currentTarget.closest(".session-item")?.dataset.session;
+  if (name) openSessionMenu(name, event.currentTarget);
+}
+
+function handleSessionMenuKeydown(event) {
+  const options = [...el.sessionMenu.querySelectorAll(".row-menu-item")];
+  if (!options.length) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    // The document-level Escape chain closes the phone drawer. Dismissing a
+    // menu should not also dismiss the surface it opened from.
+    event.stopPropagation();
+    closeSessionMenu({ restoreFocus: true });
+    return;
+  }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const current = Math.max(0, options.indexOf(document.activeElement));
+  let next = current;
+  if (event.key === "ArrowDown") next = (current + 1) % options.length;
+  if (event.key === "ArrowUp") next = (current - 1 + options.length) % options.length;
+  if (event.key === "Home") next = 0;
+  if (event.key === "End") next = options.length - 1;
+  options[next].focus();
+}
+
+async function toggleSessionPin(name) {
+  const pinned = !isSessionPinned(name);
+  try {
+    const response = await fetch("/api/pin-session", {
+      method: "POST",
+      headers: apiHeaders(true),
+      body: JSON.stringify({ name, pinned })
+    });
+    if (!response.ok) throw await apiError(response, `HTTP ${response.status}`);
+    const data = await response.json();
+    state.pinnedSessions = data.pinned_sessions || state.pinnedSessions;
+    renderSessions();
+    toast(pinned ? "Chat pinned." : "Chat unpinned.");
+  } catch (error) {
+    toast(`Could not update pin: ${error.message}`);
+  }
+}
+
+function handleSessionMenuAction(event) {
+  const item = event.target.closest(".row-menu-item");
+  if (!item) return;
+  event.stopPropagation();
+  const name = state.sessionMenuTarget;
+  closeSessionMenu();
+  if (!name) return;
+  if (item.dataset.action === "pin") toggleSessionPin(name);
+  else if (item.dataset.action === "delete") deleteSession(name);
+}
+
+function buildSessionRow(name) {
+  const generation = generationForSession(name);
+  const pinned = isSessionPinned(name);
+  const item = document.createElement("div");
+  item.className = [
+    "session-item",
+    name === state.activeSessionName ? "active" : "",
+    generation ? "running" : "",
+    pinned ? "pinned" : ""
+  ].filter(Boolean).join(" ");
+  item.dataset.session = name;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "session-open";
+  if (pinned) {
+    const mark = document.createElement("span");
+    mark.className = "session-pin-mark";
+    mark.setAttribute("aria-label", "Pinned");
+    mark.title = "Pinned";
+    mark.innerHTML = PIN_ICON;
+    button.appendChild(mark);
+  }
+  // The name gets its own element: text-overflow does not apply to the
+  // anonymous text of a flex container, so putting it straight on the button
+  // clipped long titles mid-word instead of ellipsizing them.
+  const label = document.createElement("span");
+  label.className = "session-name";
+  label.textContent = cleanSessionName(name);
+  button.appendChild(label);
+  button.title = generation ? `${name} · response running` : name;
+  if (generation) {
+    const running = document.createElement("span");
+    running.className = "session-running";
+    running.setAttribute("aria-label", "Response running");
+    running.title = "Response running";
+    button.appendChild(running);
+  }
+  button.addEventListener("click", () => loadSession(name));
+
+  const menu = document.createElement("button");
+  menu.type = "button";
+  menu.className = "session-menu-btn icon-action";
+  menu.setAttribute("aria-haspopup", "menu");
+  menu.setAttribute("aria-expanded", "false");
+  menu.setAttribute("aria-label", `Options for ${cleanSessionName(name)}`);
+  menu.title = "More options";
+  // Dots are filled, not stroked: at 1.6px stroke the shared .icon-action rule
+  // would draw three rings instead of three dots.
+  menu.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>`;
+  menu.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (state.sessionMenuTarget === name) closeSessionMenu({ restoreFocus: true });
+    else openSessionMenu(name, menu);
+  });
+  menu.addEventListener("keydown", handleSessionMenuTriggerKeydown);
+
+  item.append(button, menu);
+  return item;
+}
+
 function renderSessions() {
   if (!el.sessionList) return;
+  // A re-render replaces the button the open menu is anchored to, so the menu
+  // has to come down with it.
+  closeSessionMenu();
   el.sessionList.innerHTML = "";
 
   if (!state.savedSessions.length) return;
 
-  state.savedSessions.forEach((name) => {
-    const generation = generationForSession(name);
-    const item = document.createElement("div");
-    item.className = [
-      "session-item",
-      name === state.activeSessionName ? "active" : "",
-      generation ? "running" : ""
-    ].filter(Boolean).join(" ");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "session-open";
-    // The name gets its own element: text-overflow does not apply to the
-    // anonymous text of a flex container, so putting it straight on the button
-    // clipped long titles mid-word instead of ellipsizing them.
-    const label = document.createElement("span");
-    label.className = "session-name";
-    label.textContent = cleanSessionName(name);
-    button.appendChild(label);
-    button.title = generation ? `${name} · response running` : name;
-    if (generation) {
-      const running = document.createElement("span");
-      running.className = "session-running";
-      running.setAttribute("aria-label", "Response running");
-      running.title = "Response running";
-      button.appendChild(running);
-    }
-    button.addEventListener("click", () => loadSession(name));
+  // Both groups keep the server's newest-first order; only the grouping moves.
+  const pinned = state.savedSessions.filter(isSessionPinned);
+  const rest = state.savedSessions.filter((name) => !isSessionPinned(name));
 
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "session-delete";
-    remove.setAttribute("aria-label", `Delete ${cleanSessionName(name)}`);
-    remove.title = "Delete chat";
-    remove.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/></svg>`;
-    remove.addEventListener("click", (event) => {
-      event.stopPropagation();
-      deleteSession(name);
-    });
-    item.append(button, remove);
-    el.sessionList.appendChild(item);
-  });
+  pinned.forEach((name) => el.sessionList.appendChild(buildSessionRow(name)));
+  if (pinned.length && rest.length) {
+    const divider = document.createElement("div");
+    divider.className = "session-divider";
+    divider.setAttribute("role", "presentation");
+    el.sessionList.appendChild(divider);
+  }
+  rest.forEach((name) => el.sessionList.appendChild(buildSessionRow(name)));
 }
 
 function renderActiveConversation() {
@@ -2491,6 +2676,7 @@ async function deleteSession(name) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     state.savedSessions = data.saved_sessions || state.savedSessions.filter((session) => session !== name);
+    state.pinnedSessions = data.pinned_sessions || state.pinnedSessions.filter((session) => session !== name);
     const backendStartedNewSession = ["Active Session", "New conversation"].includes(data.active_session_name);
     if (deletingActiveSession || backendStartedNewSession) {
       state.history = [];
@@ -2520,6 +2706,7 @@ async function refreshSessions() {
   if (!response.ok) return;
   const data = await response.json();
   state.savedSessions = data.saved_sessions || [];
+  state.pinnedSessions = data.pinned_sessions || [];
   const backendName = data.active_session_name || state.activeSessionName;
   if (!generationForSession() || backendName === state.activeSessionName) {
     state.activeSessionName = backendName;

@@ -39,37 +39,49 @@
   letter-spacing: 0.02em;
 }
 
-/* Sits at the end of the brand row while the rail is open, and drops beneath
-   the mark once 02-base.css turns the brand into a column. */
-.sidebar-collapse {
+/* ── The sidebar's one icon-button treatment ──────────────────────────
+   Every bare glyph control in the rail wears this: same 32px box, same
+   radius, same hover surface, same timing. Before this existed the four of
+   them disagreed on all four, so hovering across the sidebar produced
+   boxes of three different sizes. */
+.icon-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
-  margin-left: auto;
+  width: 32px;
+  height: 32px;
+  border: 0;
   border-radius: var(--r-sm);
   background: transparent;
   color: var(--faint);
   cursor: pointer;
   transition: background-color var(--dur-1) var(--ease-out),
-              color var(--dur-1) var(--ease-out);
+              color var(--dur-1) var(--ease-out),
+              opacity var(--dur-1) var(--ease-out);
 }
 
-.sidebar-collapse svg {
+.icon-action svg {
   width: 18px;
   height: 18px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
   stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.sidebar-collapse:hover,
-.sidebar-collapse:focus-visible {
+.icon-action:hover,
+.icon-action:focus-visible,
+.icon-action[aria-expanded="true"] {
   background: var(--elevated);
   color: var(--text);
+}
+
+/* Sits at the end of the brand row while the rail is open, and drops beneath
+   the mark once 02-base.css turns the brand into a column. */
+.sidebar-collapse {
+  margin-left: auto;
 }
 
 .eyebrow,
@@ -82,19 +94,28 @@
   text-transform: lowercase;
 }
 
+/* `user-select: none` rides along with the cursor: dragging across a control
+   used to paint a text selection over its label, which read as the sidebar
+   mis-selecting itself on hover. Labels here are affordances, not prose. */
 .primary-btn,
 .ghost-btn,
 .send-btn,
 .settings-trigger,
+.sidebar-collapse,
+.vault-toggle,
 .icon-btn,
+.icon-action,
 .mic-btn,
 .session-open,
-.session-delete,
+.session-menu-btn,
+.row-menu-item,
 .slash-item,
 .block-toggle,
 .code-copy-btn,
 .profile-apply-btn {
   cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .primary-btn {
@@ -174,11 +195,16 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   min-height: 46px;
+  /* The 32px action box is optically centred in 46px, leaving ~7px of air on
+     the right to answer the title's 12px inset on the left. */
+  padding-right: 7px;
   border-left: 2px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   background: var(--surface-row);
   color: var(--muted);
-  transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+  transition: background var(--dur-1) var(--ease-out),
+              border-color var(--dur-1) var(--ease-out),
+              color var(--dur-1) var(--ease-out);
 }
 
 .session-item:hover {
@@ -192,22 +218,45 @@
   color: var(--text);
 }
 
-.session-open,
-.session-delete {
-  border: 0;
-  background: inherit;
-  color: inherit;
-}
-
+/* Transparent, not `inherit`: an inherited background made each child stamp
+   its own copy of the row's hover fill, so hovering the icon painted a
+   visibly separate rectangle inside an already-highlighted row. */
 .session-open {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  padding: 12px 9px 12px 12px;
+  padding: 12px 4px 12px 12px;
   overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: inherit;
   font-size: var(--fs-sm);
   text-align: left;
+}
+
+.session-pin-mark {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.session-pin-mark svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Separates the pinned group from the rest without spending a heading on it. */
+.session-divider {
+  flex: 0 0 auto;
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--hairline);
 }
 
 .session-name {
@@ -241,18 +290,26 @@
   .session-running { animation: none; opacity: 0.85; }
 }
 
-.session-delete {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  border-radius: 4px;
-  color: var(--danger);
+/* Geometry, hover and timing all come from .icon-action; only the reveal
+   behaviour is the row's own business. */
+.session-menu-btn {
   opacity: 0;
-  transition: opacity 100ms ease, background 100ms ease;
 }
 
-.session-delete svg,
+/* The dots are filled shapes, not strokes — .icon-action's 1.6px stroke would
+   render them as three rings. */
+.session-menu-btn svg {
+  fill: currentColor;
+  stroke: none;
+}
+
+.session-item:hover .session-menu-btn,
+.session-item.active .session-menu-btn,
+.session-menu-btn:focus-visible,
+.session-menu-btn[aria-expanded="true"] {
+  opacity: 1;
+}
+
 .settings-trigger svg {
   width: 18px;
   fill: none;
@@ -262,14 +319,97 @@
   stroke-linejoin: round;
 }
 
-.session-item:hover .session-delete,
-.session-delete:focus-visible {
-  opacity: 0.8;
+/* ── Session row menu ─────────────────────────────────────────────────
+   Shares the composer menus' visual language (05-composer.css .mode-menu),
+   but is fixed-positioned from JS: it has to escape .session-list's
+   scroll clipping, so it cannot be anchored by the cascade. */
+.row-menu {
+  position: fixed;
+  /* Above the phone drawer (53) and the settings view (56), below the theme
+     dialog (60) and the toasts (70). */
+  z-index: 58;
+  top: 0;
+  left: 0;
+  display: grid;
+  width: 188px;
+  gap: 2px;
+  padding: var(--s-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--elevated) 96%, var(--bg));
+  box-shadow: var(--elev-4);
+  opacity: 0;
+  transform: translateY(-4px) scale(0.97);
+  transform-origin: top right;
+  transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out);
 }
 
-.session-delete:hover {
-  background: color-mix(in srgb, var(--danger) 9%, transparent);
+.row-menu[hidden] {
+  display: none;
+}
+
+.row-menu.open {
   opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.row-menu-item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-soft);
+  font-family: var(--ui-label);
+  font-size: var(--fs-sm);
+  text-align: left;
+  transition: background-color var(--dur-1) var(--ease-out),
+              color var(--dur-1) var(--ease-out);
+}
+
+.row-menu-icon {
+  display: inline-flex;
+  color: var(--faint);
+}
+
+.row-menu-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.row-menu-item:hover,
+.row-menu-item:focus-visible {
+  background: color-mix(in srgb, var(--primary) 9%, var(--surface));
+  color: var(--text);
+}
+
+.row-menu-item:hover .row-menu-icon,
+.row-menu-item:focus-visible .row-menu-icon {
+  color: inherit;
+}
+
+/* Already pinned: the item now reads "Unpin chat", so tint it to show state. */
+.row-menu-item.active .row-menu-icon {
+  color: var(--accent);
+}
+
+.row-menu-item.danger {
+  color: var(--ink-danger);
+}
+
+.row-menu-item.danger:hover,
+.row-menu-item.danger:focus-visible {
+  background: var(--tint-danger);
+  color: var(--danger);
 }
 
 .settings-trigger {
@@ -337,10 +477,25 @@
   display: none;
 }
 
+/* Boxed like the other rail glyphs so the four icon targets line up, but it
+   takes its hover from the toggle it sits inside rather than owning one. */
 .vault-chevron {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  margin-right: -7px;
+  border-radius: var(--r-sm);
   color: var(--faint);
-  transition: transform var(--dur-2) var(--ease-out);
+  transition: transform var(--dur-2) var(--ease-out),
+              color var(--dur-1) var(--ease-out);
+}
+
+.vault-toggle:hover .vault-chevron,
+.vault-toggle:focus-visible .vault-chevron {
+  color: var(--text-soft);
 }
 
 .vault-chevron svg {
