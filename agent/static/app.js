@@ -2343,9 +2343,7 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
         scheduleStreamRender({ immediate: true });
         state.stream.thinkingBlock?.classList.remove("open", "running");
         state.stream.assistantBubble = document.createElement("div");
-        // .streaming drives the blinking caret; settleStreamActivity clears it
-        // on every terminal path, including abort and transport failure.
-        state.stream.assistantBubble.className = "bubble streaming";
+        state.stream.assistantBubble.className = "bubble";
         state.stream.assistantStack.appendChild(state.stream.assistantBubble);
         appendMessageActions(state.stream.assistantStack, "copy");
         state.stream.thinkingBlock = null;
@@ -2382,10 +2380,22 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
           }
         }
         // A /model switch compacts history in place, so the server can return
-        // fewer messages than are currently on screen.
+        // fewer messages than are currently on screen. Shrinking is legitimate;
+        // erasing the transcript is not.
+        //
+        // Compared by *displayable* messages, not raw length: with "Keep
+        // history" off the server retains only the system prompt, which is a
+        // non-empty array that renders to nothing. Adopting it replaced a
+        // conversation the user was still reading with the welcome screen.
+        const incomingHistory = Array.isArray(event.history) ? event.history : null;
+        const onScreenCount = toDisplayMessages(state.history).length;
+        const adoptHistory = Boolean(
+          incomingHistory
+          && (toDisplayMessages(incomingHistory).length || !onScreenCount)
+        );
         const historyShrank =
-          Array.isArray(event.history) && event.history.length < state.history.length;
-        if (event.history) state.history = event.history;
+          adoptHistory && incomingHistory.length < state.history.length;
+        if (adoptHistory) state.history = incomingHistory;
         if (event.settings) state.settings = mergeSettings(event.settings);
         if (event.runtime) {
           state.runtime = event.runtime;
@@ -2499,7 +2509,6 @@ function settleStreamActivity(interrupted = false) {
   // aborted or the connection fails. Settle the DOM before resetStream drops
   // the only references to these still-visible elements.
   state.stream.thinkingBlock?.classList.remove("open", "running");
-  state.stream.assistantBubble?.classList.remove("streaming");
   settleModeStatus();
   for (const entry of state.stream.activeToolBlocks.values()) {
     settleToolRow(entry.row, { status: interrupted ? "unknown" : "ok" });

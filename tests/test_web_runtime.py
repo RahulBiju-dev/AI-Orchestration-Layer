@@ -1671,6 +1671,83 @@ class TestHTTPGenerationLifecycle(unittest.TestCase):
             TerminalState.CANCELLED,
         )
 
+    def test_finished_turn_is_published_before_the_done_frame_is_written(self):
+        """The client re-reads /api/settings the moment it sees `done`.
+
+        Committing the turn after the frame left a window where that read
+        returned the pre-turn history — empty on a first turn — and the client
+        adopted it and rendered the welcome screen over a live conversation.
+        """
+        from agent import web
+
+        registry = GenerationRegistry()
+        store = ClientSessionStore({"options": {}, "history": True})
+        handler = self._handler("generation-one")
+        finished_history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+        ]
+        # What a concurrent GET /api/settings would have seen, per frame.
+        seen: list[tuple[str, list]] = []
+
+        def record_write(payload):
+            text = payload.decode("utf-8") if isinstance(payload, bytes) else str(payload)
+            event = json.loads(text[len("data: "):].strip())
+            seen.append((event["type"], store.snapshot("client-one").history))
+
+        handler.wfile = MagicMock()
+        handler.wfile.write.side_effect = record_write
+
+        def events(*args, **kwargs):
+            yield {"type": "content_chunk", "text": "hi there"}
+            yield {
+                "type": "done",
+                "state": "completed",
+                "history": finished_history,
+                "active_session_name": "conversation.json",
+                "saved_sessions": ["conversation.json"],
+            }
+
+        with (
+            patch.object(web, "ACTIVE_GENERATIONS", registry),
+            patch.object(web, "CLIENT_SESSIONS", store),
+            patch.object(web, "save_session_snapshot", return_value="conversation.json"),
+            patch.object(web, "generate_chat_events", side_effect=events),
+        ):
+            handler.do_POST()
+
+        done_frames = [history for kind, history in seen if kind == "done"]
+        self.assertEqual(len(done_frames), 1)
+        self.assertEqual(done_frames[0], finished_history)
+        self.assertEqual(store.snapshot("client-one").history, finished_history)
+
+    def test_generation_that_never_reaches_done_still_publishes_its_turn(self):
+        from agent import web
+
+        registry = GenerationRegistry()
+        store = ClientSessionStore({"options": {}, "history": True})
+        handler = self._handler("generation-one")
+
+        def events(*args, **kwargs):
+            yield {"type": "content_chunk", "text": "partial"}
+            raise RuntimeError("provider died")
+
+        with (
+            patch.object(web, "ACTIVE_GENERATIONS", registry),
+            patch.object(web, "CLIENT_SESSIONS", store),
+            patch.object(web, "save_session_snapshot", return_value="conversation.json"),
+            patch.object(web, "generate_chat_events", side_effect=events),
+        ):
+            handler.do_POST()
+
+        # The fallback commit in `finally` still ran, so ownership is released
+        # and the tab is left pointing at a real session rather than the alias.
+        self.assertEqual(registry.active_operations(), [])
+        self.assertEqual(
+            store.snapshot("client-one").active_session_name,
+            "conversation.json",
+        )
+
     def test_simultaneous_blank_submissions_run_only_one_generation(self):
         from agent import web
 

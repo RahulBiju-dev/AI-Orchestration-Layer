@@ -1724,7 +1724,9 @@ def _ultra_review_events(
                     yield {"type": "thinking_start"}
                 thinking += thinking_chunk
                 yield {"type": "thinking_chunk", "text": thinking_chunk}
-                continue
+            # No `continue` here: one chunk can carry both channels — the delta
+            # that closes an inline "</think>" is reasoning *and* the first of
+            # the answer — and skipping the content branch dropped it.
             content_chunk = normalize_provider_text(getattr(msg, "content", None))
             if content_chunk:
                 if thinking_open:
@@ -3384,6 +3386,7 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         if path == '/api/chat':
             lease = None
             generator = None
+            committed = False
             terminal_state = TerminalState.FAILED
             terminal_detail = "Generation did not start"
             active_name = "Active Session"
@@ -3475,6 +3478,31 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                         except ValueError:
                             terminal_state = TerminalState.FAILED
                         terminal_detail = event.get("error")
+                        # Publish the finished turn BEFORE the frame goes out.
+                        # The client re-reads /api/settings the instant it sees
+                        # `done`, and ThreadingHTTPServer serves that read on
+                        # another thread. Committing afterwards (in `finally`)
+                        # left a window where the read returned the pre-turn
+                        # history — empty on a first turn — and the client
+                        # replaced its transcript with it and rendered the
+                        # welcome screen over a live conversation.
+                        #
+                        # The frame's own history is the authority: it is what
+                        # the client is about to adopt, so committing anything
+                        # else would leave the two disagreeing. generation_history
+                        # is only a fallback for a malformed terminal payload.
+                        done_history = event.get("history")
+                        if not isinstance(done_history, list):
+                            done_history = generation_history
+                        CLIENT_SESSIONS.commit_generation(
+                            client_id,
+                            generation_session_name,
+                            active_name,
+                            generation_session,
+                            done_history,
+                            generation_start_settings,
+                        )
+                        committed = True
                     data_line = f"data: {json.dumps(event)}\n\n"
                     self.wfile.write(data_line.encode('utf-8'))
                     self.wfile.flush()
@@ -3491,14 +3519,17 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                         generator.close()
                     except Exception:
                         pass
-                CLIENT_SESSIONS.commit_generation(
-                    client_id,
-                    generation_session_name,
-                    active_name,
-                    generation_session,
-                    generation_history,
-                    generation_start_settings,
-                )
+                # Only a stream that never reached `done` still needs this:
+                # cancellation, a dropped client, or a provider failure.
+                if not committed:
+                    CLIENT_SESSIONS.commit_generation(
+                        client_id,
+                        generation_session_name,
+                        active_name,
+                        generation_session,
+                        generation_history,
+                        generation_start_settings,
+                    )
                 self._publish_legacy_view(client_id)
                 ACTIVE_GENERATIONS.finish(lease, terminal_state, terminal_detail)
                 self.close_connection = True

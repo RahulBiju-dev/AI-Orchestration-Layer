@@ -684,6 +684,151 @@ class AdapterTests(unittest.TestCase):
             ))
         self.assertEqual(chunks[0].message.thinking, "Inspect, then edit.")
 
+    # ── Inline <think> reasoning ──────────────────────────────────────────
+    # NIM Nemotron (and DeepSeek-R1 / Qwen3 behind a custom endpoint) put
+    # reasoning in the content stream instead of reasoning_content.
+
+    @staticmethod
+    def _content_deltas(*chunks):
+        lines = [
+            'data: {"choices":[{"delta":{"content":%s}}]}' % json.dumps(chunk)
+            for chunk in chunks
+        ]
+        lines.append('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}')
+        lines.append("data: [DONE]")
+        return FakeResponse(lines=lines)
+
+    def _nvidia_stream(self, response, *, think=True, prompt="hello"):
+        with patch("agent.model_providers.requests.post", return_value=response):
+            return list(chat_with_model(
+                {"model_id": "nvidia:nvidia/nemotron-3-ultra-550b-a55b"},
+                runtime(),
+                ollama_service_factory=MagicMock(),
+                environ={
+                    "NVIDIA_API_KEY": "secret",
+                    "NVIDIA_MODELS": "nvidia/nemotron-3-ultra-550b-a55b",
+                },
+                messages=[{"role": "user", "content": prompt}],
+                think=think,
+                stream=True,
+            ))
+
+    def test_inline_think_tags_are_routed_into_thinking(self):
+        chunks = self._nvidia_stream(self._content_deltas(
+            "<think>Weigh the options.</think>The answer is 42.",
+        ))
+        self.assertEqual(
+            "".join(chunk.message.thinking for chunk in chunks),
+            "Weigh the options.",
+        )
+        self.assertEqual(
+            "".join(chunk.message.content for chunk in chunks),
+            "The answer is 42.",
+        )
+
+    def test_inline_think_tags_split_across_deltas_are_reassembled(self):
+        # The opener, the closer, and the boundary between them all land on
+        # separate SSE frames, which is what a real NIM stream does.
+        chunks = self._nvidia_stream(self._content_deltas(
+            "<thi", "nk>Weigh ", "the options.", "</thi", "nk>The answer ", "is 42.",
+        ))
+        self.assertEqual(
+            "".join(chunk.message.thinking for chunk in chunks),
+            "Weigh the options.",
+        )
+        self.assertEqual(
+            "".join(chunk.message.content for chunk in chunks),
+            "The answer is 42.",
+        )
+
+    def test_a_think_tag_that_does_not_open_the_response_is_left_alone(self):
+        # An answer *about* reasoning tags must survive byte-identical.
+        answer = "To enable reasoning, emit <think>...</think> before the reply."
+        chunks = self._nvidia_stream(self._content_deltas(answer))
+        self.assertEqual("".join(chunk.message.content for chunk in chunks), answer)
+        self.assertEqual("".join(chunk.message.thinking for chunk in chunks), "")
+
+    def test_inline_reasoning_is_discarded_when_thinking_is_off(self):
+        chunks = self._nvidia_stream(
+            self._content_deltas("<think>Weigh the options.</think>The answer is 42."),
+            think=False,
+        )
+        self.assertEqual("".join(chunk.message.thinking for chunk in chunks), "")
+        self.assertEqual(
+            "".join(chunk.message.content for chunk in chunks),
+            "The answer is 42.",
+        )
+
+    def test_unterminated_think_tag_never_leaks_into_content(self):
+        chunks = self._nvidia_stream(self._content_deltas(
+            "<think>Weighing the options and then the stream was cut",
+        ))
+        self.assertEqual("".join(chunk.message.content for chunk in chunks), "")
+        self.assertIn(
+            "Weighing the options",
+            "".join(chunk.message.thinking for chunk in chunks),
+        )
+
+    def test_whitespace_inside_the_closing_tag_still_closes_the_block(self):
+        chunks = self._nvidia_stream(self._content_deltas(
+            "<think>Weigh it.</think >The answer is 42.",
+        ))
+        self.assertEqual(
+            "".join(chunk.message.content for chunk in chunks),
+            "The answer is 42.",
+        )
+
+    def test_inline_reasoning_precedes_the_nemotron_markdown_fence_repair(self):
+        # The fence repair only matches at the start of content, so the tag has
+        # to be stripped first or the truncated fence is never rebuilt.
+        chunks = self._nvidia_stream(
+            self._content_deltas("<think>Plan it.</think>arkdown\n# Title\n"),
+            # _requests_fenced_output only arms the repair when the user asked
+            # for one, so the prompt has to say so.
+            prompt="Give me the notes in a fenced code block",
+        )
+        content = "".join(chunk.message.content for chunk in chunks)
+        self.assertTrue(content.startswith("```markdown"), content)
+        self.assertEqual("".join(chunk.message.thinking for chunk in chunks), "Plan it.")
+
+    def test_non_streaming_inline_think_tags_are_split(self):
+        response = FakeResponse({
+            "choices": [{"message": {
+                "content": "<think>Weigh the options.</think>The answer is 42.",
+            }}],
+        })
+        with patch("agent.model_providers.requests.post", return_value=response):
+            result = chat_with_model(
+                {"model_id": "nvidia:nvidia/nemotron-3-ultra-550b-a55b"},
+                runtime(),
+                ollama_service_factory=MagicMock(),
+                environ={
+                    "NVIDIA_API_KEY": "secret",
+                    "NVIDIA_MODELS": "nvidia/nemotron-3-ultra-550b-a55b",
+                },
+                messages=[{"role": "user", "content": "hello"}],
+                stream=False,
+            )
+        self.assertEqual(result.message.content, "The answer is 42.")
+        self.assertEqual(result.message.thinking, "Weigh the options.")
+
+    def test_inline_reasoning_is_split_on_a_custom_openai_endpoint(self):
+        response = self._content_deltas("<think>Weigh it.</think>Done.")
+        with patch("agent.model_providers.requests.post", return_value=response):
+            chunks = list(chat_with_model(
+                {"model_id": "custom:default"},
+                runtime(),
+                ollama_service_factory=MagicMock(),
+                environ={
+                    "CUSTOM_LLM_BASE_URL": "http://127.0.0.1:8000/v1",
+                    "CUSTOM_LLM_MODEL": "deepseek-r1",
+                },
+                messages=[{"role": "user", "content": "hello"}],
+                stream=True,
+            ))
+        self.assertEqual("".join(chunk.message.thinking for chunk in chunks), "Weigh it.")
+        self.assertEqual("".join(chunk.message.content for chunk in chunks), "Done.")
+
     def test_openrouter_stream_maps_inline_rate_limit_instead_of_empty_stream(self):
         response = FakeResponse(lines=[
             'data: {"error":{"code":429,"message":"Rate limit exceeded",'
@@ -1215,6 +1360,19 @@ class ModelSelectorFrontendTests(unittest.TestCase):
         self.assertIn("if (Array.isArray(data.history))", APP)
         self.assertIn("data.context_compaction?.compacted", APP)
         self.assertIn("historyShrank", APP)
+
+    def test_a_finished_turn_never_blanks_a_visible_transcript(self):
+        # With "Keep history" off the server retains only the system prompt: a
+        # non-empty array that renders to nothing. Adopting it replaced the
+        # conversation with the welcome hero and lost the turn.
+        self.assertIn("const onScreenCount = toDisplayMessages(state.history).length", APP)
+        self.assertIn("toDisplayMessages(incomingHistory).length || !onScreenCount", APP)
+        self.assertIn("if (adoptHistory) state.history = incomingHistory", APP)
+
+    def test_the_streaming_caret_is_gone(self):
+        self.assertNotIn("caret-blink", STYLE)
+        self.assertNotIn(".bubble.streaming", STYLE)
+        self.assertNotIn('"bubble streaming"', APP)
 
     def test_compaction_marker_is_not_rendered_as_an_assistant_reply(self):
         self.assertIn("message.metadata?.compacted", APP)

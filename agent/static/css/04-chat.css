@@ -860,26 +860,6 @@
   animation: thinking-dot-pulse 1.4s var(--ease-in-out) infinite;
 }
 
-/* Streaming caret. Only the caret animates — scheduleStreamRender rebuilds the
-   whole bubble each frame, so any per-token animation would restart every
-   frame and read as a flicker. */
-.bubble.streaming::after {
-  content: "";
-  display: inline-block;
-  width: 2px;
-  height: 1.05em;
-  margin-left: 2px;
-  border-radius: 1px;
-  background: var(--primary);
-  vertical-align: text-bottom;
-  animation: caret-blink 1.05s linear infinite;
-}
-
-@keyframes caret-blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.15; }
-}
-
 /* Meta events in the transcript — status lines and compaction notices — read
    as a centred rule rather than as something the assistant said. */
 .status-line {

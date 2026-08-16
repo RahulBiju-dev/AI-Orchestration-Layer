@@ -611,6 +611,101 @@ def _provider_reasoning_text(message: Mapping[str, Any]) -> str:
     return "\n".join(fragments)
 
 
+# Reasoning models on OpenAI-compatible endpoints (NVIDIA NIM Nemotron,
+# DeepSeek-R1, Qwen3) put their reasoning in the *content* stream wrapped in a
+# tag instead of in a separate reasoning_content field, so _provider_reasoning_text
+# above never sees it and the raw tags render in the answer body.
+#
+# Whitespace-tolerant on both ends: a stray "</think >" must still close the
+# block, because failing to close swallows the entire answer into Thinking —
+# a worse failure than the leak this repairs.
+_INLINE_REASONING_OPEN = re.compile(r"^\s*<\s*(?:think|thinking|reasoning)\s*>", re.IGNORECASE)
+_INLINE_REASONING_CLOSE = re.compile(r"<\s*/\s*(?:think|thinking|reasoning)\s*>", re.IGNORECASE)
+# Longest opener plus room for the whitespace the pattern tolerates. Once the
+# leading text is this long without matching, it never will.
+_INLINE_REASONING_OPEN_MAX = 24
+# A closer held back across a chunk boundary can be at most this long.
+_INLINE_REASONING_CLOSE_MAX = 24
+
+
+class _InlineReasoningSplitter:
+    """Route tag-wrapped reasoning in a content stream to the Thinking channel.
+
+    Only a tag that *opens* the response counts. Once the splitter decides the
+    response is ordinary content it stops scanning for good, so an answer that
+    merely discusses ``<think>`` — in prose or inside a code block — is passed
+    through untouched.
+
+    Handles tags split across streaming deltas (``<thi`` then ``nk>``) by
+    holding back text that could still be part of a tag.
+    """
+
+    __slots__ = ("_state", "_buffer", "_capture")
+
+    def __init__(self, capture: bool = True) -> None:
+        self._state = "pending"
+        self._buffer = ""
+        self._capture = capture
+
+    def feed(self, text: str) -> tuple[str, str]:
+        """Consume a delta. Returns (content, thinking)."""
+        if not text:
+            return "", ""
+        if self._state == "passthrough":
+            return text, ""
+        self._buffer += text
+        return self._drain(final=False)
+
+    def flush(self) -> tuple[str, str]:
+        """Release whatever is still held at end of stream."""
+        if self._state == "passthrough" or not self._buffer:
+            self._buffer = ""
+            return "", ""
+        return self._drain(final=True)
+
+    def _drain(self, *, final: bool) -> tuple[str, str]:
+        content = ""
+        thinking = ""
+        if self._state == "pending":
+            match = _INLINE_REASONING_OPEN.match(self._buffer)
+            if match:
+                self._buffer = self._buffer[match.end():]
+                self._state = "inside"
+            elif final or len(self._buffer.lstrip()) >= _INLINE_REASONING_OPEN_MAX:
+                # Not a reasoning response. Release everything and stop looking.
+                content = self._buffer
+                self._buffer = ""
+                self._state = "passthrough"
+                return content, thinking
+            else:
+                # Too early to tell; hold until more arrives.
+                return "", ""
+
+        if self._state == "inside":
+            match = _INLINE_REASONING_CLOSE.search(self._buffer)
+            if match:
+                thinking = self._buffer[:match.start()]
+                content = self._buffer[match.end():]
+                self._buffer = ""
+                self._state = "passthrough"
+            elif final:
+                # Truncated generation: there is reasoning but no answer.
+                thinking = self._buffer
+                self._buffer = ""
+            else:
+                # Hold back a tail that could be the start of a closing tag.
+                cut = len(self._buffer)
+                marker = self._buffer.rfind("<")
+                if marker != -1 and len(self._buffer) - marker < _INLINE_REASONING_CLOSE_MAX:
+                    cut = marker
+                thinking = self._buffer[:cut]
+                self._buffer = self._buffer[cut:]
+
+        if not self._capture:
+            thinking = ""
+        return content, thinking
+
+
 def _raise_for_provider_payload_error(payload: Mapping[str, Any], provider: str) -> None:
     """Map OpenAI-compatible in-body and HTTP-200 stream errors safely."""
     error = payload.get("error")
@@ -1017,6 +1112,7 @@ def _openai_chunk(
     definition: ModelDefinition,
     *,
     repair_markdown_fence: bool = False,
+    capture_thinking: bool = True,
 ) -> NormalizedChunk:
     _raise_for_provider_payload_error(payload, definition.provider)
     choices = payload.get("choices")
@@ -1043,14 +1139,25 @@ def _openai_chunk(
             name=call_name,
             arguments=_json_arguments(function.get("arguments")),
         )))
+    # Split before the fence repair: an unstripped "<think>" prefix would stop
+    # _repair_nemotron_markdown_prefix from ever matching.
+    splitter = _InlineReasoningSplitter(capture=capture_thinking)
+    body, inline_thinking = splitter.feed(normalize_provider_text(message.get("content")))
+    trailing_body, trailing_thinking = splitter.flush()
+    body += trailing_body
+    inline_thinking += trailing_thinking
+    thinking = "\n".join(filter(None, (
+        _provider_reasoning_text(message),
+        inline_thinking,
+    )))
     result = NormalizedChunk(
         message=NormalizedMessage(
             content=_repair_nemotron_markdown_prefix(
-                normalize_provider_text(message.get("content")),
+                body,
                 definition,
                 requested_fence=repair_markdown_fence,
             ),
-            thinking=_provider_reasoning_text(message),
+            thinking=thinking,
             tool_calls=tool_calls,
             provider_metadata=(
                 {"reasoning_details": deepcopy(message["reasoning_details"])}
@@ -1171,6 +1278,7 @@ def _openai_stream(
     definition: ModelDefinition,
     *,
     repair_markdown_fence: bool = False,
+    capture_thinking: bool = True,
 ) -> Iterator[NormalizedChunk]:
     pending: dict[int, dict[str, str]] = {}
     reasoning_details: list[dict[str, Any]] = []
@@ -1181,6 +1289,7 @@ def _openai_stream(
     saw_output = False
     content_started = False
     initial_content = ""
+    splitter = _InlineReasoningSplitter(capture=capture_thinking)
     for payload in _iter_sse_json(response, definition.provider):
         _raise_for_provider_payload_error(payload, definition.provider)
         usage = payload.get("usage") or {}
@@ -1222,8 +1331,16 @@ def _openai_stream(
             function = raw_call.get("function") or {}
             current["name"] += str(function.get("name") or "")
             current["arguments"] += str(function.get("arguments") or "")
-        content = normalize_provider_text(delta.get("content"))
-        thinking = _provider_reasoning_text(delta)
+        # Pull any tag-wrapped reasoning out of the content stream before the
+        # fence-repair buffer sees it, otherwise initial_content starts with
+        # "<think>" and _repair_nemotron_markdown_prefix never matches.
+        content, inline_thinking = splitter.feed(
+            normalize_provider_text(delta.get("content"))
+        )
+        thinking = "\n".join(filter(None, (
+            _provider_reasoning_text(delta),
+            inline_thinking,
+        )))
         if (
             content
             and repair_markdown_fence
@@ -1249,6 +1366,19 @@ def _openai_stream(
                 content=content,
                 thinking=thinking,
             ))
+    # Release whatever the splitter was holding back: an undecided prefix, or
+    # reasoning from a generation that was cut off before it closed its tag.
+    trailing_content, trailing_thinking = splitter.flush()
+    if trailing_content:
+        if repair_markdown_fence and _is_nvidia_nemotron(definition) and not content_started:
+            initial_content += trailing_content
+        else:
+            content_started = True
+            saw_output = True
+            yield NormalizedChunk(message=NormalizedMessage(content=trailing_content))
+    if trailing_thinking:
+        saw_output = True
+        yield NormalizedChunk(message=NormalizedMessage(thinking=trailing_thinking))
     if initial_content:
         saw_output = True
         yield NormalizedChunk(message=NormalizedMessage(
@@ -1523,6 +1653,9 @@ def _remote_chat(
     streaming = bool(kwargs.get("stream"))
     kwargs["messages"] = _selene_messages(kwargs.get("messages") or [])
     repair_markdown_fence = _requests_fenced_output(kwargs["messages"])
+    # With Show thinking off, inline reasoning tags are still stripped — they
+    # must never reach the answer — but the reasoning itself is dropped.
+    capture_thinking = bool(kwargs.get("think", True))
 
     if definition.id.startswith("gemini:"):
         response = _post(
@@ -1570,6 +1703,7 @@ def _remote_chat(
                 _response_json(response, definition.provider),
                 definition,
                 repair_markdown_fence=repair_markdown_fence,
+                capture_thinking=capture_thinking,
             )
         finally:
             release_response()
@@ -1578,6 +1712,7 @@ def _remote_chat(
             response,
             definition,
             repair_markdown_fence=repair_markdown_fence,
+            capture_thinking=capture_thinking,
         ),
         token,
         cleanup=release_response,
