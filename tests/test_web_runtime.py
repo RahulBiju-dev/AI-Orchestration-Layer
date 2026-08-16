@@ -259,6 +259,98 @@ class TestClientSessionStore(unittest.TestCase):
             self.assertTrue((Path(temporary) / second).is_file())
 
 
+class TestSessionRename(unittest.TestCase):
+    """Renaming a chat from the sidebar's overflow menu."""
+
+    def setUp(self):
+        from agent import web
+
+        self.web = web
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        self.store = ClientSessionStore({"options": {}, "history": True})
+        patches = [
+            patch.object(web, "_SESSIONS_DIR", str(root)),
+            patch.object(web, "_PINS_PATH", str(root / ".pins.json")),
+            patch.object(web, "CLIENT_SESSIONS", self.store),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        self.root = root
+
+    def _make(self, name):
+        (self.root / name).write_text("{}", encoding="utf-8")
+        return name
+
+    def test_rename_keeps_the_creation_stamp_and_uniqueness_suffix(self):
+        # The stamp is what the sidebar's newest-first ordering rests on, so a
+        # retitle must not mint a new identity.
+        name = self._make("Old_Title_20260101_120000_ab12cd34.json")
+        renamed = self.web.rename_session(name, "Deploy pipeline notes")
+
+        self.assertEqual(renamed, "Deploy_pipeline_notes_20260101_120000_ab12cd34.json")
+        self.assertTrue((self.root / renamed).is_file())
+        self.assertFalse((self.root / name).exists())
+
+    def test_rename_survives_titles_that_are_not_filename_safe(self):
+        name = self._make("Old_20260101_120000.json")
+        renamed = self.web.rename_session(name, "  Weekly   sync!! / notes  ")
+
+        self.assertEqual(renamed, "Weekly_sync_notes_20260101_120000.json")
+        # cleanSessionName in the client turns the underscores back into spaces.
+        self.assertIn("Weekly_sync_notes", renamed)
+
+    def test_rename_rejects_titles_that_reduce_to_nothing(self):
+        name = self._make("Old_20260101_120000.json")
+        for title in ("", "   ", "!!!", "///"):
+            with self.assertRaises(ValueError):
+                self.web.rename_session(name, title)
+        self.assertTrue((self.root / name).is_file())
+
+    def test_rename_refuses_the_reserved_temporary_prefix(self):
+        # "session_<stamp>.json" is how an untitled chat looks, and the auto
+        # titler would overwrite the name the user just chose.
+        name = self._make("Old_20260101_120000.json")
+        with self.assertRaises(ValueError):
+            self.web.rename_session(name, "session")
+
+    def test_rename_carries_the_pin_across(self):
+        name = self._make("Old_20260101_120000.json")
+        self.web.set_session_pinned(name, True)
+
+        renamed = self.web.rename_session(name, "Kept pinned")
+
+        self.assertEqual(self.web.load_pinned_sessions(), [renamed])
+
+    def test_rename_repoints_tabs_reading_the_conversation(self):
+        name = self._make("Old_20260101_120000.json")
+        history = [{"role": "user", "content": "hello"}]
+        self.store.select("client-one", name, {"options": {}}, history)
+
+        renamed = self.web.rename_session(name, "Still open")
+
+        view = self.store.snapshot("client-one")
+        self.assertEqual(view.active_session_name, renamed)
+        # Only the identity changed: the open transcript must survive.
+        self.assertEqual(view.history, history)
+
+    def test_rename_resolves_a_colliding_title(self):
+        first = self._make("Alpha_20260101_120000.json")
+        self._make("Taken_20260101_120000.json")
+
+        renamed = self.web.rename_session(first, "Taken")
+
+        self.assertEqual(renamed, "Taken_20260101_120000_2.json")
+        self.assertTrue((self.root / "Taken_20260101_120000.json").is_file())
+
+    def test_renaming_to_the_same_title_is_a_no_op(self):
+        name = self._make("Same_Title_20260101_120000.json")
+        self.assertEqual(self.web.rename_session(name, "Same Title"), name)
+        self.assertTrue((self.root / name).is_file())
+
+
 class TestChatEventTerminalState(unittest.TestCase):
     @staticmethod
     def _run_with_implementation(implementation, *, token=None):

@@ -1369,6 +1369,22 @@ class ModelSelectorFrontendTests(unittest.TestCase):
         self.assertIn("toDisplayMessages(incomingHistory).length || !onScreenCount", APP)
         self.assertIn("if (adoptHistory) state.history = incomingHistory", APP)
 
+    def test_the_row_menu_offers_rename(self):
+        self.assertIn('data-action="rename"', HTML)
+        self.assertIn('item.dataset.action === "rename"', APP)
+        self.assertIn("function startSessionRename(", APP)
+        # window.prompt is a no-op in Electron, so the row has to host the edit.
+        self.assertIn("session-rename-input", APP)
+        self.assertIn(".session-rename-input", STYLE)
+        self.assertIn("/api/rename-session", APP)
+
+    def test_context_meter_prefers_the_providers_own_token_count(self):
+        # prompt + completion is what the next request re-reads, so the reply is
+        # charged at its measured cost instead of a chars/4 guess.
+        self.assertIn("state.contextUsage = {", APP)
+        self.assertIn("measured.total", APP)
+        self.assertIn("estimateHistoryTokens(state.history.slice(measured.historyLength))", APP)
+
     def test_the_streaming_caret_is_gone(self):
         self.assertNotIn("caret-blink", STYLE)
         self.assertNotIn(".bubble.streaming", STYLE)

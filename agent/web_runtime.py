@@ -380,3 +380,19 @@ class ClientSessionStore:
                     self._views[client_id] = SessionView(
                         "Active Session", deepcopy(view.session), []
                     )
+
+    def rename_session(self, session_name: str, new_session_name: str) -> None:
+        """Repoint every tab viewing *session_name* at its new filename.
+
+        Unlike remove_session this keeps each view's session and history: only
+        the identity changed, so a tab reading the conversation must keep
+        reading it rather than being reset to a blank chat.
+        """
+        with self._lock:
+            for client_id, view in list(self._views.items()):
+                if view.active_session_name == session_name:
+                    self._views[client_id] = SessionView(
+                        new_session_name,
+                        deepcopy(view.session),
+                        deepcopy(view.history),
+                    )

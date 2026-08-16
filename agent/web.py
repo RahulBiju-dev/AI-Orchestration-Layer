@@ -652,6 +652,72 @@ def title_temporary_session(
     return target
 
 
+# Every session filename ends in its creation stamp, optionally followed by the
+# uniqueness suffix save_session mints. A user rename replaces only the title in
+# front of it, so the conversation keeps the identity the sidebar sorts on.
+_SESSION_SUFFIX_RE = re.compile(
+    r"_(?P<stamp>\d{8}_\d{6}(?:_\d+)*)(?P<unique>_[0-9a-f]{8})?\.json$",
+    re.IGNORECASE,
+)
+MAX_SESSION_TITLE_LENGTH = 120
+
+
+def _sanitize_session_title(value: str) -> str:
+    """Reduce a user-supplied chat title to a safe filename component.
+
+    Mirrors save_session's allowlist rather than escaping: anything outside
+    [alnum _ -] becomes an underscore, which cleanSessionName in the web client
+    renders back as a space.
+    """
+    collapsed = " ".join(str(value or "").split())
+    safe = "".join(
+        char if char.isalnum() or char in ("_", "-") else "_" for char in collapsed
+    )
+    safe = re.sub(r"_{2,}", "_", safe).strip("_-")
+    safe = safe[:MAX_SESSION_TITLE_LENGTH].strip("_-")
+    if not safe:
+        raise ValueError("Chat name must contain at least one letter or number")
+    if _TEMPORARY_SESSION_RE.fullmatch(f"{safe}_20260101_000000.json"):
+        # "session" would make the file look untitled again and the auto-titler
+        # would overwrite the name the user just chose.
+        raise ValueError("That chat name is reserved")
+    return safe
+
+
+def rename_session(filename: str, title: str) -> str:
+    """Retitle a saved conversation in place, keeping its creation stamp.
+
+    Returns:
+        str: The new filename.
+    """
+    safe_name = os.path.basename(filename or "")
+    match = _SESSION_SUFFIX_RE.search(safe_name)
+    if not match:
+        raise ValueError("Session not found")
+    safe_title = _sanitize_session_title(title)
+    suffix = f"{match.group('stamp')}{match.group('unique') or ''}"
+
+    old_path = os.path.join(_SESSIONS_DIR, safe_name)
+    with _session_lock(safe_name):
+        if not os.path.isfile(old_path):
+            raise ValueError("Session not found")
+        target = f"{safe_title}_{suffix}.json"
+        target_path = os.path.join(_SESSIONS_DIR, target)
+        collision = 2
+        while os.path.exists(target_path) and target_path != old_path:
+            target = f"{safe_title}_{suffix}_{collision}.json"
+            target_path = os.path.join(_SESSIONS_DIR, target)
+            collision += 1
+        if target_path == old_path:
+            return safe_name
+        os.replace(old_path, target_path)
+        with _SESSION_LOCKS_GUARD:
+            _SESSION_RENAMES[safe_name] = target
+        _repin_renamed_session(safe_name, target)
+    CLIENT_SESSIONS.rename_session(safe_name, target)
+    return target
+
+
 def load_session(filename: str, client_id: str = LEGACY_CLIENT_ID) -> None:
     """Load session from a JSON file.
     
@@ -3630,6 +3696,44 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     pins = set_session_pinned(name, pinned)
                 self.send_json_response(200, {"status": "success", "pinned_sessions": pins})
             except (OSError, PersistenceError) as exc:
+                self.send_json_response(500, {"status": "error", "error": str(exc)})
+            return
+
+        if path == '/api/rename-session':
+            name = os.path.basename(str(body.get("name", "")))
+            title = str(body.get("title", ""))
+            try:
+                rename_error = None
+                renamed = name
+                with _SESSION_LIFECYCLE_LOCK:
+                    if not name or name not in list_saved_sessions():
+                        rename_error = (404, "Session not found")
+                    elif not ACTIVE_GENERATIONS.wait_for_session_idle(name, client_id, 1.0):
+                        # The filename is the generation's identity; moving it
+                        # mid-stream would strand the reply.
+                        rename_error = (
+                            409,
+                            "Session still has an active generation; wait for it to finish",
+                        )
+                    else:
+                        try:
+                            renamed = rename_session(name, title)
+                        except ValueError as exc:
+                            rename_error = (400, str(exc))
+                if rename_error is not None:
+                    status, error = rename_error
+                    self.send_json_response(status, {"status": "error", "error": error})
+                    return
+                self._publish_legacy_view(client_id)
+                view = CLIENT_SESSIONS.snapshot(client_id)
+                self.send_json_response(200, {
+                    "status": "success",
+                    "name": renamed,
+                    "saved_sessions": list_saved_sessions(),
+                    "pinned_sessions": load_pinned_sessions(),
+                    "active_session_name": view.active_session_name,
+                })
+            except OSError as exc:
                 self.send_json_response(500, {"status": "error", "error": str(exc)})
             return
 

@@ -147,6 +147,12 @@ const state = {
   savedSessions: [],
   pinnedSessions: [],
   sessionMenuTarget: null,
+  renamingSession: null,
+  renameDraft: "",
+  // Last exact token count the provider reported, and how much history it
+  // covered. Anchors the context meter so replies are counted at their real
+  // cost instead of a chars/4 guess. Cleared whenever the view changes.
+  contextUsage: null,
   activeSessionName: "New conversation",
   modelName: "selene",
   models: [
@@ -246,6 +252,9 @@ function selectConversationView(name) {
   if (String(name || "") !== state.activeSessionName) {
     markCurrentGenerationBackgrounded();
     state.viewVersion += 1;
+    // A token count measured against one conversation says nothing about the
+    // next one.
+    state.contextUsage = null;
   }
   state.activeSessionName = name || "New conversation";
   syncActiveGeneration();
@@ -1139,20 +1148,118 @@ function handleSessionMenuAction(event) {
   closeSessionMenu();
   if (!name) return;
   if (item.dataset.action === "pin") toggleSessionPin(name);
+  else if (item.dataset.action === "rename") startSessionRename(name);
   else if (item.dataset.action === "delete") deleteSession(name);
+}
+
+/* ── Renaming a chat in place ──────────────────────────────────────────
+   window.prompt is a no-op in Electron, so the row itself becomes the
+   editor. The draft lives in state so the field survives the re-renders a
+   background generation triggers while the user is still typing. */
+
+function startSessionRename(name) {
+  state.renamingSession = name;
+  state.renameDraft = cleanSessionName(name);
+  renderSessions();
+  const field = el.sessionList?.querySelector(".session-rename-input");
+  field?.focus();
+  field?.select();
+}
+
+function cancelSessionRename({ rerender = true } = {}) {
+  if (!state.renamingSession) return;
+  state.renamingSession = null;
+  state.renameDraft = "";
+  if (rerender) renderSessions();
+}
+
+function buildSessionRenameField(name) {
+  const field = document.createElement("input");
+  field.type = "text";
+  field.className = "session-rename-input";
+  field.value = state.renameDraft;
+  field.maxLength = 120;
+  field.setAttribute("aria-label", `Rename ${cleanSessionName(name)}`);
+  field.spellcheck = false;
+
+  const settle = (commit) => {
+    if (field.dataset.settled) return;
+    field.dataset.settled = "1";
+    const title = field.value;
+    // Clear the editing state before the request so a slow rename cannot leave
+    // the row stuck in an input the user can no longer escape from.
+    state.renamingSession = null;
+    state.renameDraft = "";
+    if (commit && title.trim() && title.trim() !== cleanSessionName(name)) {
+      renameSession(name, title);
+    } else {
+      renderSessions();
+    }
+  };
+
+  field.addEventListener("input", () => { state.renameDraft = field.value; });
+  field.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter") {
+      event.preventDefault();
+      settle(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      settle(false);
+    }
+  });
+  field.addEventListener("blur", () => settle(true));
+  field.addEventListener("click", (event) => event.stopPropagation());
+  return field;
+}
+
+async function renameSession(name, title) {
+  try {
+    const response = await fetch("/api/rename-session", {
+      method: "POST",
+      headers: apiHeaders(true),
+      body: JSON.stringify({ name, title })
+    });
+    if (!response.ok) throw await apiError(response, `HTTP ${response.status}`);
+    const data = await response.json();
+    const renamed = data.name || name;
+    state.savedSessions = data.saved_sessions || state.savedSessions;
+    state.pinnedSessions = data.pinned_sessions || state.pinnedSessions;
+    if (state.activeSessionName === name) {
+      // Rebind the view and any in-flight generation to the new filename so
+      // the open conversation does not become invisible to itself.
+      state.activeSessionName = renamed;
+      const generation = generationForSession(renamed) || generationForSession(name);
+      if (generation) generation.sessionName = renamed;
+      el.title.textContent = cleanSessionName(renamed);
+      document.title = titleForSession(renamed);
+    }
+    renderSessions();
+    toast("Chat renamed.");
+  } catch (error) {
+    renderSessions();
+    toast(`Could not rename that chat: ${error.message}`);
+  }
 }
 
 function buildSessionRow(name) {
   const generation = generationForSession(name);
   const pinned = isSessionPinned(name);
+  const renaming = state.renamingSession === name;
   const item = document.createElement("div");
   item.className = [
     "session-item",
     name === state.activeSessionName ? "active" : "",
     generation ? "running" : "",
-    pinned ? "pinned" : ""
+    pinned ? "pinned" : "",
+    renaming ? "renaming" : ""
   ].filter(Boolean).join(" ");
   item.dataset.session = name;
+
+  if (renaming) {
+    item.appendChild(buildSessionRenameField(name));
+    return item;
+  }
 
   const button = document.createElement("button");
   button.type = "button";
@@ -1208,6 +1315,12 @@ function renderSessions() {
   // A re-render replaces the button the open menu is anchored to, so the menu
   // has to come down with it.
   closeSessionMenu();
+  // A background refresh can land mid-rename. Retire the outgoing field first
+  // so tearing it down cannot fire a blur that commits a half-typed name; the
+  // draft lives in state, so the replacement picks up exactly where it left off.
+  const editing = el.sessionList.querySelector(".session-rename-input");
+  if (editing) editing.dataset.settled = "1";
+  const hadFocus = editing === document.activeElement;
   el.sessionList.innerHTML = "";
 
   if (!state.savedSessions.length) return;
@@ -1224,6 +1337,16 @@ function renderSessions() {
     el.sessionList.appendChild(divider);
   }
   rest.forEach((name) => el.sessionList.appendChild(buildSessionRow(name)));
+
+  // Hand focus back to the rebuilt rename field, caret at the end rather than
+  // selected, so the keystroke that lands next appends instead of replacing.
+  if (hadFocus && state.renamingSession) {
+    const field = el.sessionList.querySelector(".session-rename-input");
+    if (field) {
+      field.focus();
+      field.setSelectionRange(field.value.length, field.value.length);
+    }
+  }
 }
 
 function renderActiveConversation() {
@@ -2362,6 +2485,16 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
       break;
     case "token_usage":
       if (!visible) break;
+      // prompt + completion is exactly the context this conversation now
+      // occupies: the reply is re-read as prompt on the next turn. Recorded so
+      // later recalculations build on the measurement instead of discarding it.
+      // historyLength is anchored in `done`, because the assistant message is
+      // appended after this event is emitted.
+      state.contextUsage = {
+        total: Number(event.total) || 0,
+        budget: Number(event.budget) || null,
+        historyLength: null
+      };
       updateContextMeter(event.total, event.budget);
       break;
     case "done":
@@ -2396,6 +2529,13 @@ function handleStreamEvent(event, generation, { record = true, forceVisible = fa
         const historyShrank =
           adoptHistory && incomingHistory.length < state.history.length;
         if (adoptHistory) state.history = incomingHistory;
+        // Anchor the measurement to the history it actually covered, now that
+        // the reply has landed. Compaction rewrites history, so a shrink
+        // invalidates the measurement rather than anchoring it.
+        if (state.contextUsage && state.contextUsage.historyLength === null) {
+          if (historyShrank) state.contextUsage = null;
+          else state.contextUsage.historyLength = state.history.length;
+        }
         if (event.settings) state.settings = mergeSettings(event.settings);
         if (event.runtime) {
           state.runtime = event.runtime;
@@ -3669,17 +3809,8 @@ function activeSystemPromptText() {
   return "";
 }
 
-function estimatedContextTokens() {
-  // Count system once (filtered out of history below) so the meter reflects the
-  // same baseline the model always receives, even on an empty new chat.
-  const systemPrompt = activeSystemPromptText();
-  let total = 0;
-  if (systemPrompt) {
-    // Role/message framing overhead mirrors agent.core._estimate_message_tokens.
-    total += estimateTokens(JSON.stringify({ role: "system", content: systemPrompt })) + 4;
-  }
-
-  const historyText = state.history
+function estimateHistoryTokens(messages) {
+  const text = messages
     .filter((message) => message.role !== "system")
     .map((message) => [
       message.role || "",
@@ -3689,12 +3820,38 @@ function estimatedContextTokens() {
       JSON.stringify(message.tool_calls || "")
     ].join("\n"))
     .join("\n");
-  total += estimateTokens(historyText);
+  return estimateTokens(text);
+}
 
+function estimatedContextTokens() {
   const draft = el.input?.value || "";
-  if (draft) total += estimateTokens(draft);
+  const draftTokens = draft ? estimateTokens(draft) : 0;
 
-  return total;
+  // Prefer the provider's own count. It is exact where chars/4 is not, and
+  // prompt + completion is precisely what the next request re-reads — so the
+  // reply is charged at its real cost rather than re-guessed from its text.
+  // Only what arrived after the measurement still needs estimating.
+  const measured = state.contextUsage;
+  if (
+    measured
+    && measured.historyLength !== null
+    && state.history.length >= measured.historyLength
+  ) {
+    return measured.total
+      + estimateHistoryTokens(state.history.slice(measured.historyLength))
+      + draftTokens;
+  }
+
+  // Count system once (filtered out of history below) so the meter reflects the
+  // same baseline the model always receives, even on an empty new chat.
+  const systemPrompt = activeSystemPromptText();
+  let total = 0;
+  if (systemPrompt) {
+    // Role/message framing overhead mirrors agent.core._estimate_message_tokens.
+    total += estimateTokens(JSON.stringify({ role: "system", content: systemPrompt })) + 4;
+  }
+  total += estimateHistoryTokens(state.history);
+  return total + draftTokens;
 }
 
 function estimateTokens(text) {

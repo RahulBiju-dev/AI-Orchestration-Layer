@@ -235,6 +235,32 @@
   text-align: left;
 }
 
+/* The rename field stands in for the whole row, so it spans both grid columns
+   and matches .session-open's metrics — the row must not resize on edit. */
+.session-item.renaming {
+  grid-template-columns: minmax(0, 1fr);
+  padding-right: 0;
+}
+
+.session-rename-input {
+  width: 100%;
+  min-width: 0;
+  padding: 12px 10px 12px 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  outline: 1px solid var(--line-focus);
+  outline-offset: -1px;
+  background: var(--surface-high);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+}
+
+.session-rename-input:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
 .session-pin-mark {
   display: inline-flex;
   flex: 0 0 auto;
