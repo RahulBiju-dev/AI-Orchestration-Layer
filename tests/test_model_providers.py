@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from agent.environment import load_dotenv
+from agent.environment import load_dotenv, refresh_dotenv, reset_dotenv_cache
 from agent.model_providers import (
     ERROR_FALLBACK_MODEL_IDS,
     GEMINI_FREE_CHAT_MODELS,
@@ -80,6 +81,81 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(loaded, path)
         self.assertEqual(environment["OPENROUTER_API_KEY"], "exported-key")
         self.assertEqual(environment["CUSTOM_LLM_BASE_URL"], "http://localhost:8000/v1")
+
+    def test_refresh_reapplies_edited_models_and_withdraws_deleted_entries(self):
+        self.addCleanup(reset_dotenv_cache)
+        # Operators edit provider lists while Selene runs; the loader has to
+        # notice instead of freezing whatever existed at import time.
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".env"
+            path.write_text(
+                "GEMINI_API_KEY=file-key\nGEMINI_MODELS=gemini-3.5-flash\n",
+                encoding="utf-8",
+            )
+            environment = {"SELENE_ENV_FILE": str(path)}
+            with patch.dict(os.environ, environment, clear=True):
+                load_dotenv()
+                self.assertEqual(os.environ["GEMINI_MODELS"], "gemini-3.5-flash")
+
+                path.write_text(
+                    "GEMINI_API_KEY=file-key\n"
+                    "GEMINI_MODELS=gemini-3.5-flash,gemini-3.5-flash-lite\n",
+                    encoding="utf-8",
+                )
+                os.utime(path, (0, 0))
+                self.assertTrue(refresh_dotenv())
+                self.assertEqual(
+                    os.environ["GEMINI_MODELS"],
+                    "gemini-3.5-flash,gemini-3.5-flash-lite",
+                )
+                # An unchanged file is not re-applied.
+                self.assertFalse(refresh_dotenv())
+
+                path.write_text("GEMINI_API_KEY=file-key\n", encoding="utf-8")
+                os.utime(path, (1, 1))
+                self.assertTrue(refresh_dotenv())
+                self.assertNotIn("GEMINI_MODELS", os.environ)
+
+    def test_refresh_never_overwrites_a_real_export(self):
+        self.addCleanup(reset_dotenv_cache)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".env"
+            path.write_text("GEMINI_MODELS=from-file\n", encoding="utf-8")
+            environment = {
+                "SELENE_ENV_FILE": str(path),
+                "GEMINI_MODELS": "from-export",
+            }
+            with patch.dict(os.environ, environment, clear=True):
+                load_dotenv()
+                path.write_text("GEMINI_MODELS=edited-file\n", encoding="utf-8")
+                os.utime(path, (0, 0))
+                refresh_dotenv()
+                self.assertEqual(os.environ["GEMINI_MODELS"], "from-export")
+
+    def test_model_registry_picks_up_env_edits_without_a_restart(self):
+        self.addCleanup(reset_dotenv_cache)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".env"
+            path.write_text(
+                "GEMINI_API_KEY=file-key\nGEMINI_MODELS=gemini-3.5-flash\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"SELENE_ENV_FILE": str(path)}, clear=True):
+                load_dotenv()
+                self.assertEqual(
+                    [model["id"] for model in available_models(runtime())],
+                    ["local:default", "gemini:gemini-3.5-flash"],
+                )
+
+                path.write_text(
+                    "GEMINI_API_KEY=file-key\nGEMINI_MODELS=gemma-4-31b-it\n",
+                    encoding="utf-8",
+                )
+                os.utime(path, (0, 0))
+                self.assertEqual(
+                    [model["id"] for model in available_models(runtime())],
+                    ["local:default", "gemini:gemma-4-31b-it"],
+                )
 
     def test_env_example_lists_every_registered_free_gemini_chat_model(self):
         example = (ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
@@ -271,10 +347,10 @@ class RegistryTests(unittest.TestCase):
             runtime(),
             {
                 "OPENROUTER_API_KEY": "secret",
-                "OPENROUTER_MODELS": "vendor/paid,nvidia/nemotron:free",
+                "OPENROUTER_MODELS": "vendor/one,nvidia/nemotron:free",
             },
         )
-        self.assertEqual(model.id, "openrouter:nvidia/nemotron:free")
+        self.assertEqual(model.id, "openrouter:vendor/one")
 
     def test_gemini_registry_uses_each_models_native_context_maximum(self):
         models = available_models(
@@ -309,17 +385,34 @@ class RegistryTests(unittest.TestCase):
                 },
             )
 
-    def test_non_free_gemini_model_is_not_available(self):
+    def test_gemini_models_outside_the_curated_table_are_still_offered(self):
+        # GEMINI_MODELS is the source of truth for the selector: a model the
+        # operator added must appear without editing GEMINI_FREE_CHAT_MODELS.
+        model_id = "gemini-3.1-pro-preview"
+        self.assertNotIn(model_id, GEMINI_FREE_CHAT_MODELS)
         environment = {
             "GEMINI_API_KEY": "google-secret",
-            "GEMINI_MODELS": "gemini-3.1-pro-preview",
+            "GEMINI_MODELS": model_id,
+        }
+        self.assertEqual(
+            [model["id"] for model in available_models(runtime(), environment)],
+            ["local:default", f"gemini:{model_id}"],
+        )
+        model = resolve_model(f"gemini:{model_id}", runtime(), environment)
+        self.assertEqual(model.model, model_id)
+        # Uncurated models inherit the family context maximum, not the
+        # conservative remote fallback.
+        self.assertEqual(model.context_window, 1_048_576)
+
+    def test_malformed_gemini_model_identifier_is_still_rejected(self):
+        environment = {
+            "GEMINI_API_KEY": "google-secret",
+            "GEMINI_MODELS": "gemini 3 pro",
         }
         self.assertEqual(
             [model["id"] for model in available_models(runtime(), environment)],
             ["local:default"],
         )
-        with self.assertRaises(UnsupportedModelError):
-            resolve_model("gemini:gemini-3.1-pro-preview", runtime(), environment)
 
     def test_missing_key_and_unknown_model_have_safe_errors(self):
         with self.assertRaises(MissingProviderConfiguration) as missing:
@@ -337,17 +430,19 @@ class RegistryTests(unittest.TestCase):
         self.assertNotIn("openai:default", registry)
         self.assertNotIn("anthropic:default", registry)
 
-    def test_openrouter_rejects_non_free_model_configuration(self):
-        with self.assertRaises(UnsupportedModelError) as error:
-            resolve_model(
-                "openrouter:default",
-                runtime(),
-                {
-                    "OPENROUTER_API_KEY": "secret",
-                    "OPENROUTER_MODEL": "vendor/paid-model",
-                },
-            )
-        self.assertIn(":free", str(error.exception))
+    def test_openrouter_offers_any_configured_model_slug(self):
+        # OPENROUTER_MODELS is operator-controlled server configuration, so a
+        # slug without the :free suffix is a deliberate choice, not an error.
+        model = resolve_model(
+            "openrouter:default",
+            runtime(),
+            {
+                "OPENROUTER_API_KEY": "secret",
+                "OPENROUTER_MODEL": "stealth/ox-alpha",
+            },
+        )
+        self.assertEqual(model.id, "openrouter:stealth/ox-alpha")
+        self.assertEqual(model.model, "stealth/ox-alpha")
 
     def test_web_session_validation_persists_a_configured_model(self):
         from agent import web

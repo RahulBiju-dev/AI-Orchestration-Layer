@@ -839,8 +839,36 @@ function updateModelUI() {
   }
 }
 
+async function refreshModels() {
+  // The provider registry is built from the server's .env, which operators
+  // edit while Selene runs. Re-fetch it instead of trusting the snapshot this
+  // page loaded with, so added models appear and removed ones disappear.
+  try {
+    const response = await fetch("/api/models", { headers: apiHeaders() });
+    if (!response.ok) return;
+    const data = await response.json();
+    if (!Array.isArray(data.models) || !data.models.length) return;
+    const unchanged = data.models.length === state.models.length
+      && data.models.every((model, index) => model.id === state.models[index]?.id);
+    if (unchanged) return;
+
+    const hadFocus = el.modelMenu?.contains(document.activeElement);
+    state.models = data.models;
+    // A selection that vanished from .env has already been resolved away on
+    // the server; adopt that choice so the label and the next request agree.
+    if (data.model_id && !data.models.some((model) => model.id === state.settings.model_id)) {
+      state.settings.model_id = data.model_id;
+    }
+    updateModelUI();
+    if (hadFocus) el.modelMenu?.querySelector(".selected, [data-model-id]")?.focus();
+  } catch {
+    // Offline or mid-restart: keep showing the list we already have.
+  }
+}
+
 function openModelMenu(focus = false) {
   if (!el.modelMenu || !el.modelTrigger || state.isGenerating) return;
+  refreshModels();
   el.modelMenu.hidden = false;
   el.modelTrigger.setAttribute("aria-expanded", "true");
   el.modelPicker.classList.add("active");

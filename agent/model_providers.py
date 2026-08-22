@@ -18,7 +18,7 @@ from urllib.parse import quote, urlsplit
 import requests
 
 from agent.cancellation import CancellationToken
-from agent.environment import load_dotenv
+from agent.environment import load_dotenv, refresh_dotenv
 from agent.runtime_config import RuntimeConfig
 from agent.system_prompts import (
     active_system_prompt_for_session,
@@ -39,6 +39,9 @@ ERROR_FALLBACK_MODEL_IDS = (
 )
 DEFAULT_CAPABILITIES = frozenset({"chat", "streaming", "tools", "thinking", "json"})
 REMOTE_CAPABILITIES = frozenset({"chat", "streaming", "tools", "json"})
+# Known-good free chat models, used for context-window and capability
+# defaults and as the shipped .env.example list. This is metadata, not an
+# allowlist: GEMINI_MODELS decides what the selector offers.
 GEMINI_FREE_CHAT_MODELS = (
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
@@ -54,11 +57,29 @@ GEMINI_CONTEXT_WINDOWS = {
     model: 262_144 if model.startswith("gemma-4-") else 1_048_576
     for model in GEMINI_FREE_CHAT_MODELS
 }
+
 DEFAULT_REMOTE_CONTEXT_WINDOW = 131_072
 MAX_REMOTE_CONTEXT_WINDOW = 1_048_576
 NVIDIA_CONTEXT_WINDOWS: dict[str, int] = {
     "nvidia/nemotron-3-ultra-550b-a55b": 262_144,
 }
+
+
+def _gemini_context_window(model: str) -> int:
+    """Context maximum for a configured Gemini model.
+
+    Models outside the curated table inherit the family default rather than
+    the conservative remote fallback, which would silently truncate history.
+    """
+    if model in GEMINI_CONTEXT_WINDOWS:
+        return GEMINI_CONTEXT_WINDOWS[model]
+    if model.startswith("gemma-"):
+        return 262_144
+    if model.startswith("gemini-"):
+        return 1_048_576
+    return DEFAULT_REMOTE_CONTEXT_WINDOW
+
+
 LOCAL_MODEL_DISPLAY_NAME = "Gemma 4 E4B"
 SELENE_IDENTITY = (
     "You are Selene, a precise assistant with calm, subtle warmth. Always identify "
@@ -233,9 +254,7 @@ def _configured_model(
     api_key_env: str | None,
     required_env: Sequence[str] = (),
     capabilities: frozenset[str] = REMOTE_CAPABILITIES,
-    require_free_model: bool = False,
     model_value: str | None = None,
-    allowed_models: frozenset[str] | None = None,
     context_window: int | None = DEFAULT_REMOTE_CONTEXT_WINDOW,
     context_window_env: str | None = None,
 ) -> ModelDefinition:
@@ -265,12 +284,6 @@ def _configured_model(
         pass
     elif not model or len(model) > 255 or any(character.isspace() or ord(character) < 32 for character in model):
         reason = f"Set {model_env} to a valid provider model identifier."
-        unavailable_code = "unsupported_model"
-    elif require_free_model and model != "openrouter/free" and not model.endswith(":free"):
-        reason = f"Set {model_env} to openrouter/free or a model identifier ending in :free."
-        unavailable_code = "unsupported_model"
-    elif allowed_models is not None and model not in allowed_models:
-        reason = f"{model} is not registered as a supported free chat model."
         unavailable_code = "unsupported_model"
     else:
         parsed_endpoint = urlsplit(endpoint)
@@ -315,7 +328,6 @@ def _configured_gemini_models(environ: Mapping[str, str]) -> list[ModelDefinitio
             api_key_env="GEMINI_API_KEY",
             required_env=("GEMINI_API_KEY", "GEMINI_MODELS"),
         )]
-    allowed = frozenset(GEMINI_FREE_CHAT_MODELS)
     return [
         _configured_model(
             environ,
@@ -329,15 +341,12 @@ def _configured_gemini_models(environ: Mapping[str, str]) -> list[ModelDefinitio
             default_endpoint="https://generativelanguage.googleapis.com/v1beta",
             api_key_env="GEMINI_API_KEY",
             required_env=("GEMINI_API_KEY",),
-            allowed_models=allowed,
             capabilities=(
                 DEFAULT_CAPABILITIES
                 if model.startswith(("gemini-2.5-", "gemini-3"))
                 else REMOTE_CAPABILITIES
             ),
-            context_window=GEMINI_CONTEXT_WINDOWS.get(
-                model, DEFAULT_REMOTE_CONTEXT_WINDOW
-            ),
+            context_window=_gemini_context_window(model),
             context_window_env="GEMINI_CONTEXT_WINDOW",
         )
         for model in models
@@ -365,7 +374,6 @@ def _configured_openrouter_models(environ: Mapping[str, str]) -> list[ModelDefin
             default_endpoint="https://openrouter.ai/api/v1/chat/completions",
             api_key_env="OPENROUTER_API_KEY",
             required_env=("OPENROUTER_API_KEY", "OPENROUTER_MODELS"),
-            require_free_model=True,
             context_window_env="OPENROUTER_CONTEXT_WINDOW",
         )]
     return [
@@ -381,7 +389,6 @@ def _configured_openrouter_models(environ: Mapping[str, str]) -> list[ModelDefin
             default_endpoint="https://openrouter.ai/api/v1/chat/completions",
             api_key_env="OPENROUTER_API_KEY",
             required_env=("OPENROUTER_API_KEY",),
-            require_free_model=True,
             context_window_env="OPENROUTER_CONTEXT_WINDOW",
         )
         for model in models
@@ -434,7 +441,14 @@ def build_model_registry(
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, ModelDefinition]:
     """Build model metadata from server-side configuration only."""
-    environment = os.environ if environ is None else environ
+    if environ is None:
+        # Provider lists live in .env, and operators edit them while Selene is
+        # running. Re-read the file when it changed so the model menu reflects
+        # the current configuration without a restart.
+        refresh_dotenv()
+        environment = os.environ
+    else:
+        environment = environ
     local_model = _clean(getattr(runtime, "chat_model", None)) or "selene"
     local = ModelDefinition(
         id=LOCAL_MODEL_ID,

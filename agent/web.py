@@ -3270,6 +3270,29 @@ class AgentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_json_response(200, response_data)
             return
 
+        elif path == '/api/models':
+            # Cheap re-read of the provider registry so the model menu can
+            # pick up .env edits without a page reload. Deliberately does not
+            # probe Ollama or touch session history the way /api/settings does.
+            try:
+                client_id = self._client_id(query=query)
+            except ValueError as exc:
+                self.send_json_response(400, {"status": "error", "error": str(exc)})
+                return
+            view = CLIENT_SESSIONS.snapshot(client_id)
+            runtime = get_runtime_config(view.session)
+            models = available_models(runtime)
+            try:
+                selected_model = resolve_model(view.session.get("model_id"), runtime)
+            except (MissingProviderConfiguration, UnsupportedModelError):
+                selected_model = resolve_model(LOCAL_MODEL_ID, runtime)
+            self.send_json_response(200, {
+                "models": models,
+                "model_id": selected_model.id,
+                "model_name": selected_model.display_name,
+            })
+            return
+
         elif path == '/api/generations':
             try:
                 client_id = self._client_id(query=query)
