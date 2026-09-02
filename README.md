@@ -219,6 +219,7 @@ The default interface — launch with `python main.py` and the agent opens in yo
 - **Model selector** — choose any configured route per conversation immediately beside the Mode control.
 - **Cyberpunk-Obsidian aesthetic** — deep charcoal backgrounds, glassmorphism cards, and neon glowing accents in Cyan, Magenta, Teal, and Amber.
 - **Enhanced 3D Elements** — realistic layered shadows (`--shadow-subtle`, `--shadow-heavy`) and tactile hover/active states that simulate physical lift for cards and message bubbles.
+- **Place-based themes** — 16 atmospheric color themes (including royal **Bengaluru**, ice/ghost-blue **Scandinavia**, Tokyo, Oslo, Kyoto, and more) accessible via the topbar palette button or the `/theme` slash command.
 - **Context window usage indicators** — visual tracking of the model's context capacity in real time.
 - **Live SSE streaming** — tokens and thinking blocks are pushed to the browser in real-time via Server-Sent Events; no polling, no page reloads.
 - **Generation ownership** — each browser tab sends an `X-Selene-Client-ID`. Unsaved chats are isolated per tab; a **saved** session allows only one active generation across tabs. Each run has a generation ID and ends in exactly one terminal SSE state: `completed`, `cancelled`, or `failed`.
@@ -772,6 +773,7 @@ Type `/` in the terminal CLI to open the filtered command menu. Use **Up/Down** 
 | `/show parameters` | View active session parameters and flags |
 | `/show system` | Display the current system prompt |
 | `/show model` | Show the active route, provider, context limit, and local details when available (also `/show info`) |
+| `/theme [place]` | Select TUI/Web color theme (e.g. `bengaluru`, `scandinavia`, `oslo`, `tokyo`) |
 | `/quit` | Exit the agent (also `/exit`, `/q`) |
 
 ### Vault Commands

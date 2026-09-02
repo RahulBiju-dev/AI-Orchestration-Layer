@@ -79,7 +79,7 @@
   --code-bg: color-mix(in srgb, var(--bg) 82%, black);
   /* Recessed surfaces. The composer sits below the page rather than floating
      above it, and its pickers deeper still. Derived from whichever --bg is
-     active, so all 14 places inherit the relationship — same trick as
+     active, so all 16 places inherit the relationship — same trick as
      --code-bg above, and the reason no per-theme block needs to know. */
   --sunken: color-mix(in srgb, var(--bg) 86%, black);
   --sunken-deep: color-mix(in srgb, var(--bg) 72%, black);
@@ -111,7 +111,7 @@
 
   /* ── Elevation ──────────────────────────────────────────────────────
      Shadows are tinted from --bg rather than pure black, so they read as
-     native in all 14 themes instead of as grey haze over a coloured page. */
+     native in all 16 themes instead of as grey haze over a coloured page. */
   --shadow-color: color-mix(in srgb, var(--bg) 40%, black);
   --elev-0: none;
   --elev-1: 0 1px 2px -1px color-mix(in srgb, var(--shadow-color) 55%, transparent);
@@ -446,5 +446,45 @@
   --warning: #e0b060;
   --success: #70d0b0;
   --select-fg: #120c0c;
+}
+
+:root[data-theme="bengaluru"] {
+  --bg: #0e0c16;
+  --surface: #171422;
+  --panel: #201b30;
+  --elevated: #2b2340;
+  --primary: #e5a93c;
+  --line: #2b223c;
+  --line-strong: #3c2f54;
+  --line-focus: #e5a93c;
+  --text: #f6f3ee;
+  --text-soft: #ded6cc;
+  --muted: #8f829c;
+  --faint: #564a66;
+  --accent: #b886ee;
+  --danger: #e05858;
+  --warning: #e8ba46;
+  --success: #4ec480;
+  --select-fg: #0e0c16;
+}
+
+:root[data-theme="scandinavia"] {
+  --bg: #cee4f5;
+  --surface: #ddecfa;
+  --panel: #bedbf0;
+  --elevated: #adcfe8;
+  --primary: #0078be;
+  --line: #a0c8e2;
+  --line-strong: #7eaed0;
+  --line-focus: #0078be;
+  --text: #081a2c;
+  --text-soft: #18344c;
+  --muted: #3d607e;
+  --faint: #628aa8;
+  --accent: #0090e0;
+  --danger: #cc2c3e;
+  --warning: #b06e00;
+  --success: #098e5a;
+  --select-fg: #ffffff;
 }
 

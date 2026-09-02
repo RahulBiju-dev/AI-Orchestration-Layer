@@ -123,9 +123,30 @@ const PLACE_THEMES = [
   { id: "venice", name: "Venice", description: "Lagoon teal & rose", background: "#0c1214", surface: "#141c1e", primary: "#50b0b8", accent: "#e0a0a8" },
   { id: "seoul", name: "Seoul", description: "Electric violet night", background: "#0c0a14", surface: "#14101e", primary: "#a070f0", accent: "#c0a0ff" },
   { id: "santorini", name: "Santorini", description: "Aegean blue & white", background: "#0a1018", surface: "#121a24", primary: "#60b0e8", accent: "#e8f0f8" },
-  { id: "havana", name: "Havana", description: "Tropical coral & mint", background: "#120c0c", surface: "#1a1212", primary: "#e07070", accent: "#70d0b0" }
+  { id: "havana", name: "Havana", description: "Tropical coral & mint", background: "#120c0c", surface: "#1a1212", primary: "#e07070", accent: "#70d0b0" },
+  { id: "bengaluru", name: "Bengaluru", description: "Royal gold, jacaranda & garden night", background: "#0e0c16", surface: "#171422", primary: "#e5a93c", accent: "#b886ee" },
+  { id: "scandinavia", name: "Scandinavia", description: "Ice & ghost blue", background: "#cee4f5", surface: "#ddecfa", primary: "#0078be", accent: "#0090e0" }
 ];
 const PLACE_THEME_IDS = new Set(PLACE_THEMES.map((theme) => theme.id));
+const PLACE_THEME_ALIASES = {
+  bangalore: "bengaluru",
+  "garden-city": "bengaluru",
+  jacaranda: "bengaluru",
+  mysore: "bengaluru",
+  karnataka: "bengaluru",
+  nordic: "scandinavia",
+  glacier: "scandinavia",
+  "ice-blue": "scandinavia",
+  iceberg: "scandinavia",
+  "ghost-blue": "scandinavia",
+  ghost: "scandinavia"
+};
+
+function resolvePlaceThemeId(name) {
+  const normalized = String(name || "").trim().toLowerCase().replace(/_/g, "-").replace(/\s+/g, "-");
+  if (PLACE_THEME_IDS.has(normalized)) return normalized;
+  return PLACE_THEME_ALIASES[normalized] || "";
+}
 
 function storedTheme() {
   try {
@@ -3514,8 +3535,7 @@ function handleThemeDialogKeydown(event) {
 }
 
 function applyTheme(name, { announce = false } = {}) {
-  const normalized = String(name || "").trim().toLowerCase();
-  const theme = PLACE_THEMES.find((entry) => entry.id === normalized);
+  const theme = PLACE_THEMES.find((entry) => entry.id === resolvePlaceThemeId(name));
   if (!theme) return false;
 
   state.theme = theme.id;

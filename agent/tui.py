@@ -1678,7 +1678,6 @@ def build_app_class():
             theme_name = DEFAULT_THEME
             if isinstance(self.session, dict):
                 theme_name = str(self.session.get("tui_theme") or DEFAULT_THEME)
-
             return Panel(
                 brand,
                 border_style=pal["border"],

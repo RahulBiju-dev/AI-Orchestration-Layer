@@ -1141,7 +1141,7 @@ class ThemeCatalogTests(unittest.TestCase):
         )
 
         catalog = theme_catalog()
-        self.assertEqual(len(theme_names()), 14)
+        self.assertEqual(len(theme_names()), 16)
         self.assertEqual(catalog[0][0], "oslo")
         self.assertEqual(DEFAULT_THEME, "oslo")
         self.assertIn("oslo", catalog[0][1].casefold())
@@ -1151,7 +1151,7 @@ class ThemeCatalogTests(unittest.TestCase):
         for place in (
             "oslo", "tokyo", "rome", "amazon", "cairo", "kyoto", "bergen",
             "marrakech", "shanghai", "reykjavik", "venice", "seoul",
-            "santorini", "havana",
+            "santorini", "havana", "bengaluru", "scandinavia",
         ):
             self.assertIn(place, places)
         specs = theme_specs_for_slash()
@@ -1165,6 +1165,11 @@ class ThemeCatalogTests(unittest.TestCase):
         self.assertEqual(normalize_theme_name("tokyo-night"), "tokyo")
         self.assertEqual(normalize_theme_name("nord"), "bergen")
         self.assertEqual(normalize_theme_name("Tokyo"), "tokyo")
+        self.assertEqual(normalize_theme_name("bangalore"), "bengaluru")
+        self.assertEqual(normalize_theme_name("mysore"), "bengaluru")
+        self.assertEqual(normalize_theme_name("iceberg"), "scandinavia")
+        self.assertEqual(normalize_theme_name("glacier"), "scandinavia")
+        self.assertEqual(normalize_theme_name("ghost-blue"), "scandinavia")
         self.assertEqual(textual_theme_name("tokyo"), "Tokyo")
         self.assertEqual(textual_theme_name("oslo"), "Oslo (default)")
 

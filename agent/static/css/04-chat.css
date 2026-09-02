@@ -901,7 +901,7 @@
 }
 
 /* Tinted from --primary rather than a hardcoded amber, so the pulse belongs to
-   whichever of the 14 themes is active. */
+   whichever of the 16 themes is active. */
 @keyframes thinking-dot-pulse {
   0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 50%, transparent); opacity: 1; }
   70% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--primary) 0%, transparent); opacity: 0.75; }
