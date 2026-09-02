@@ -252,3 +252,7 @@ bun.lock
 # Later
 .github/
 AGENTS.md
+.claude/
+
+# Obsidian brain (graphify vault — local map of this repo, not shipped)
+brain/
